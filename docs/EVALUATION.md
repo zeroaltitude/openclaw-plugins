@@ -177,7 +177,42 @@ vestige stats --states     # Cognitive state distribution
 
 ---
 
-## 6. Open Questions
+## 6. Automated Spaced Retrieval Testing (Anisha's Protocol)
+
+A key refinement from Anisha: **generate ground-truth Q&A pairs at conversation time**, stored outside the memory system, then quiz agents at increasing intervals.
+
+### How It Works
+
+1. **At conversation time:** After each substantive exchange, automatically generate a question and its correct answer. Store this in a separate eval database (NOT in Vestige, NOT in memory files — this is ground truth, not agent memory).
+
+2. **Schedule quizzes:** At t+1 day, t+7 days, t+30 days, ask the agent the question in a fresh session.
+
+3. **Score:** Compare the agent's answer against ground truth. Record accuracy, confidence, and whether it cited Vestige.
+
+4. **Compare:** Run the same quiz against:
+   - Agent WITH Vestige
+   - Agent WITHOUT Vestige (or same agent with Vestige disabled)
+
+### What This Measures
+
+- **Decay curves:** How does recall degrade over time? Does FSRS-6 match actual agent behavior?
+- **Vestige vs. baseline:** At each time interval, how much better is Vestige recall vs. file-based memory?
+- **Memory type sensitivity:** Do facts, preferences, and procedures decay at different rates?
+
+### Automation
+
+A cron job or heartbeat task could:
+1. After each conversation, call an LLM to generate 1-3 Q&A pairs from the transcript
+2. Store them in a SQLite eval DB with timestamps
+3. At scheduled intervals, inject quiz questions into a test session
+4. Score responses automatically (exact match + semantic similarity)
+5. Produce weekly reports with decay curves
+
+This directly validates whether the cognitive science model (FSRS-6, calibrated on human flashcard data) is well-calibrated for LLM agent memory.
+
+---
+
+## 7. Open Questions
 
 - How do we measure "knowledge quality" beyond recall accuracy?
 - Should we weight cross-agent knowledge transfer differently for different memory types (facts vs. preferences vs. procedures)?
