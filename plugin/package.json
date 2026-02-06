@@ -1,0 +1,16 @@
+{
+  "name": "@openclaw/plugin-vestige",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for Vestige cognitive memory",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

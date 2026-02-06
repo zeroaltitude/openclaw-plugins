@@ -1,0 +1,9 @@
+apiVersion: v2
+name: vestige
+description: Cognitive memory service for OpenClaw agents (Vestige + FastAPI bridge)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: BigHat Biosciences
+    url: https://github.com/BigHat-Biosciences
