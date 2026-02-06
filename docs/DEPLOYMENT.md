@@ -23,9 +23,16 @@ docker build -t $ECR_REPO:latest -f docker/Dockerfile .
 docker push $ECR_REPO:latest
 ```
 
-## 2. Create Auth Secret
+> **Note**: The Dockerfile verifies a SHA256 checksum of the downloaded Vestige binary.
+> Before production use, update the `VESTIGE_SHA256` build arg in the Dockerfile with the
+> actual checksum from the release.
 
-Option A — Let Helm create it:
+## 2. Authentication Setup
+
+**Authentication is required by default.** The Helm chart will fail to render if
+`auth.token` is empty and `auth.existingSecret` is not provided.
+
+Option A — Let Helm create the secret:
 ```bash
 helm install vestige helm/vestige/ \
   --set auth.token="your-secure-token-here"
@@ -39,6 +46,9 @@ kubectl create secret generic vestige-auth \
 helm install vestige helm/vestige/ \
   --set auth.existingSecret=vestige-auth
 ```
+
+> **⚠️ Never deploy with an empty auth token.** For local development without auth,
+> set `VESTIGE_ALLOW_ANONYMOUS=true` in the environment (not recommended for production).
 
 ## 3. Deploy with Helm
 
@@ -61,6 +71,8 @@ image:
   tag: "v0.1.0"
 
 ingress:
+  # Optional: ACM certificate for ALB HTTPS termination
+  certificateArn: "arn:aws:acm:us-west-2:123456789:certificate/your-cert-id"
   hosts:
     - host: vestige.internal.yourcompany.com
       paths:
@@ -86,21 +98,39 @@ helm install vestige helm/vestige/ \
   --set auth.token="$(openssl rand -base64 32)"
 ```
 
-## 4. Verify Deployment
+## 4. Startup & Probes
+
+The Helm chart configures three probes:
+
+| Probe | Endpoint | Purpose |
+|-------|----------|---------|
+| **Startup** | `GET /health` | Allows up to **5 minutes** (30 × 10s) for initial model download |
+| **Liveness** | `GET /health` | Restarts pod if vestige-mcp process dies |
+| **Readiness** | `GET /readyz` | Removes from service if not ready |
+
+On first boot, Vestige downloads the Nomic Embed Text v1.5 model (~130MB). The startup
+probe prevents Kubernetes from killing the pod during this download. Subsequent restarts
+use the cached model from the PVC.
+
+The `/health` endpoint returns **503** when the MCP process is not alive, so liveness
+probes will correctly detect a dead subprocess.
+
+## 5. Verify Deployment
 
 ```bash
 # Check pods
 kubectl get pods -n openclaw -l app.kubernetes.io/name=vestige
 
-# Check logs
+# Check logs (look for "Vestige tools discovered" to confirm startup)
 kubectl logs -n openclaw -l app.kubernetes.io/name=vestige -f
 
 # Health check (port-forward)
 kubectl port-forward -n openclaw svc/vestige 8000:8000
 curl http://localhost:8000/health
+curl http://localhost:8000/readyz
 ```
 
-## 5. Configure OpenClaw Plugin
+## 6. Configure OpenClaw Plugin
 
 Add to your OpenClaw plugin configuration:
 
@@ -117,12 +147,7 @@ Add to your OpenClaw plugin configuration:
 }
 ```
 
-## 6. First Boot
-
-On first startup, Vestige downloads the Nomic Embed Text v1.5 model (~130MB). This causes:
-- Readiness probe to fail for ~60-90 seconds
-- `startPeriod: 60s` in health check accounts for this
-- Subsequent restarts use the cached model (on the PVC)
+> **Note**: The plugin strips trailing slashes from `serverUrl` automatically.
 
 ## Upgrading
 
@@ -150,6 +175,7 @@ Common causes:
 - vestige-mcp binary not found → check Dockerfile build
 - GLIBC version mismatch → ensure Ubuntu 24.04 base image
 - Model download failure → check internet access from pod
+- Auth token empty → ensure `auth.token` or `auth.existingSecret` is set
 
 ### SQLite lock errors
 
@@ -162,6 +188,12 @@ If OOMKilled, increase memory limit:
 helm upgrade vestige helm/vestige/ \
   --set resources.limits.memory=768Mi
 ```
+
+### Authentication errors (500 at startup)
+
+If you see "Authentication not configured" in logs, either:
+1. Set `VESTIGE_AUTH_TOKEN` to a non-empty value, or
+2. For dev: set `VESTIGE_ALLOW_ANONYMOUS=true`
 
 ### Data recovery
 

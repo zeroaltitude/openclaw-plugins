@@ -20,9 +20,10 @@ Vestige is a Rust MCP server implementing FSRS-6 spaced repetition, dual-strengt
                                         │  POST /codebase          │
                                         │  POST /intention         │
                                         │  GET  /health            │
+                                        │  GET  /readyz            │
                                         └──────────┬───────────────┘
                                                    │
-                                          MCP JSON-RPC (stdio)
+                                          MCP JSON-RPC (stdio/NDJSON)
                                                    │
                                         ┌──────────▼───────────────┐
                                         │  vestige-mcp             │
@@ -67,42 +68,49 @@ openclaw-vestige/
 ## Components
 
 ### Server (`server/`)
-A thin FastAPI application (~200 lines) that:
+A thin FastAPI application that:
 - Spawns `vestige-mcp` as a child process on startup
-- Translates HTTP requests into MCP JSON-RPC tool calls over stdio
-- Provides bearer token authentication
-- Passes agent identity via `X-Agent-Id` header
-- Auto-restarts the subprocess on crash
+- Translates HTTP requests into MCP JSON-RPC tool calls over stdio (NDJSON framing)
+- Discovers available tools via `tools/list` and logs them at startup
+- Provides bearer token authentication (required by default)
+- Passes agent identity via `X-Agent-Id` header (preserved alongside user context)
+- Auto-restarts the subprocess on crash (with lifecycle locking to prevent races)
+- Returns proper 503 status when unhealthy
 
 ### Plugin (`plugin/`)
-An OpenClaw TypeScript plugin that registers five tools:
+An OpenClaw TypeScript plugin (CommonJS) that registers five tools:
 - `vestige_search` — Hybrid keyword + semantic memory search
 - `vestige_ingest` — Direct memory storage
 - `vestige_smart_ingest` — Intelligent ingestion with duplicate detection
 - `vestige_promote` — Strengthen a memory (mark as helpful)
 - `vestige_demote` — Weaken a memory (mark as wrong)
 
+The plugin includes request timeouts (30s) and parses MCP content from responses.
+
 ### Docker (`docker/`)
 Multi-stage Dockerfile:
-1. Downloads pre-built vestige binaries from GitHub releases
+1. Downloads pre-built vestige binaries from GitHub releases (with SHA256 verification)
 2. Ubuntu 24.04 runtime (GLIBC 2.39 required) + Python 3.12 + FastAPI
+3. Runs as UID/GID 1000 matching Helm securityContext
 
 ### Helm Chart (`helm/vestige/`)
 Production k8s deployment with:
 - Single-replica Deployment (SQLite constraint)
-- 5Gi PVC for data persistence
-- Internal ALB ingress
-- Liveness/readiness probes
-- Secret management for auth token
+- 5Gi PVC for data persistence (including embedding model cache)
+- Internal ALB ingress with optional ACM certificate
+- Liveness, readiness, and startup probes (5min startup budget for model download)
+- Secret management for auth token (required — fails if empty)
+- Container-level security hardening (drop ALL caps, no privilege escalation)
 
 ## Configuration
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `VESTIGE_AUTH_TOKEN` | *(none)* | Bearer token for API auth. Unset = open access. |
+| `VESTIGE_AUTH_TOKEN` | *(required)* | Bearer token for API auth. Must be set. |
+| `VESTIGE_ALLOW_ANONYMOUS` | `false` | Set to `true` to allow unauthenticated access (dev only) |
 | `VESTIGE_DATA_DIR` | `/data` | SQLite database directory |
 | `VESTIGE_BINARY` | `vestige-mcp` | Path to vestige-mcp binary |
-| `FASTEMBED_CACHE_PATH` | `~/.cache/vestige/fastembed` | Embedding model cache |
+| `FASTEMBED_CACHE_PATH` | `/data/.cache/vestige/fastembed` | Embedding model cache (should be on PVC) |
 | `LOG_LEVEL` | `info` | Python log level |
 
 ## Documentation
