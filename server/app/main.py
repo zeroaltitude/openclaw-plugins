@@ -11,7 +11,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from .auth import BearerAuthMiddleware
@@ -43,6 +43,12 @@ mcp = MCPClient(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await mcp.start()
+    # Log discovered tool names so operators can verify they match endpoints
+    tool_names = mcp.tool_names
+    if tool_names:
+        logger.info("Vestige MCP tools available: %s", ", ".join(tool_names))
+    else:
+        logger.warning("No tools discovered from Vestige MCP — endpoints may not work")
     yield
     await mcp.stop()
 
@@ -60,11 +66,23 @@ app.add_middleware(BearerAuthMiddleware)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _agent_context(agent_id: str | None) -> dict[str, Any]:
-    """Build optional agent context dict."""
+def _agent_context(agent_id: str | None, existing_context: str | None = None) -> dict[str, Any]:
+    """Build optional agent context dict.
+
+    Instead of overwriting the user's context with agent_id, we include
+    agent_id as a separate field and preserve the original context.
+    """
+    result: dict[str, Any] = {}
+    if existing_context:
+        result["context"] = existing_context
     if agent_id:
-        return {"context": f"agent:{agent_id}"}
-    return {}
+        result["agent_id"] = agent_id
+        # If there's already a context, prepend agent identity
+        if "context" in result:
+            result["context"] = f"agent:{agent_id} | {result['context']}"
+        else:
+            result["context"] = f"agent:{agent_id}"
+    return result
 
 
 async def _tool(name: str, arguments: dict[str, Any]) -> VestigeResponse:
@@ -81,11 +99,23 @@ async def _tool(name: str, arguments: dict[str, Any]) -> VestigeResponse:
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    return HealthResponse(
-        status="healthy" if mcp.alive else "unhealthy",
-        vestige_process=mcp.alive,
+    is_alive = mcp.alive
+    response = HealthResponse(
+        status="healthy" if is_alive else "unhealthy",
+        vestige_process=is_alive,
         uptime_seconds=round(mcp.uptime, 1),
     )
+    if not is_alive:
+        raise HTTPException(status_code=503, detail=response.model_dump())
+    return response
+
+
+@app.get("/readyz")
+async def readyz():
+    """Readiness probe endpoint — returns 200 only when the MCP process is alive."""
+    if not mcp.alive:
+        raise HTTPException(status_code=503, detail="vestige-mcp not ready")
+    return {"ready": True}
 
 
 @app.post("/search", response_model=VestigeResponse)
@@ -114,9 +144,7 @@ async def ingest(
         "node_type": req.node_type,
         "tags": req.tags,
     }
-    if req.context:
-        args["context"] = req.context
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_context(x_agent_id, req.context))
     return await _tool("ingest", args)
 
 
@@ -130,9 +158,7 @@ async def smart_ingest(
         "node_type": req.node_type,
         "tags": req.tags,
     }
-    if req.context:
-        args["context"] = req.context
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_context(x_agent_id, req.context))
     return await _tool("smart_ingest", args)
 
 
@@ -179,9 +205,7 @@ async def codebase(
         "pattern_type": req.pattern_type,
         "tags": req.tags,
     }
-    if req.context:
-        args["context"] = req.context
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_context(x_agent_id, req.context))
     return await _tool("codebase", args)
 
 
