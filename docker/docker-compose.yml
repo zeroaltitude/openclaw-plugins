@@ -10,6 +10,7 @@ services:
     environment:
       - VESTIGE_AUTH_TOKEN=${VESTIGE_AUTH_TOKEN:-dev-token-change-me}
       - VESTIGE_DATA_DIR=/data
+      - FASTEMBED_CACHE_PATH=/data/.cache/vestige/fastembed
       - LOG_LEVEL=debug
     volumes:
       - vestige-data:/data
@@ -18,7 +19,7 @@ services:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 5s
-      start_period: 60s
+      start_period: 120s
       retries: 3
 
 volumes:
