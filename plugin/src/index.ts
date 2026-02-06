@@ -19,31 +19,71 @@ interface PluginApi {
   getAgentId(): string | undefined;
 }
 
-/** POST JSON to the Vestige bridge and return the raw text response. */
+/** Default request timeout in milliseconds (30s). */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** POST JSON to the Vestige bridge and return parsed response data. */
 async function vestigeCall(
   api: PluginApi,
   path: string,
   body: Record<string, unknown>,
 ): Promise<string> {
-  const serverUrl = api.getSetting("serverUrl") ?? "http://vestige.internal:8000";
+  let serverUrl = api.getSetting("serverUrl") ?? "http://vestige.internal:8000";
+  // Strip trailing slash to avoid double-slash in URL
+  serverUrl = serverUrl.replace(/\/+$/, "");
+
   const token = api.getSetting("authToken") ?? "";
   const agentId = api.getAgentId() ?? "unknown";
 
-  const resp = await fetch(`${serverUrl}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      "X-Agent-Id": agentId,
-    },
-    body: JSON.stringify(body),
-  });
+  // Use AbortController for request timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  if (!resp.ok) {
-    const detail = await resp.text().catch(() => resp.statusText);
-    return JSON.stringify({ error: true, status: resp.status, detail });
+  try {
+    const resp = await fetch(`${serverUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        "X-Agent-Id": agentId,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => resp.statusText);
+      return JSON.stringify({ error: true, status: resp.status, detail });
+    }
+
+    // Parse the JSON response and extract meaningful content
+    const json = await resp.json();
+    if (json.success && json.data) {
+      // Extract text from MCP content array if present
+      const content = json.data.content;
+      if (Array.isArray(content)) {
+        const texts = content
+          .filter((c: any) => c.type === "text" && c.text)
+          .map((c: any) => c.text);
+        if (texts.length > 0) {
+          return texts.join("\n");
+        }
+      }
+      // Fallback: stringify the data
+      return JSON.stringify(json.data);
+    }
+    if (json.error) {
+      return JSON.stringify({ error: true, detail: json.error });
+    }
+    return JSON.stringify(json);
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      return JSON.stringify({ error: true, detail: `Request to ${path} timed out after ${REQUEST_TIMEOUT_MS}ms` });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return resp.text();
 }
 
 /** Wrap a string result in the MCP content format OpenClaw expects. */
@@ -52,8 +92,9 @@ function textResult(text: string) {
 }
 
 // ── Plugin entry point ───────────────────────────────────────────────────────
+// Uses module.exports for CJS compatibility (tsconfig targets CommonJS)
 
-export default function (api: PluginApi) {
+module.exports = function (api: PluginApi) {
   // ── vestige_search ─────────────────────────────────────────────────────
   api.registerTool({
     name: "vestige_search",
@@ -130,4 +171,4 @@ export default function (api: PluginApi) {
       return textResult(await vestigeCall(api, "/demote", params));
     },
   });
-}
+};
