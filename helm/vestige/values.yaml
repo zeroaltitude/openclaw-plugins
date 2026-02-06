@@ -16,6 +16,9 @@ service:
 ingress:
   enabled: true
   className: alb
+  # Optional: ARN of the ACM certificate for ALB HTTPS termination
+  # certificateArn: "arn:aws:acm:us-west-2:123456789:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  certificateArn: ""
   annotations:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internal
@@ -48,8 +51,13 @@ env:
   LOG_LEVEL: info
   VESTIGE_DATA_DIR: /data
   VESTIGE_BINARY: vestige-mcp
+  # Embedding model cache — must be on PVC so it persists across restarts
+  FASTEMBED_CACHE_PATH: /data/.cache/vestige/fastembed
 
-# Auth token — override via --set or external secret
+# Auth token — REQUIRED for production deployments.
+# Either set auth.token via --set or provide auth.existingSecret.
+# Leaving both empty will cause the secret template to fail at deploy time.
+# For local dev without auth, set env var VESTIGE_ALLOW_ANONYMOUS=true.
 auth:
   existingSecret: ""   # Use an existing k8s secret name
   secretKey: token     # Key within the secret
@@ -66,12 +74,19 @@ probes:
     failureThreshold: 3
   readiness:
     httpGet:
-      path: /health
+      path: /readyz
       port: http
     initialDelaySeconds: 10
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 3
+  # Startup probe: gives up to 5 minutes for initial model download
+  startup:
+    httpGet:
+      path: /health
+      port: http
+    failureThreshold: 30
+    periodSeconds: 10
 
 nodeSelector: {}
 tolerations: []

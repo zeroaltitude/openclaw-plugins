@@ -27,6 +27,7 @@ Common labels
 {{- define "vestige.labels" -}}
 helm.sh/chart: {{ include "vestige.name" . }}-{{ .Chart.Version }}
 {{ include "vestige.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
