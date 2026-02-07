@@ -15,8 +15,9 @@ interface PluginApi {
     parameters: any;
     execute: (id: string, params: any) => Promise<{ content: Array<{ type: string; text: string }> }>;
   }): void;
-  getSetting(key: string): string | undefined;
-  getAgentId(): string | undefined;
+  pluginConfig: Record<string, unknown> | undefined;
+  config: Record<string, unknown>;
+  logger: { info(...args: any[]): void; warn(...args: any[]): void; error(...args: any[]): void };
 }
 
 /** Default request timeout in milliseconds (30s). */
@@ -28,12 +29,13 @@ async function vestigeCall(
   path: string,
   body: Record<string, unknown>,
 ): Promise<string> {
-  let serverUrl = api.getSetting("serverUrl") ?? "http://vestige.internal:8000";
+  const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
+  let serverUrl = (cfg.serverUrl as string) ?? "http://vestige.internal:8000";
   // Strip trailing slash to avoid double-slash in URL
   serverUrl = serverUrl.replace(/\/+$/, "");
 
-  const token = api.getSetting("authToken") ?? "";
-  const agentId = api.getAgentId() ?? "unknown";
+  const token = (cfg.authToken as string) ?? "";
+  const agentId = "tabitha";
 
   // Use AbortController for request timeout
   const controller = new AbortController();
