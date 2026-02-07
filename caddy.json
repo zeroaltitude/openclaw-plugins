@@ -9,9 +9,4 @@ vestige.yourdomain.com {
         uri strip_prefix /api
         reverse_proxy localhost:8000
     }
-    
-    # Vestige UI (if applicable)
-    handle {
-        reverse_proxy localhost:5173
-    }
 }
