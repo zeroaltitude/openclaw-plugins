@@ -46,6 +46,7 @@ class MCPClient:
         self._connected_at: float = 0.0
         self._tools: list[dict] = []
         self._available_tool_names: list[str] = []
+        self._session_id: str | None = None  # Mcp-Session-Id for stateful mode
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -94,6 +95,7 @@ class MCPClient:
             await self._client.aclose()
             self._client = None
         self._connected = False
+        self._session_id = None
         logger.info("MCP client disconnected")
 
     @property
@@ -195,15 +197,16 @@ class MCPClient:
             raise MCPConnectionError("HTTP client not initialized — call connect() first")
 
         url = self._request_url()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        # Include session ID for stateful Streamable HTTP (required after initialize)
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+
         try:
-            response = await self._client.post(
-                url,
-                json=msg,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-            )
+            response = await self._client.post(url, json=msg, headers=headers)
             response.raise_for_status()
         except httpx.ConnectError as exc:
             self._connected = False
@@ -212,6 +215,13 @@ class MCPClient:
             raise MCPConnectionError(f"Timeout communicating with Vestige at {url}: {exc}") from exc
         except httpx.HTTPStatusError as exc:
             raise MCPError(f"Vestige returned HTTP {exc.response.status_code}: {exc.response.text}") from exc
+
+        # Capture session ID from response (set by supergateway in stateful mode)
+        session_id = response.headers.get("mcp-session-id")
+        if session_id:
+            if self._session_id and self._session_id != session_id:
+                logger.info("MCP session ID changed: %s → %s", self._session_id, session_id)
+            self._session_id = session_id
 
         # Parse response — handle both JSON and SSE formats
         content_type = response.headers.get("content-type", "")
@@ -260,15 +270,19 @@ class MCPClient:
             raise MCPConnectionError("HTTP client not initialized — call connect() first")
 
         url = self._request_url()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+
         try:
-            response = await self._client.post(
-                url,
-                json=msg,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-            )
+            response = await self._client.post(url, json=msg, headers=headers)
+            # Capture session ID if present
+            sid = response.headers.get("mcp-session-id")
+            if sid:
+                self._session_id = sid
             # Notifications may return 200 or 202, both are fine
             if response.status_code >= 400:
                 logger.warning("Notification returned HTTP %d: %s", response.status_code, response.text[:200])
