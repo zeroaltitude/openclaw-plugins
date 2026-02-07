@@ -1,7 +1,7 @@
 {
-  "name": "vestige",
+  "id": "vestige",
+  "name": "Vestige Cognitive Memory",
   "version": "0.1.0",
-  "displayName": "Vestige Cognitive Memory",
   "description": "Shared cognitive memory for OpenClaw agents powered by Vestige — FSRS-6 spaced repetition, dual-strength memory, and prediction error gating.",
   "author": "BigHat Biosciences",
   "main": "dist/index.js",
