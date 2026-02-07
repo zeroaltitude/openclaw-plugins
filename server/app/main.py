@@ -1,7 +1,7 @@
 """FastAPI HTTP bridge for vestige-mcp.
 
-Spawns the vestige-mcp binary as a subprocess and translates incoming HTTP
-requests into MCP JSON-RPC tool calls over stdin/stdout.
+Connects to an external Vestige MCP server (via Streamable HTTP or SSE) and
+translates incoming HTTP requests into MCP JSON-RPC tool calls.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
 
 from .auth import BearerAuthMiddleware
 from .mcp_client import MCPClient, MCPError, MCPToolError
@@ -35,14 +34,28 @@ logger = logging.getLogger("vestige.server")
 # ── MCP client singleton ─────────────────────────────────────────────────────
 
 mcp = MCPClient(
-    binary=os.environ.get("VESTIGE_BINARY", "vestige-mcp"),
-    data_dir=os.environ.get("VESTIGE_DATA_DIR"),
+    url=os.environ.get("VESTIGE_MCP_URL"),
+    transport=os.environ.get("VESTIGE_TRANSPORT"),
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await mcp.start()
+    # Connect to the external Vestige MCP server
+    logger.info(
+        "Connecting to Vestige MCP at %s (transport=%s)",
+        mcp.url,
+        mcp.transport,
+    )
+    try:
+        await mcp.connect()
+    except Exception as exc:
+        logger.error("Failed to connect to Vestige MCP: %s", exc)
+        logger.error(
+            "Ensure Vestige is running and VESTIGE_MCP_URL is set correctly. "
+            "Bridge will retry on first request."
+        )
+
     # Log discovered tool names so operators can verify they match endpoints
     tool_names = mcp.tool_names
     if tool_names:
@@ -50,7 +63,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("No tools discovered from Vestige MCP — endpoints may not work")
     yield
-    await mcp.stop()
+    await mcp.disconnect()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -58,7 +71,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OpenClaw Vestige Bridge",
     description="HTTP bridge to the Vestige cognitive memory MCP server",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 app.add_middleware(BearerAuthMiddleware)
@@ -100,9 +113,12 @@ async def _tool(name: str, arguments: dict[str, Any]) -> VestigeResponse:
 @app.get("/health", response_model=HealthResponse)
 async def health():
     is_alive = mcp.alive
+    # Optionally do a deeper health check
+    if is_alive:
+        is_alive = await mcp.health_check()
     response = HealthResponse(
         status="healthy" if is_alive else "unhealthy",
-        vestige_process=is_alive,
+        vestige_connected=is_alive,
         uptime_seconds=round(mcp.uptime, 1),
     )
     if not is_alive:
@@ -112,7 +128,7 @@ async def health():
 
 @app.get("/readyz")
 async def readyz():
-    """Readiness probe endpoint — returns 200 only when the MCP process is alive."""
+    """Readiness probe endpoint — returns 200 only when connected to Vestige."""
     if not mcp.alive:
         raise HTTPException(status_code=503, detail="vestige-mcp not ready")
     return {"ready": True}

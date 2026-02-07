@@ -87,5 +87,5 @@ class VestigeResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str  # "healthy" | "degraded" | "unhealthy"
-    vestige_process: bool
+    vestige_connected: bool
     uptime_seconds: float

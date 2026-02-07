@@ -23,8 +23,14 @@ Vestige is a Rust MCP server implementing FSRS-6 spaced repetition, dual-strengt
                                         │  GET  /readyz            │
                                         └──────────┬───────────────┘
                                                    │
-                                          MCP JSON-RPC (stdio/NDJSON)
+                                        MCP JSON-RPC (Streamable HTTP)
                                                    │
+                                        ┌──────────▼───────────────┐
+                                        │  supergateway            │
+                                        │  (wraps vestige-mcp)     │
+                                        │  port 3100               │
+                                        └──────────┬───────────────┘
+                                                   │ stdio
                                         ┌──────────▼───────────────┐
                                         │  vestige-mcp             │
                                         │  (Rust binary, unmodified)│
@@ -41,7 +47,7 @@ Vestige is a Rust MCP server implementing FSRS-6 spaced repetition, dual-strengt
 git clone git@github.com:BigHat-Biosciences/openclaw-vestige.git
 cd openclaw-vestige
 
-# 2. Run with Docker Compose
+# 2. Run with Docker Compose (starts Vestige + Bridge as separate services)
 cd docker
 VESTIGE_AUTH_TOKEN=my-secret-token docker compose up --build
 
@@ -54,28 +60,49 @@ curl -X POST http://localhost:8000/search \
   -d '{"query": "coding preferences"}'
 ```
 
+### Direct MCP Access (Claude Code)
+
+With the Docker Compose setup running, you can also connect Claude Code directly to Vestige:
+
+```bash
+claude mcp add vestige --url http://localhost:3100/mcp
+```
+
+This bypasses the bridge (and its auth layer) — useful for local development.
+
 ## Project Structure
 
 ```
 openclaw-vestige/
-├── server/          # FastAPI HTTP bridge → vestige-mcp subprocess
-├── plugin/          # OpenClaw TypeScript plugin (registers agent tools)
-├── docker/          # Dockerfile + docker-compose.yml
-├── helm/vestige/    # Kubernetes Helm chart
-└── docs/            # Architecture & deployment docs
+├── server/              # FastAPI HTTP bridge → connects to Vestige over HTTP
+├── plugin/              # OpenClaw TypeScript plugin (registers agent tools)
+├── docker/
+│   ├── Dockerfile.vestige   # Vestige MCP + supergateway (Streamable HTTP)
+│   ├── Dockerfile.bridge    # FastAPI bridge (Python, no Vestige binary)
+│   ├── Dockerfile           # Legacy single-container (deprecated)
+│   └── docker-compose.yml   # Two-service setup
+├── helm/vestige/        # Kubernetes Helm chart (sidecar pattern)
+└── docs/                # Architecture & deployment docs
 ```
 
 ## Components
 
 ### Server (`server/`)
 A thin FastAPI application that:
-- Spawns `vestige-mcp` as a child process on startup
-- Translates HTTP requests into MCP JSON-RPC tool calls over stdio (NDJSON framing)
+- Connects to an external Vestige MCP server over Streamable HTTP (or SSE)
+- Translates REST endpoints to MCP JSON-RPC tool calls
 - Discovers available tools via `tools/list` and logs them at startup
 - Provides bearer token authentication (required by default)
 - Passes agent identity via `X-Agent-Id` header (preserved alongside user context)
-- Auto-restarts the subprocess on crash (with lifecycle locking to prevent races)
-- Returns proper 503 status when unhealthy
+- Reconnects automatically if the connection is lost
+- Returns proper 503 status when Vestige is unreachable
+
+### Vestige MCP (`docker/Dockerfile.vestige`)
+The Vestige memory engine exposed via HTTP:
+- Runs `vestige-mcp` (unmodified Rust binary) wrapped by `supergateway`
+- Exposes Streamable HTTP on port 3100 at `/mcp`
+- No authentication — the bridge handles auth
+- Manages SQLite database and Nomic Embed model
 
 ### Plugin (`plugin/`)
 An OpenClaw TypeScript plugin (CommonJS) that registers five tools:
@@ -87,18 +114,13 @@ An OpenClaw TypeScript plugin (CommonJS) that registers five tools:
 
 The plugin includes request timeouts (30s) and parses MCP content from responses.
 
-### Docker (`docker/`)
-Multi-stage Dockerfile:
-1. Downloads pre-built vestige binaries from GitHub releases (with SHA256 verification)
-2. Ubuntu 24.04 runtime (GLIBC 2.39 required) + Python 3.12 + FastAPI
-3. Runs as UID/GID 1000 matching Helm securityContext
-
 ### Helm Chart (`helm/vestige/`)
-Production k8s deployment with:
-- Single-replica Deployment (SQLite constraint)
-- 5Gi PVC for data persistence (including embedding model cache)
+Production k8s deployment with sidecar pattern:
+- **vestige-mcp container**: supergateway + vestige-mcp, port 3100 (localhost only)
+- **bridge container**: FastAPI, port 8000 (exposed via Service/Ingress)
+- Shared PVC for data persistence (including embedding model cache)
 - Internal ALB ingress with optional ACM certificate
-- Liveness, readiness, and startup probes (5min startup budget for model download)
+- Separate liveness, readiness, and startup probes for each container
 - Secret management for auth token (required — fails if empty)
 - Container-level security hardening (drop ALL caps, no privilege escalation)
 
@@ -108,10 +130,12 @@ Production k8s deployment with:
 |---------------------|---------|-------------|
 | `VESTIGE_AUTH_TOKEN` | *(required)* | Bearer token for API auth. Must be set. |
 | `VESTIGE_ALLOW_ANONYMOUS` | `false` | Set to `true` to allow unauthenticated access (dev only) |
-| `VESTIGE_DATA_DIR` | `/data` | SQLite database directory |
-| `VESTIGE_BINARY` | `vestige-mcp` | Path to vestige-mcp binary |
-| `FASTEMBED_CACHE_PATH` | `/data/.cache/vestige/fastembed` | Embedding model cache (should be on PVC) |
-| `LOG_LEVEL` | `info` | Python log level |
+| `VESTIGE_MCP_URL` | `http://localhost:3100/mcp` | URL of the Vestige MCP endpoint |
+| `VESTIGE_TRANSPORT` | `streamable_http` | Transport mode: `streamable_http` or `sse` |
+| `VESTIGE_REQUEST_TIMEOUT` | `30` | Timeout in seconds for MCP requests |
+| `VESTIGE_DATA_DIR` | `/data` | SQLite database directory (Vestige container) |
+| `FASTEMBED_CACHE_PATH` | `/data/.cache/vestige/fastembed` | Embedding model cache (Vestige container) |
+| `LOG_LEVEL` | `info` | Python log level (bridge container) |
 
 ## Documentation
 

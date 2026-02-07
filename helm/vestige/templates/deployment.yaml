@@ -26,9 +26,53 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       containers:
-        - name: vestige
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+        # ── Vestige MCP sidecar ─────────────────────────────────────────
+        # Runs supergateway wrapping vestige-mcp, exposes Streamable HTTP
+        # on port 3100 (localhost only, not exposed via Service).
+        - name: vestige-mcp
+          image: "{{ .Values.vestigeImage.repository }}:{{ .Values.vestigeImage.tag }}"
+          imagePullPolicy: {{ .Values.vestigeImage.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: mcp
+              containerPort: 3100
+              protocol: TCP
+          env:
+            - name: VESTIGE_DATA_DIR
+              value: {{ .Values.persistence.mountPath | quote }}
+            - name: FASTEMBED_CACHE_PATH
+              value: "{{ .Values.persistence.mountPath }}/.cache/vestige/fastembed"
+          {{- with .Values.probes.vestige.startup }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.probes.vestige.liveness }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.probes.vestige.readiness }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.vestigeResources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+
+        # ── FastAPI Bridge ──────────────────────────────────────────────
+        # HTTP bridge with auth, agent identity, and REST endpoints.
+        # Connects to vestige-mcp sidecar on localhost:3100.
+        - name: bridge
+          image: "{{ .Values.bridgeImage.repository }}:{{ .Values.bridgeImage.tag }}"
+          imagePullPolicy: {{ .Values.bridgeImage.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
@@ -40,6 +84,10 @@ spec:
               containerPort: 8000
               protocol: TCP
           env:
+            - name: VESTIGE_MCP_URL
+              value: "http://localhost:3100/mcp"
+            - name: VESTIGE_TRANSPORT
+              value: "streamable_http"
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
@@ -53,25 +101,20 @@ spec:
                   name: {{ include "vestige.fullname" . }}-auth
                   {{- end }}
                   key: {{ .Values.auth.secretKey }}
-          {{- with .Values.probes.startup }}
+          {{- with .Values.probes.bridge.startup }}
           startupProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.probes.liveness }}
+          {{- with .Values.probes.bridge.liveness }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.probes.readiness }}
+          {{- with .Values.probes.bridge.readiness }}
           readinessProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          volumeMounts:
-            {{- if .Values.persistence.enabled }}
-            - name: data
-              mountPath: {{ .Values.persistence.mountPath }}
-            {{- end }}
+            {{- toYaml .Values.bridgeResources | nindent 12 }}
       volumes:
         {{- if .Values.persistence.enabled }}
         - name: data

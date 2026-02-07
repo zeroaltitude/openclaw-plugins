@@ -1,25 +1,54 @@
 version: "3.9"
 
 services:
+  # ── Vestige MCP Server ──────────────────────────────────────────────────
+  # Runs vestige-mcp wrapped by supergateway, exposing Streamable HTTP on
+  # port 3100. No authentication — the bridge handles auth.
   vestige:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.vestige
+    ports:
+      - "3100:3100"
+    environment:
+      - VESTIGE_DATA_DIR=/data
+      - FASTEMBED_CACHE_PATH=/data/.cache/vestige/fastembed
+    volumes:
+      - vestige-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3100/mcp",
+             "-X", "POST",
+             "-H", "Content-Type: application/json",
+             "-d", '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}']
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+
+  # ── FastAPI Bridge ──────────────────────────────────────────────────────
+  # HTTP bridge that adds authentication, agent identity, and REST endpoints.
+  # Connects to Vestige MCP over Streamable HTTP.
+  bridge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bridge
     ports:
       - "8000:8000"
     environment:
       - VESTIGE_AUTH_TOKEN=${VESTIGE_AUTH_TOKEN:-dev-token-change-me}
-      - VESTIGE_DATA_DIR=/data
-      - FASTEMBED_CACHE_PATH=/data/.cache/vestige/fastembed
+      - VESTIGE_MCP_URL=http://vestige:3100/mcp
+      - VESTIGE_TRANSPORT=streamable_http
       - LOG_LEVEL=debug
-    volumes:
-      - vestige-data:/data
+    depends_on:
+      vestige:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 5s
-      start_period: 120s
+      start_period: 30s
       retries: 3
 
 volumes:

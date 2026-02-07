@@ -1,82 +1,77 @@
-"""MCP JSON-RPC 2.0 client communicating with vestige-mcp over stdio.
+"""MCP JSON-RPC 2.0 client communicating with an external Vestige MCP server.
 
-Transport framing: This client uses NDJSON (newline-delimited JSON) for the
-stdio transport. Each JSON-RPC message is a single line terminated by ``\\n``.
-This matches the Vestige MCP server implementation which is built on the
-``rmcp`` Rust crate — rmcp uses NDJSON framing for stdio (not LSP-style
-``Content-Length`` headers). This is the most common framing for MCP stdio
-transports.
+Transport: Connects to a standalone Vestige instance exposed via Streamable HTTP
+(supergateway) or SSE. No subprocess management — the Vestige process runs
+independently and the bridge connects as a client.
+
+Supported transports:
+  - streamable_http (default): POST JSON-RPC to /mcp endpoint
+  - sse: GET /sse for server-sent events, POST /message for requests
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any
 
+import httpx
+
 logger = logging.getLogger("vestige.mcp")
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+VESTIGE_MCP_URL = os.environ.get("VESTIGE_MCP_URL", "http://localhost:3100/mcp")
+VESTIGE_TRANSPORT = os.environ.get("VESTIGE_TRANSPORT", "streamable_http")
+REQUEST_TIMEOUT = float(os.environ.get("VESTIGE_REQUEST_TIMEOUT", "30"))
 
 
 class MCPClient:
-    """Manages a vestige-mcp subprocess and speaks MCP JSON-RPC over its stdio."""
+    """Connects to an external Vestige MCP server over HTTP (Streamable HTTP or SSE)."""
 
-    def __init__(self, binary: str = "vestige-mcp", data_dir: str | None = None):
-        self.binary = binary
-        self.data_dir = data_dir
-        self._proc: asyncio.subprocess.Process | None = None
+    def __init__(
+        self,
+        url: str | None = None,
+        transport: str | None = None,
+        timeout: float | None = None,
+    ):
+        self.url = url or VESTIGE_MCP_URL
+        self.transport = transport or VESTIGE_TRANSPORT
+        self.timeout = timeout or REQUEST_TIMEOUT
         self._req_id = 0
-        self._lock = asyncio.Lock()
-        self._lifecycle_lock = asyncio.Lock()
-        self._started_at: float = 0.0
+        self._client: httpx.AsyncClient | None = None
+        self._connected = False
+        self._connected_at: float = 0.0
         self._tools: list[dict] = []
         self._available_tool_names: list[str] = []
-        self._stderr_task: asyncio.Task | None = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
-    async def start(self) -> None:
-        """Spawn vestige-mcp and perform MCP initialize handshake."""
-        async with self._lifecycle_lock:
-            # Don't spawn a duplicate if already alive
-            if self.alive:
-                logger.debug("start() called but process already alive, skipping")
-                return
+    async def connect(self) -> None:
+        """Initialize the HTTP client and perform MCP handshake with Vestige."""
+        self._client = httpx.AsyncClient(timeout=self.timeout)
 
-            cmd = [self.binary]
-            if self.data_dir:
-                cmd += ["--data-dir", self.data_dir]
+        # MCP initialize handshake
+        resp = await self._send(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "openclaw-vestige-bridge", "version": "0.2.0"},
+            },
+        )
+        self._tools = resp.get("capabilities", {}).get("tools", [])
 
-            self._proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            self._started_at = time.monotonic()
-            logger.info("vestige-mcp started (pid=%s)", self._proc.pid)
+        # Send initialized notification (no id → notification)
+        await self._send_notification("notifications/initialized", {})
+        self._connected = True
+        self._connected_at = time.monotonic()
+        logger.info("MCP initialized via %s – capabilities report %d tools", self.transport, len(self._tools))
 
-            # Drain stderr in the background to prevent pipe buffer deadlock
-            self._stderr_task = asyncio.create_task(self._drain_stderr())
-
-            # MCP initialize handshake
-            resp = await self._send(
-                "initialize",
-                {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "openclaw-vestige-bridge", "version": "0.1.0"},
-                },
-            )
-            self._tools = resp.get("capabilities", {}).get("tools", [])
-
-            # Send initialized notification (no id → notification)
-            await self._send_notification("notifications/initialized", {})
-            logger.info("MCP initialized – capabilities report %d tools", len(self._tools))
-
-            # Discover actual tool names via tools/list
-            await self._discover_tools()
+        # Discover actual tool names via tools/list
+        await self._discover_tools()
 
     async def _discover_tools(self) -> None:
         """Call tools/list to discover the actual tool names from Vestige."""
@@ -93,95 +88,54 @@ class MCPClient:
             logger.warning("Failed to list tools (non-fatal): %s", exc)
             self._available_tool_names = []
 
-    async def _drain_stderr(self) -> None:
-        """Continuously read stderr to prevent pipe buffer deadlock."""
-        while self._proc and self._proc.stderr:
-            try:
-                line = await self._proc.stderr.readline()
-                if not line:
-                    break
-                logger.debug("vestige-mcp stderr: %s", line.decode().rstrip())
-            except Exception:
-                break
-
-    async def stop(self) -> None:
-        if self._proc and self._proc.returncode is None:
-            self._proc.terminate()
-            try:
-                await asyncio.wait_for(self._proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self._proc.kill()
-            logger.info("vestige-mcp stopped")
-        # Cancel stderr drainer
-        if self._stderr_task and not self._stderr_task.done():
-            self._stderr_task.cancel()
-            self._stderr_task = None
-        self._proc = None
+    async def disconnect(self) -> None:
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+        self._connected = False
+        logger.info("MCP client disconnected")
 
     @property
     def alive(self) -> bool:
-        return self._proc is not None and self._proc.returncode is None
+        """Check if we have an active connection to Vestige."""
+        return self._connected and self._client is not None
 
     @property
     def uptime(self) -> float:
-        return time.monotonic() - self._started_at if self._started_at else 0.0
+        return time.monotonic() - self._connected_at if self._connected_at else 0.0
 
     @property
     def tool_names(self) -> list[str]:
         """Return the list of tool names discovered from Vestige."""
         return list(self._available_tool_names)
 
-    async def ensure_alive(self) -> None:
-        """Restart the subprocess if it has died (serialized with lifecycle lock)."""
-        async with self._lifecycle_lock:
-            if not self.alive:
-                logger.warning("vestige-mcp not alive – restarting")
-                # Release lifecycle lock internally — start() re-acquires it,
-                # but since we hold it here we call _start_unlocked instead.
-                await self._start_unlocked()
+    async def health_check(self) -> bool:
+        """Check if the Vestige MCP endpoint is reachable.
 
-    async def _start_unlocked(self) -> None:
-        """Internal start without acquiring _lifecycle_lock (caller must hold it)."""
-        if self.alive:
-            return
+        Sends a lightweight JSON-RPC ping (tools/list) to verify connectivity.
+        Returns True if reachable, False otherwise.
+        """
+        try:
+            if not self._client:
+                self._client = httpx.AsyncClient(timeout=self.timeout)
+            await self._send("tools/list", {})
+            return True
+        except Exception as exc:
+            logger.warning("Vestige health check failed: %s", exc)
+            return False
 
-        cmd = [self.binary]
-        if self.data_dir:
-            cmd += ["--data-dir", self.data_dir]
-
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        self._started_at = time.monotonic()
-        logger.info("vestige-mcp started (pid=%s)", self._proc.pid)
-
-        # Drain stderr in the background to prevent pipe buffer deadlock
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
-
-        # MCP initialize handshake
-        resp = await self._send(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "openclaw-vestige-bridge", "version": "0.1.0"},
-            },
-        )
-        self._tools = resp.get("capabilities", {}).get("tools", [])
-
-        await self._send_notification("notifications/initialized", {})
-        logger.info("MCP initialized – capabilities report %d tools", len(self._tools))
-
-        await self._discover_tools()
+    async def ensure_connected(self) -> None:
+        """Reconnect if the connection has been lost."""
+        if not self.alive:
+            logger.warning("Vestige connection lost – reconnecting")
+            await self.connect()
 
     # ── tool invocation ───────────────────────────────────────────────────
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Call an MCP tool and return the parsed result content."""
-        await self.ensure_alive()
+        await self.ensure_connected()
         resp = await self._send("tools/call", {"name": name, "arguments": arguments})
         # MCP tools/call returns { content: [...] } or { isError: true, content: [...] }
         if resp.get("isError"):
@@ -191,62 +145,105 @@ class MCPClient:
         content = resp.get("content", [])
         return {"content": content}
 
-    # ── low-level JSON-RPC ────────────────────────────────────────────────
+    # ── low-level JSON-RPC over HTTP ──────────────────────────────────────
 
     async def _send(self, method: str, params: dict) -> dict:
-        async with self._lock:
-            self._req_id += 1
-            msg = {
-                "jsonrpc": "2.0",
-                "id": self._req_id,
-                "method": method,
-                "params": params,
-            }
-            return await self._roundtrip(msg)
+        """Send a JSON-RPC request and return the result."""
+        self._req_id += 1
+        msg = {
+            "jsonrpc": "2.0",
+            "id": self._req_id,
+            "method": method,
+            "params": params,
+        }
+        return await self._post_jsonrpc(msg)
 
     async def _send_notification(self, method: str, params: dict) -> None:
-        async with self._lock:
-            msg = {"jsonrpc": "2.0", "method": method, "params": params}
-            await self._write(msg)
+        """Send a JSON-RPC notification (no id, no response expected)."""
+        msg = {"jsonrpc": "2.0", "method": method, "params": params}
+        await self._post_jsonrpc_notification(msg)
 
-    async def _roundtrip(self, msg: dict) -> dict:
-        await self._write(msg)
-        return await self._read_response(msg["id"])
+    async def _post_jsonrpc(self, msg: dict) -> dict:
+        """POST a JSON-RPC message and parse the response."""
+        if not self._client:
+            raise MCPConnectionError("HTTP client not initialized — call connect() first")
 
-    async def _write(self, msg: dict) -> None:
-        if not self._proc or not self._proc.stdin:
-            raise MCPConnectionError("vestige-mcp process not available (stdin closed)")
-        line = json.dumps(msg) + "\n"
-        self._proc.stdin.write(line.encode())
-        await self._proc.stdin.drain()
+        url = self._request_url()
+        try:
+            response = await self._client.post(
+                url,
+                json=msg,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+            response.raise_for_status()
+        except httpx.ConnectError as exc:
+            self._connected = False
+            raise MCPConnectionError(f"Cannot reach Vestige at {url}: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            raise MCPConnectionError(f"Timeout communicating with Vestige at {url}: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise MCPError(f"Vestige returned HTTP {exc.response.status_code}: {exc.response.text}") from exc
 
-    async def _read_response(self, expected_id: int) -> dict:
-        if not self._proc or not self._proc.stdout:
-            raise MCPConnectionError("vestige-mcp process not available (stdout closed)")
-        while True:
-            raw = await asyncio.wait_for(self._proc.stdout.readline(), timeout=30)
-            if not raw:
-                raise MCPConnectionError("vestige-mcp closed stdout unexpectedly")
-            line = raw.decode().strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                logger.debug("non-JSON from vestige-mcp: %s", line)
-                continue
+        # Parse JSON-RPC response
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise MCPError(f"Invalid JSON from Vestige: {response.text[:200]}") from exc
 
-            # Skip notifications (no id)
-            if "id" not in data:
-                continue
-            if data["id"] != expected_id:
-                logger.warning("unexpected id %s (expected %s)", data["id"], expected_id)
-                continue
+        # Handle JSON-RPC batch or single response
+        # Streamable HTTP may return an array; pick the response matching our id
+        if isinstance(data, list):
+            for item in data:
+                if item.get("id") == msg.get("id"):
+                    data = item
+                    break
+            else:
+                # No matching id — use the first result-bearing item
+                for item in data:
+                    if "result" in item:
+                        data = item
+                        break
+                else:
+                    raise MCPError(f"No matching response in batch: {data}")
 
-            if "error" in data:
-                err = data["error"]
-                raise MCPError(f"MCP error {err.get('code')}: {err.get('message')}")
-            return data.get("result", {})
+        if "error" in data:
+            err = data["error"]
+            raise MCPError(f"MCP error {err.get('code')}: {err.get('message')}")
+
+        return data.get("result", {})
+
+    async def _post_jsonrpc_notification(self, msg: dict) -> None:
+        """POST a JSON-RPC notification (fire-and-forget)."""
+        if not self._client:
+            raise MCPConnectionError("HTTP client not initialized — call connect() first")
+
+        url = self._request_url()
+        try:
+            response = await self._client.post(
+                url,
+                json=msg,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+            # Notifications may return 200 or 202, both are fine
+            if response.status_code >= 400:
+                logger.warning("Notification returned HTTP %d: %s", response.status_code, response.text[:200])
+        except httpx.ConnectError as exc:
+            self._connected = False
+            raise MCPConnectionError(f"Cannot reach Vestige at {url}: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            raise MCPConnectionError(f"Timeout sending notification to Vestige: {exc}") from exc
+
+    def _request_url(self) -> str:
+        """Return the URL for sending JSON-RPC requests based on transport mode."""
+        if self.transport == "sse":
+            # SSE mode: requests go to /message, events come from /sse
+            # Replace /sse suffix with /message if present, else append /message
+            base = self.url.rstrip("/")
+            if base.endswith("/sse"):
+                return base[:-4] + "/message"
+            return base + "/message"
+        # streamable_http (default): POST directly to the URL
+        return self.url
 
 
 class MCPError(Exception):

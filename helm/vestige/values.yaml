@@ -2,8 +2,22 @@
 
 replicaCount: 1
 
+# ── Container images ──────────────────────────────────────────────────────────
+# Two separate images: vestige-mcp (Rust + supergateway) and bridge (Python).
+
+vestigeImage:
+  repository: ""  # e.g. 123456789.dkr.ecr.us-west-2.amazonaws.com/vestige-mcp
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+bridgeImage:
+  repository: ""  # e.g. 123456789.dkr.ecr.us-west-2.amazonaws.com/vestige-bridge
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Legacy single-image config (ignored by new deployment template)
 image:
-  repository: ""  # e.g. 123456789.dkr.ecr.us-west-2.amazonaws.com/vestige
+  repository: ""
   tag: "latest"
   pullPolicy: IfNotPresent
 
@@ -17,7 +31,6 @@ ingress:
   enabled: true
   className: alb
   # Optional: ARN of the ACM certificate for ALB HTTPS termination
-  # certificateArn: "arn:aws:acm:us-west-2:123456789:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
   certificateArn: ""
   annotations:
     kubernetes.io/ingress.class: alb
@@ -31,6 +44,26 @@ ingress:
         - path: /
           pathType: Prefix
 
+# ── Resources ─────────────────────────────────────────────────────────────────
+# Separate resource blocks for each container in the pod.
+
+vestigeResources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+bridgeResources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+# Legacy single-container resources (ignored by new deployment template)
 resources:
   requests:
     cpu: 250m
@@ -49,10 +82,6 @@ persistence:
 
 env:
   LOG_LEVEL: info
-  VESTIGE_DATA_DIR: /data
-  VESTIGE_BINARY: vestige-mcp
-  # Embedding model cache — must be on PVC so it persists across restarts
-  FASTEMBED_CACHE_PATH: /data/.cache/vestige/fastembed
 
 # Auth token — REQUIRED for production deployments.
 # Either set auth.token via --set or provide auth.existingSecret.
@@ -63,30 +92,81 @@ auth:
   secretKey: token     # Key within the secret
   token: ""            # Inline token (not recommended for prod)
 
+# ── Probes ────────────────────────────────────────────────────────────────────
+# Separate probe blocks for each container.
+
 probes:
-  liveness:
-    httpGet:
-      path: /health
-      port: http
-    initialDelaySeconds: 30
-    periodSeconds: 30
-    timeoutSeconds: 5
-    failureThreshold: 3
-  readiness:
-    httpGet:
-      path: /readyz
-      port: http
-    initialDelaySeconds: 10
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3
-  # Startup probe: gives up to 5 minutes for initial model download
-  startup:
-    httpGet:
-      path: /health
-      port: http
-    failureThreshold: 30
-    periodSeconds: 10
+  vestige:
+    # Startup probe: gives up to 5 minutes for initial model download
+    startup:
+      exec:
+        command:
+          - curl
+          - -sf
+          - http://localhost:3100/mcp
+          - -X
+          - POST
+          - -H
+          - "Content-Type: application/json"
+          - -d
+          - '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}'
+      failureThreshold: 30
+      periodSeconds: 10
+    liveness:
+      exec:
+        command:
+          - curl
+          - -sf
+          - http://localhost:3100/mcp
+          - -X
+          - POST
+          - -H
+          - "Content-Type: application/json"
+          - -d
+          - '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}'
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      exec:
+        command:
+          - curl
+          - -sf
+          - http://localhost:3100/mcp
+          - -X
+          - POST
+          - -H
+          - "Content-Type: application/json"
+          - -d
+          - '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}'
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+  bridge:
+    startup:
+      httpGet:
+        path: /health
+        port: http
+      failureThreshold: 12
+      periodSeconds: 5
+    liveness:
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 10
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      httpGet:
+        path: /readyz
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
 
 nodeSelector: {}
 tolerations: []

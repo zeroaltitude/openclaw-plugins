@@ -1,0 +1,43 @@
+# ── Dockerfile.bridge ──────────────────────────────────────────────────────────
+# FastAPI HTTP bridge for Vestige MCP.
+#
+# This is a thin Python service that:
+# - Connects to an external Vestige MCP server over HTTP (Streamable HTTP/SSE)
+# - Adds authentication (bearer token)
+# - Translates REST endpoints to MCP JSON-RPC tool calls
+#
+# No vestige binary needed — it runs separately.
+# ──────────────────────────────────────────────────────────────────────────────
+
+FROM ubuntu:24.04
+
+# Install Python 3.12 + minimal deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user matching Helm securityContext
+RUN groupadd --gid 1000 vestige \
+    && useradd --uid 1000 --gid 1000 -m -s /bin/bash vestige
+
+# Install Python dependencies
+WORKDIR /app
+COPY server/requirements.txt .
+RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
+
+# Copy server code
+COPY server/app/ ./app/
+
+RUN chown -R vestige:vestige /app
+
+ENV VESTIGE_MCP_URL=http://localhost:3100/mcp \
+    VESTIGE_TRANSPORT=streamable_http \
+    LOG_LEVEL=info
+
+EXPOSE 8000
+USER vestige
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

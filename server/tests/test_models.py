@@ -68,5 +68,5 @@ def test_vestige_response():
 
 
 def test_health_response():
-    r = HealthResponse(status="healthy", vestige_process=True, uptime_seconds=42.5)
+    r = HealthResponse(status="healthy", vestige_connected=True, uptime_seconds=42.5)
     assert r.status == "healthy"
