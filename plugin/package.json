@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "OpenClaw plugin for Vestige cognitive memory",
   "main": "dist/index.js",
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch"
