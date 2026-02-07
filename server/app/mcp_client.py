@@ -128,17 +128,36 @@ class MCPClient:
             return False
 
     async def ensure_connected(self) -> None:
-        """Reconnect if the connection has been lost."""
+        """Reconnect if the connection has been lost or the session is stale."""
         if not self.alive:
             logger.warning("Vestige connection lost – reconnecting")
+            await self.connect()
+        elif self._session_id is None and self._connected:
+            # Connected but no session ID — re-initialize
+            logger.warning("No MCP session ID — re-initializing")
             await self.connect()
 
     # ── tool invocation ───────────────────────────────────────────────────
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        """Call an MCP tool and return the parsed result content."""
+        """Call an MCP tool and return the parsed result content.
+
+        Automatically retries once on stale session errors by reconnecting.
+        """
         await self.ensure_connected()
-        resp = await self._send("tools/call", {"name": name, "arguments": arguments})
+        try:
+            resp = await self._send("tools/call", {"name": name, "arguments": arguments})
+        except MCPError as exc:
+            # Detect stale session ID errors and retry with a fresh connection
+            err_msg = str(exc).lower()
+            if "session" in err_msg and ("invalid" in err_msg or "not found" in err_msg or "no valid" in err_msg):
+                logger.warning("Stale MCP session detected — reconnecting and retrying")
+                self._connected = False
+                self._session_id = None
+                await self.connect()
+                resp = await self._send("tools/call", {"name": name, "arguments": arguments})
+            else:
+                raise
         # MCP tools/call returns { content: [...] } or { isError: true, content: [...] }
         if resp.get("isError"):
             texts = [c.get("text", "") for c in resp.get("content", [])]
