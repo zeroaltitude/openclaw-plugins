@@ -96,12 +96,20 @@ cargo build --release
 sudo cp target/release/vestige-mcp target/release/vestige target/release/vestige-restore /usr/local/bin/
 
 # Option B: Download pre-built binary (if your OS has GLIBC 2.38+)
+# x86_64 only — no aarch64 pre-built binaries available (build from source for Graviton)
 curl -L https://github.com/samvallad33/vestige/releases/latest/download/vestige-mcp-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 sudo mv vestige-mcp vestige vestige-restore /usr/local/bin/
 
-# Verify
+# Verify it's in PATH — this is critical, supergateway will fail silently if not found
 vestige-mcp --version
+which vestige-mcp
+# Should output: /usr/local/bin/vestige-mcp
 ```
+
+> **⚠️ PATH is critical.** Supergateway spawns `vestige-mcp` as a child process. If the binary
+> isn't in PATH, supergateway will exit with code 1 and no obvious error message. Always verify
+> with `which vestige-mcp` before proceeding. If you installed to a non-standard location,
+> use the full path in the supergateway command (Step 4).
 
 ## Step 3: Create Data Directory
 
@@ -117,6 +125,7 @@ sudo chown $USER:$USER /data/vestige
 sudo npm install -g supergateway
 
 # Run (binds to localhost only)
+# If vestige-mcp is in PATH:
 supergateway \
   --stdio "vestige-mcp --data-dir /data/vestige" \
   --port 3100 \
@@ -124,10 +133,23 @@ supergateway \
   --streamableHttpPath /mcp \
   --healthEndpoint /health &
 
+# If vestige-mcp is NOT in PATH, use the full path:
+# supergateway \
+#   --stdio "/usr/local/bin/vestige-mcp --data-dir /data/vestige" \
+#   --port 3100 \
+#   --outputTransport streamableHttp \
+#   --streamableHttpPath /mcp \
+#   --healthEndpoint /health &
+
 # Verify
 curl http://localhost:3100/health
 # → "ok"
 ```
+
+> **⚠️ If supergateway exits immediately with code 1**, check:
+> 1. Is `vestige-mcp` in PATH? (`which vestige-mcp`)
+> 2. Check stderr: if running via nohup, look at your stderr log file
+> 3. Try running vestige-mcp standalone first: `echo '{}' | vestige-mcp --data-dir /data/vestige`
 
 **First boot note:** Vestige will download the Nomic Embed model (~130MB) on the first request. This takes 1-3 minutes depending on bandwidth. Subsequent boots use the cached model.
 
@@ -138,10 +160,19 @@ curl http://localhost:3100/health
 git clone https://github.com/BigHat-Biosciences/openclaw-vestige.git /opt/openclaw-vestige
 cd /opt/openclaw-vestige/server
 
-# Create venv and install deps
-python3.12 -m venv .venv
+# Create a Python virtual environment — DO NOT use system Python
+python3 -m venv .venv
 source .venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# If requirements.txt is missing or incomplete, install core deps directly:
+# pip install fastapi uvicorn httpx pydantic
+
+# Verify the venv is active (should show .venv path, not /usr/bin)
+which uvicorn
+# → /opt/openclaw-vestige/server/.venv/bin/uvicorn
 
 # Generate an auth token
 export VESTIGE_AUTH_TOKEN=$(openssl rand -hex 32)
@@ -151,12 +182,17 @@ echo "$VESTIGE_AUTH_TOKEN" > /data/vestige/auth-token  # save it
 # Configure bridge to connect to supergateway
 export VESTIGE_MCP_URL=http://localhost:3100/mcp
 
-# Start
-uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+# Start — use the venv's uvicorn, NOT the system one
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 &
 
 # Verify
 curl -H "Authorization: Bearer $VESTIGE_AUTH_TOKEN" http://localhost:8000/health
 ```
+
+> **⚠️ Common mistake: using system Python/uvicorn.** If you see `ModuleNotFoundError: No module named 'fastapi'`,
+> you're running the system uvicorn instead of the venv one. Always activate the venv first
+> (`source .venv/bin/activate`) or use the full path (`.venv/bin/uvicorn`). The system Python on
+> Ubuntu does NOT have FastAPI installed.
 
 ## Step 6: Configure Caddy (HTTPS)
 
@@ -165,8 +201,11 @@ sudo tee /etc/caddy/Caddyfile << 'EOF'
 vestige.yourdomain.com {
     # Claude Code / native MCP access
     # (No auth — restrict by IP or add basic_auth if needed)
+    # flush_interval -1 is REQUIRED for MCP Streamable HTTP (SSE streaming)
     handle /mcp* {
-        reverse_proxy localhost:3100
+        reverse_proxy localhost:3100 {
+            flush_interval -1
+        }
     }
 
     # OpenClaw agent API (bridge handles bearer auth)
@@ -312,8 +351,13 @@ sudo systemctl enable --now supergateway vestige-bridge
 
 | Issue | Fix |
 |-------|-----|
-| `vestige-mcp: command not found` | Ensure it's in PATH: `which vestige-mcp` or use full path in supergateway command |
+| `vestige-mcp: command not found` | Ensure it's in PATH: `which vestige-mcp` or use full path in supergateway `--stdio` arg |
+| Supergateway exits with code 1 immediately | Almost always: `vestige-mcp` not in PATH. Check stderr log. |
+| `ModuleNotFoundError: No module named 'fastapi'` | You're using system Python, not the venv. Run `source .venv/bin/activate` or use `.venv/bin/uvicorn` |
+| `curl: transfer closed with outstanding read data remaining` | Supergateway crashed mid-response. Check if process is still running (`ps aux | grep supergateway`) |
 | First request hangs (~2 min) | Normal — downloading Nomic Embed model (~130MB). Check `FASTEMBED_CACHE_PATH`. |
 | Caddy fails to get cert | Ensure ports 80+443 are open in security group AND DNS A record resolves to the EC2 public IP |
+| Claude Desktop: `SSE stream disconnected` | Caddy is buffering SSE responses. Add `flush_interval -1` to the reverse_proxy block (see Step 6) |
 | Bridge can't reach supergateway | Check `VESTIGE_MCP_URL` env var. Verify supergateway is running: `curl localhost:3100/health` |
 | GLIBC version error | Pre-built binary needs GLIBC 2.38+. Use Ubuntu 24.04 or build from source. |
+| Pre-built binary on Graviton/ARM | No aarch64 pre-built binaries available. Must build from source with `cargo build --release`. |
