@@ -1,5 +1,5 @@
 {
-  "name": "@openclaw/plugin-vestige",
+  "name": "@openclaw/vestige",
   "version": "0.1.0",
   "description": "OpenClaw plugin for Vestige cognitive memory",
   "main": "dist/index.js",
