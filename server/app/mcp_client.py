@@ -163,6 +163,32 @@ class MCPClient:
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
         await self._post_jsonrpc_notification(msg)
 
+    @staticmethod
+    def _parse_sse_json(text: str) -> dict | list | None:
+        """Extract JSON data from an SSE-formatted response.
+
+        Supergateway returns Streamable HTTP responses as SSE:
+            event: message
+            data: {"jsonrpc":"2.0","id":1,"result":{...}}
+
+        This extracts and parses the JSON from the 'data:' lines.
+        """
+        results = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload:
+                    try:
+                        results.append(json.loads(payload))
+                    except json.JSONDecodeError:
+                        continue
+        if len(results) == 1:
+            return results[0]
+        elif len(results) > 1:
+            return results
+        return None
+
     async def _post_jsonrpc(self, msg: dict) -> dict:
         """POST a JSON-RPC message and parse the response."""
         if not self._client:
@@ -173,7 +199,10 @@ class MCPClient:
             response = await self._client.post(
                 url,
                 json=msg,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
             )
             response.raise_for_status()
         except httpx.ConnectError as exc:
@@ -184,11 +213,24 @@ class MCPClient:
         except httpx.HTTPStatusError as exc:
             raise MCPError(f"Vestige returned HTTP {exc.response.status_code}: {exc.response.text}") from exc
 
-        # Parse JSON-RPC response
-        try:
-            data = response.json()
-        except Exception as exc:
-            raise MCPError(f"Invalid JSON from Vestige: {response.text[:200]}") from exc
+        # Parse response — handle both JSON and SSE formats
+        content_type = response.headers.get("content-type", "")
+        data = None
+
+        if "text/event-stream" in content_type:
+            # Supergateway returns SSE-formatted responses
+            data = self._parse_sse_json(response.text)
+            if data is None:
+                raise MCPError(f"No JSON data found in SSE response: {response.text[:200]}")
+        else:
+            # Standard JSON response
+            try:
+                data = response.json()
+            except Exception as exc:
+                # Last resort: try SSE parsing in case content-type is wrong
+                data = self._parse_sse_json(response.text)
+                if data is None:
+                    raise MCPError(f"Invalid JSON from Vestige: {response.text[:200]}") from exc
 
         # Handle JSON-RPC batch or single response
         # Streamable HTTP may return an array; pick the response matching our id
@@ -222,7 +264,10 @@ class MCPClient:
             response = await self._client.post(
                 url,
                 json=msg,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
             )
             # Notifications may return 200 or 202, both are fine
             if response.status_code >= 400:
