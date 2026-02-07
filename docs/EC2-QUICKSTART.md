@@ -118,6 +118,10 @@ sudo mkdir -p /data/vestige
 sudo chown $USER:$USER /data/vestige
 ```
 
+> **Note:** The `--data-dir` flag points to the **SQLite database file path**, not a directory.
+> Vestige will create the `.db` file at this path. If you point it at an existing directory,
+> you'll get `unable to open database file` errors. Use e.g. `/data/vestige/vestige.db`.
+
 ## Step 4: Start Supergateway (Vestige over Streamable HTTP)
 
 ```bash
@@ -127,19 +131,23 @@ sudo npm install -g supergateway
 # Run (binds to localhost only)
 # If vestige-mcp is in PATH:
 supergateway \
-  --stdio "vestige-mcp --data-dir /data/vestige" \
+  --stdio "vestige-mcp --data-dir /data/vestige/vestige.db" \
   --port 3100 \
   --outputTransport streamableHttp \
   --streamableHttpPath /mcp \
-  --healthEndpoint /health &
+  --healthEndpoint /health \
+  --stateful \
+  --sessionTimeout 300000 &
 
 # If vestige-mcp is NOT in PATH, use the full path:
 # supergateway \
-#   --stdio "/usr/local/bin/vestige-mcp --data-dir /data/vestige" \
+#   --stdio "/usr/local/bin/vestige-mcp --data-dir /data/vestige/vestige.db" \
 #   --port 3100 \
 #   --outputTransport streamableHttp \
 #   --streamableHttpPath /mcp \
-#   --healthEndpoint /health &
+#   --healthEndpoint /health \
+#   --stateful \
+#   --sessionTimeout 300000 &
 
 # Verify
 curl http://localhost:3100/health
@@ -150,6 +158,12 @@ curl http://localhost:3100/health
 > 1. Is `vestige-mcp` in PATH? (`which vestige-mcp`)
 > 2. Check stderr: if running via nohup, look at your stderr log file
 > 3. Try running vestige-mcp standalone first: `echo '{}' | vestige-mcp --data-dir /data/vestige`
+
+**Flags explained:**
+- `--stateful` — Manages session lifecycle. Without this, each MCP connection spawns a new
+  vestige-mcp process (~900MB each) that never gets cleaned up.
+- `--sessionTimeout 300000` — Kills idle sessions after 5 minutes, reclaiming memory.
+  Adjust based on your usage pattern.
 
 **First boot note:** Vestige will download the Nomic Embed model (~130MB) on the first request. This takes 1-3 minutes depending on bandwidth. Subsequent boots use the cached model.
 
@@ -285,7 +299,7 @@ After=network.target
 Type=simple
 User=ubuntu
 Environment=FASTEMBED_CACHE_PATH=/data/vestige/.cache/vestige/fastembed
-ExecStart=/usr/bin/npx supergateway --stdio "vestige-mcp --data-dir /data/vestige" --port 3100 --outputTransport streamableHttp --streamableHttpPath /mcp --healthEndpoint /health
+ExecStart=/usr/bin/npx supergateway --stdio "vestige-mcp --data-dir /data/vestige/vestige.db" --port 3100 --outputTransport streamableHttp --streamableHttpPath /mcp --healthEndpoint /health --stateful --sessionTimeout 300000
 Restart=always
 RestartSec=5
 
@@ -361,3 +375,5 @@ sudo systemctl enable --now supergateway vestige-bridge
 | Bridge can't reach supergateway | Check `VESTIGE_MCP_URL` env var. Verify supergateway is running: `curl localhost:3100/health` |
 | GLIBC version error | Pre-built binary needs GLIBC 2.38+. Use Ubuntu 24.04 or build from source. |
 | Pre-built binary on Graviton/ARM | No aarch64 pre-built binaries available. Must build from source with `cargo build --release`. |
+| Many vestige-mcp processes (~900MB each) | Missing `--stateful` flag. Without it, supergateway spawns a new process per session and never cleans up. Add `--stateful --sessionTimeout 300000`. |
+| `unable to open database file: /data/vestige` | `--data-dir` is a file path, not a directory. Use `/data/vestige/vestige.db` not `/data/vestige`. |
