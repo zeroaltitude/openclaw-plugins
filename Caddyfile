@@ -1,4 +1,4 @@
-vestige.yourdomain.com {
+vestige.bighatbio.me {
     # Claude Code / native MCP access (no auth — add IP allowlist or basic auth if needed)
     handle /mcp* {
         reverse_proxy localhost:3100
