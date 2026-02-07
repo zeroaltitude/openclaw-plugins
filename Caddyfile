@@ -1,12 +1,12 @@
 vestige.bighatbio.me {
-    # Claude Code / native MCP access (no auth — add IP allowlist or basic auth if needed)
-    handle /mcp* {
-        reverse_proxy localhost:3100
-    }
-    
-    # OpenClaw agent API (bridge handles bearer auth)
-    handle /api/* {
-        uri strip_prefix /api
-        reverse_proxy localhost:8000
-    }
+	# Claude Code / native MCP access (no auth — add IP allowlist or basic auth if needed)
+	handle /mcp* {
+		reverse_proxy localhost:3100
+	}
+
+	# OpenClaw agent API (bridge handles bearer auth)
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy localhost:8000
+	}
 }
