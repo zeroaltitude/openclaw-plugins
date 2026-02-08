@@ -186,6 +186,7 @@ export function register(api: PluginApi) {
       taintPolicy: (cfg.taintPolicy as any) ?? undefined,
       policies: (cfg.policies as any[]) ?? undefined,
       approvalTtlSeconds: (cfg.approvalTtlSeconds as number) ?? undefined,
+      maxIterations: (cfg.maxIterations as number) ?? undefined,
     },
   );
 };

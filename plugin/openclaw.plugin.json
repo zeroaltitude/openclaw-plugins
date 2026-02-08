@@ -80,6 +80,11 @@
         "type": "number",
         "description": "How long an approval code is valid (default: 60)",
         "default": 60
+      },
+      "maxIterations": {
+        "type": "number",
+        "description": "Max agent loop iterations before blocking the turn (default: 10)",
+        "default": 10
       }
     }
   },

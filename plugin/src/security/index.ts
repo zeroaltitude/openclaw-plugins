@@ -42,6 +42,8 @@ export interface SecurityPluginConfig {
   notifyTarget?: string;
   /** Approval code TTL in seconds (default: 60) */
   approvalTtlSeconds?: number;
+  /** Max agent loop iterations before blocking (default: 10) */
+  maxIterations?: number;
 }
 
 /** Get a short session key for log prefixes */
@@ -64,7 +66,13 @@ export function registerSecurityHooks(
   const store = new ProvenanceStore(config?.maxCompletedGraphs ?? 100);
   const approvalTtlMs = (config?.approvalTtlSeconds ?? 60) * 1000;
   const approvalStore = new ApprovalStore(approvalTtlMs);
-  const policies = [...DEFAULT_POLICIES, ...(config?.policies ?? [])];
+  const maxIterations = config?.maxIterations ?? 10;
+  const basePolicies = DEFAULT_POLICIES.map(p => 
+    p.name === "max-recursion" 
+      ? { ...p, when: { ...p.when, iterationGte: maxIterations } }
+      : p
+  );
+  const policies = [...basePolicies, ...(config?.policies ?? [])];
   const toolTrustOverrides = config?.toolTrustOverrides;
   const verbose = config?.verbose ?? false;
   const taintPolicyConfig = config?.taintPolicy;
