@@ -220,7 +220,27 @@ export function evaluateTaintPolicyWithApprovals(
 }
 
 /** Default security policies */
+/**
+ * Default security policies for all built-in OpenClaw tools.
+ * These are always present and config policies merge on top.
+ * 
+ * Tool categories:
+ *   - Execution:  exec (shell), browser (web automation)
+ *   - Messaging:  message (send to channels/DMs)
+ *   - Filesystem: Write, Edit (modify files)
+ *   - Config:     gateway (change runtime config, restart)
+ *   - Scheduling: cron (create persistent jobs)
+ *   - Network:    web_fetch, web_search (read-only, these ARE the taint sources)
+ *   - Memory:     Read, memory_search, memory_get (read-only local)
+ *   - Agents:     sessions_spawn, sessions_send (delegate to sub-agents)
+ *   - Nodes:      nodes (control paired devices)
+ * 
+ * Read-only tools (Read, web_fetch, web_search, memory_*, image, session_status,
+ * sessions_list, sessions_history, agents_list) are not restricted — they are
+ * either the taint source itself or read-only with no side effects.
+ */
 export const DEFAULT_POLICIES: SecurityPolicy[] = [
+  // --- Execution ---
   {
     name: "no-exec-when-external",
     when: { contextTaintIncludes: ["external", "untrusted"] },
@@ -230,13 +250,35 @@ export const DEFAULT_POLICIES: SecurityPolicy[] = [
     },
   },
   {
-    name: "no-send-when-untrusted",
+    name: "no-browser-when-untrusted",
     when: { contextTaintIncludes: ["untrusted"] },
     action: {
-      blockTools: ["message"],
+      removeTools: ["browser"],
+      reason: "browser disabled: context contains untrusted content",
+    },
+  },
+
+  // --- Messaging ---
+  {
+    name: "no-message-when-untrusted",
+    when: { contextTaintIncludes: ["untrusted"] },
+    action: {
+      removeTools: ["message"],
       reason: "messaging disabled: context contains untrusted content",
     },
   },
+
+  // --- Filesystem ---
+  {
+    name: "no-write-when-external",
+    when: { contextTaintIncludes: ["external", "untrusted"] },
+    action: {
+      removeTools: ["Write", "Edit"],
+      reason: "file writes disabled: context contains external content",
+    },
+  },
+
+  // --- Config ---
   {
     name: "no-config-change",
     when: { contextTaintIncludes: ["local", "shared", "external", "untrusted"] },
@@ -245,6 +287,8 @@ export const DEFAULT_POLICIES: SecurityPolicy[] = [
       reason: "config changes disabled: prevents policy circumvention via config.patch",
     },
   },
+
+  // --- Scheduling ---
   {
     name: "no-cron-when-external",
     when: { contextTaintIncludes: ["external", "untrusted"] },
@@ -253,6 +297,48 @@ export const DEFAULT_POLICIES: SecurityPolicy[] = [
       reason: "cron disabled: prevents scheduling persistent backdoors via tainted context",
     },
   },
+
+  // --- Agent delegation ---
+  {
+    name: "no-spawn-when-untrusted",
+    when: { contextTaintIncludes: ["untrusted"] },
+    action: {
+      removeTools: ["sessions_spawn", "sessions_send"],
+      reason: "agent delegation disabled: prevents propagating untrusted content to sub-agents",
+    },
+  },
+
+  // --- Device control ---
+  {
+    name: "no-nodes-when-external",
+    when: { contextTaintIncludes: ["external", "untrusted"] },
+    action: {
+      removeTools: ["nodes"],
+      reason: "node control disabled: context contains external content",
+    },
+  },
+
+  // --- TTS (exfiltration vector) ---
+  {
+    name: "no-tts-when-untrusted",
+    when: { contextTaintIncludes: ["untrusted"] },
+    action: {
+      removeTools: ["tts"],
+      reason: "TTS disabled: prevents audio exfiltration of untrusted content",
+    },
+  },
+
+  // --- Canvas ---
+  {
+    name: "no-canvas-when-untrusted",
+    when: { contextTaintIncludes: ["untrusted"] },
+    action: {
+      removeTools: ["canvas"],
+      reason: "canvas disabled: prevents rendering untrusted content",
+    },
+  },
+
+  // --- Recursion limit ---
   {
     name: "max-recursion",
     when: { iterationGte: 10 },
