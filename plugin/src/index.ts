@@ -6,6 +6,7 @@
  */
 
 import { Type } from "@sinclair/typebox";
+import { registerSecurityHooks } from "./security/index.js";
 
 // The OpenClaw plugin API type (provided at runtime)
 interface PluginApi {
@@ -15,6 +16,7 @@ interface PluginApi {
     parameters: any;
     execute: (id: string, params: any) => Promise<{ content: Array<{ type: string; text: string }> }>;
   }): void;
+  registerHook(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number }): void;
   pluginConfig: Record<string, unknown> | undefined;
   config: Record<string, unknown>;
   logger: { info(...args: any[]): void; warn(...args: any[]): void; error(...args: any[]): void };
@@ -173,4 +175,13 @@ module.exports = function (api: PluginApi) {
       return textResult(await vestigeCall(api, "/demote", params));
     },
   });
+
+  // Register security/provenance hooks
+  registerSecurityHooks(
+    api,
+    api.logger,
+    {
+      verbose: true, // TODO: make configurable
+    },
+  );
 };
