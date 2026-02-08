@@ -68,6 +68,34 @@ export const DEFAULT_TOOL_TRUST: Record<string, TrustLevel> = {
   "canvas": "local",
 };
 
+// --- Taint policy modes ---
+
+export type TaintPolicyMode = "allow" | "deny" | "restrict";
+
+export interface TaintPolicyConfig {
+  /** Policy for system-trust content (default: allow) */
+  system?: TaintPolicyMode;
+  /** Policy for owner-trust content (default: allow) */
+  owner?: TaintPolicyMode;
+  /** Policy for local-trust content (default: allow) */
+  local?: TaintPolicyMode;
+  /** Policy for shared-trust content (default: restrict) */
+  shared?: TaintPolicyMode;
+  /** Policy for external-trust content (default: restrict) */
+  external?: TaintPolicyMode;
+  /** Policy for untrusted content (default: restrict) */
+  untrusted?: TaintPolicyMode;
+}
+
+export const DEFAULT_TAINT_POLICY: Required<TaintPolicyConfig> = {
+  system: "allow",
+  owner: "allow",
+  local: "allow",
+  shared: "restrict",
+  external: "restrict",
+  untrusted: "restrict",
+};
+
 /** Get trust level for a tool, defaulting to "local" for unknown tools */
 export function getToolTrust(toolName: string, overrides?: Record<string, TrustLevel>): TrustLevel {
   if (overrides?.[toolName]) return overrides[toolName];

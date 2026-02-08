@@ -17,6 +17,18 @@
       "authToken": {
         "type": "string",
         "description": "Bearer token for Vestige API authentication"
+      },
+      "taintPolicy": {
+        "type": "object",
+        "description": "Per-trust-level policy modes: allow (no restrictions), deny (block turn), restrict (apply tool removal policies)",
+        "properties": {
+          "system": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "allow" },
+          "owner": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "allow" },
+          "local": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "allow" },
+          "shared": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "restrict" },
+          "external": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "restrict" },
+          "untrusted": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "restrict" }
+        }
       }
     }
   },

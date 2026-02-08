@@ -4,7 +4,8 @@
  */
 
 import type { TrustLevel } from "./trust-levels.js";
-import { TRUST_ORDER } from "./trust-levels.js";
+import { TRUST_ORDER, DEFAULT_TAINT_POLICY } from "./trust-levels.js";
+import type { TaintPolicyConfig } from "./trust-levels.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
 
 export interface SecurityPolicy {
@@ -117,6 +118,20 @@ export function shouldBlockTurn(evaluations: PolicyEvaluation[]): { block: boole
     }
   }
   return { block: false };
+}
+
+/**
+ * Evaluate the taint policy for the current graph state.
+ * Returns "allow" (skip policies), "deny" (block turn), or "restrict" (normal evaluation).
+ */
+export function evaluateTaintPolicy(
+  graph: TurnProvenanceGraph,
+  taintPolicy?: TaintPolicyConfig,
+): { mode: "allow" | "deny" | "restrict"; level: TrustLevel } {
+  const config = { ...DEFAULT_TAINT_POLICY, ...taintPolicy };
+  const currentTaint = graph.maxTaint;
+  const mode = config[currentTaint] ?? "restrict";
+  return { mode, level: currentTaint };
 }
 
 /** Default security policies */
