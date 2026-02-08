@@ -238,6 +238,22 @@ export const DEFAULT_POLICIES: SecurityPolicy[] = [
     },
   },
   {
+    name: "no-config-change",
+    when: { contextTaintIncludes: ["local", "shared", "external", "untrusted"] },
+    action: {
+      removeTools: ["gateway"],
+      reason: "config changes disabled: prevents policy circumvention via config.patch",
+    },
+  },
+  {
+    name: "no-cron-when-external",
+    when: { contextTaintIncludes: ["external", "untrusted"] },
+    action: {
+      removeTools: ["cron"],
+      reason: "cron disabled: prevents scheduling persistent backdoors via tainted context",
+    },
+  },
+  {
     name: "max-recursion",
     when: { iterationGte: 10 },
     action: {
