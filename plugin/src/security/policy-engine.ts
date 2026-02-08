@@ -27,8 +27,10 @@ export interface PolicyCondition {
 }
 
 export interface PolicyAction {
-  /** Remove these tools from the available set */
+  /** Remove these tools from the available set. Use ["*"] for catch-all (everything not in allowTools). */
   removeTools?: string[];
+  /** Explicitly allow these tools (exempt from glob "*" removal) */
+  allowTools?: string[];
   /** Block these tools entirely */
   blockTools?: string[];
   /** Block the entire turn */
@@ -97,19 +99,52 @@ export function evaluatePolicies(
 
 /**
  * Get the set of tools to remove based on policy evaluations.
+ * @param evaluations - evaluated policies
+ * @param availableTools - current tool names (needed for glob "*" expansion)
  */
-export function getToolRemovals(evaluations: PolicyEvaluation[]): Set<string> {
+export function getToolRemovals(evaluations: PolicyEvaluation[], availableTools?: string[]): Set<string> {
   const removals = new Set<string>();
+  const allowed = new Set<string>(); // tools explicitly allowed (exempt from glob)
+
+  // First pass: collect all allowTools across matched policies
+  for (const eval_ of evaluations) {
+    if (eval_.matched && eval_.action?.allowTools) {
+      for (const tool of eval_.action.allowTools) {
+        allowed.add(tool.toLowerCase());
+      }
+    }
+  }
+
+  // Second pass: collect removals, expanding "*" glob
   for (const eval_ of evaluations) {
     if (eval_.matched && eval_.action) {
       for (const tool of eval_.action.removeTools ?? []) {
-        removals.add(tool);
+        if (tool === "*") {
+          // Glob: add all available tools not in the allowed set
+          if (availableTools) {
+            for (const t of availableTools) {
+              if (!allowed.has(t.toLowerCase())) {
+                removals.add(t);
+              }
+            }
+          }
+        } else {
+          removals.add(tool);
+        }
       }
       for (const tool of eval_.action.blockTools ?? []) {
         removals.add(tool);
       }
     }
   }
+
+  // Remove any explicitly allowed tools from the removal set
+  for (const tool of removals) {
+    if (allowed.has(tool.toLowerCase())) {
+      removals.delete(tool);
+    }
+  }
+
   return removals;
 }
 
@@ -149,6 +184,7 @@ export function evaluateTaintPolicyWithApprovals(
   policies: SecurityPolicy[],
   approvalStore: ApprovalStore,
   sessionKey: string,
+  availableTools?: string[],
 ): {
   mode: TaintPolicyMode;
   toolRemovals: Set<string>;
@@ -178,7 +214,7 @@ export function evaluateTaintPolicyWithApprovals(
   // this trust level requires enforcement. Policies apply unconditionally.
   const skipTaintCheck = true;
   const evaluations = evaluatePolicies(policies, graph, skipTaintCheck);
-  const allRemovals = getToolRemovals(evaluations);
+  const allRemovals = getToolRemovals(evaluations, availableTools);
   const blockCheck = shouldBlockTurn(evaluations);
 
   if (blockCheck.block) {
@@ -335,6 +371,32 @@ export const DEFAULT_POLICIES: SecurityPolicy[] = [
     action: {
       removeTools: ["canvas"],
       reason: "canvas disabled: prevents rendering untrusted content",
+    },
+  },
+
+  // --- Catch-all: block any unlisted tool ---
+  // This MUST be last. Any tool not explicitly allowed above gets blocked.
+  // The allowTools list covers read-only / safe tools that should always work.
+  {
+    name: "default-catchall",
+    when: { contextTaintIncludes: ["external", "untrusted"] },
+    action: {
+      removeTools: ["*"],
+      allowTools: [
+        // Read-only filesystem
+        "Read", "read",
+        // Memory (read-only)
+        "memory_search", "memory_get",
+        // Web read (these ARE the taint sources — blocking them is pointless)
+        "web_fetch", "web_search",
+        // Image analysis (read-only)
+        "image",
+        // Session introspection (read-only)
+        "session_status", "sessions_list", "sessions_history", "agents_list",
+        // Vestige memory (read-only search + promote/demote)
+        "vestige_search", "vestige_promote", "vestige_demote",
+      ],
+      reason: "tool blocked by catch-all: no explicit policy allows this tool with tainted context",
     },
   },
 

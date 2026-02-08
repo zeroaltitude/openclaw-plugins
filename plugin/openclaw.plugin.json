@@ -61,7 +61,12 @@
                 "removeTools": {
                   "type": "array",
                   "items": { "type": "string" },
-                  "description": "Remove these tools from the available set"
+                  "description": "Remove these tools from the available set. Use [\"*\"] for catch-all."
+                },
+                "allowTools": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Explicitly allow these tools (exempt from glob * removal)"
                 },
                 "blockTools": {
                   "type": "array",

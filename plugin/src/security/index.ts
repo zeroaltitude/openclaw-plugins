@@ -143,7 +143,8 @@ export function registerSecurityHooks(
     }
 
     // Use the unified policy evaluator that handles all modes including "confirm"
-    const result = evaluateTaintPolicyWithApprovals(graph, fullTaintConfig, policies, approvalStore, sessionKey);
+    const currentToolNames = (event.tools ?? []).map((t: any) => t.name);
+    const result = evaluateTaintPolicyWithApprovals(graph, fullTaintConfig, policies, approvalStore, sessionKey, currentToolNames);
 
     if (result.mode === "allow") {
       logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
