@@ -144,13 +144,7 @@ export function evaluatePolicy(
     return result;
   }
 
-  // If allow mode, everything passes
-  if (defaultMode === "allow") {
-    result.allowed = [...availableTools];
-    return result;
-  }
-
-  // For confirm/restrict: evaluate each tool
+  // Evaluate each tool — even in "allow" mode, tool overrides may be stricter
   for (const tool of availableTools) {
     const mode = getToolMode(tool, taintLevel, config);
     switch (mode) {
