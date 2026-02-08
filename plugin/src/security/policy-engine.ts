@@ -195,7 +195,8 @@ export function evaluateWithApprovals(
     };
   }
 
-  if (result.defaultMode === "allow") {
+  // Even in "allow" mode, check if any tools have overrides that are stricter
+  if (result.defaultMode === "allow" && result.confirm.length === 0 && result.restricted.length === 0) {
     return {
       mode: "allow",
       toolRemovals: new Set(),
@@ -221,8 +222,15 @@ export function evaluateWithApprovals(
     pendingConfirmations.push({ toolName: tool, reason });
   }
 
+  // Effective mode: if default is "allow" but overrides triggered, report the strictest override
+  const effectiveMode = pendingConfirmations.length > 0
+    ? strictest(result.defaultMode, "confirm")
+    : result.restricted.length > 0
+      ? strictest(result.defaultMode, "restrict")
+      : result.defaultMode;
+
   return {
-    mode: result.defaultMode,
+    mode: effectiveMode,
     toolRemovals,
     pendingConfirmations,
   };
