@@ -92,8 +92,10 @@ export function getToolMode(
   const overrideMode = override[taintLevel] ?? override["*"];
   if (!overrideMode) return defaultMode;
 
-  // Override can only be stricter than default
-  return strictest(defaultMode, overrideMode);
+  // The override IS the effective mode for this tool.
+  // It can be more permissive (safe tools: "allow") or more restrictive (dangerous tools: "restrict").
+  // This is intentional: safe tools MUST be able to override "restrict" back to "allow".
+  return overrideMode;
 }
 
 /**
@@ -284,7 +286,7 @@ export function buildPolicyConfig(
     system: "allow",
     owner: "allow",
     local: "allow",
-    shared: "restrict",
+    shared: "confirm",
     external: "confirm",
     untrusted: "confirm",
     ...taintPolicy,
