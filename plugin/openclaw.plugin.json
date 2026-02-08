@@ -20,14 +20,14 @@
       },
       "taintPolicy": {
         "type": "object",
-        "description": "Per-trust-level policy modes: allow (no restrictions), deny (block turn), restrict (apply tool removal policies)",
+        "description": "Per-trust-level policy modes: allow (no restrictions), deny (block turn), restrict (apply tool removal policies), confirm (restrict with interactive approval)",
         "properties": {
-          "system": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "allow" },
-          "owner": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "allow" },
-          "local": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "allow" },
-          "shared": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "restrict" },
-          "external": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "restrict" },
-          "untrusted": { "type": "string", "enum": ["allow", "deny", "restrict"], "default": "restrict" }
+          "system": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "allow" },
+          "owner": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "allow" },
+          "local": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "allow" },
+          "shared": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "restrict" },
+          "external": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "restrict" },
+          "untrusted": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "restrict" }
         }
       }
     }

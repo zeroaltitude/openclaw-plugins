@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
-import { evaluatePolicies, getToolRemovals, shouldBlockTurn, evaluateTaintPolicy, DEFAULT_POLICIES, type SecurityPolicy } from "../policy-engine.js";
+import { evaluatePolicies, getToolRemovals, shouldBlockTurn, evaluateTaintPolicy, evaluateTaintPolicyWithApprovals, DEFAULT_POLICIES, type SecurityPolicy } from "../policy-engine.js";
 import { TurnProvenanceGraph } from "../provenance-graph.js";
 import type { TaintPolicyConfig } from "../trust-levels.js";
+import { DEFAULT_TAINT_POLICY } from "../trust-levels.js";
 import { registerSecurityHooks } from "../index.js";
+import { ApprovalStore } from "../approval-store.js";
 
 // Helper to build a graph with specific taint
 function graphWithTaint(toolName?: string): TurnProvenanceGraph {
@@ -296,6 +298,113 @@ function graphWithTaint(toolName?: string): TurnProvenanceGraph {
   assert.ok(logs.some(l => l.includes("Turn Complete")), "should log Turn Complete");
   assert.ok(logs.some(l => l.includes("Final taint")), "should log final taint");
   assert.ok(logs.some(l => l.includes("Graph:")), "should log graph JSON dump");
+}
+
+// --- evaluateTaintPolicyWithApprovals tests ---
+
+// "confirm" mode with no approvals → tools restricted + pendingConfirmations populated
+{
+  const g = graphWithTaint("message"); // external taint
+  const config = { ...DEFAULT_TAINT_POLICY, external: "confirm" as const };
+  const store = new ApprovalStore();
+  const result = evaluateTaintPolicyWithApprovals(g, config, DEFAULT_POLICIES, store, "test-session");
+  assert.equal(result.mode, "confirm");
+  assert.ok(result.toolRemovals.has("exec"), "exec should be restricted");
+  assert.ok(result.pendingConfirmations.length > 0, "should have pending confirmations");
+  assert.ok(result.pendingConfirmations.some(p => p.toolName === "exec"));
+}
+
+// "confirm" mode with approval → approved tool not in removals
+{
+  const g = graphWithTaint("message"); // external taint
+  const config = { ...DEFAULT_TAINT_POLICY, external: "confirm" as const };
+  const store = new ApprovalStore();
+  store.approve("test-session", "exec");
+  const result = evaluateTaintPolicyWithApprovals(g, config, DEFAULT_POLICIES, store, "test-session");
+  assert.equal(result.mode, "confirm");
+  assert.ok(!result.toolRemovals.has("exec"), "exec should NOT be restricted after approval");
+  assert.ok(!result.pendingConfirmations.some(p => p.toolName === "exec"));
+}
+
+// "confirm" mode with approveAll → no removals
+{
+  const g = graphWithTaint("web_fetch"); // untrusted taint
+  const config = { ...DEFAULT_TAINT_POLICY, untrusted: "confirm" as const };
+  const store = new ApprovalStore();
+  store.addPending({ sessionKey: "s1", toolName: "exec", taintLevel: "untrusted", reason: "test", requestedAt: 1 });
+  store.addPending({ sessionKey: "s1", toolName: "message", taintLevel: "untrusted", reason: "test", requestedAt: 2 });
+  store.approveAll("s1");
+  const result = evaluateTaintPolicyWithApprovals(g, config, DEFAULT_POLICIES, store, "s1");
+  assert.equal(result.mode, "confirm");
+  assert.equal(result.toolRemovals.size, 0, "no removals after approveAll");
+  assert.equal(result.pendingConfirmations.length, 0);
+}
+
+// "allow" mode → no removals regardless
+{
+  const g = graphWithTaint("web_fetch"); // untrusted taint
+  const config = { ...DEFAULT_TAINT_POLICY, untrusted: "allow" as const };
+  const store = new ApprovalStore();
+  const result = evaluateTaintPolicyWithApprovals(g, config, DEFAULT_POLICIES, store, "s1");
+  assert.equal(result.mode, "allow");
+  assert.equal(result.toolRemovals.size, 0);
+}
+
+// "deny" mode → block=true
+{
+  const g = graphWithTaint("message"); // external taint
+  const config = { ...DEFAULT_TAINT_POLICY, external: "deny" as const };
+  const store = new ApprovalStore();
+  const result = evaluateTaintPolicyWithApprovals(g, config, DEFAULT_POLICIES, store, "s1");
+  assert.equal(result.mode, "deny");
+  assert.equal(result.block, true);
+  assert.ok(result.blockReason?.includes("denied"));
+}
+
+// Integration: confirm mode with !approve in before_llm_call
+{
+  const logs: string[] = [];
+  const mockLogger = {
+    info: (...args: any[]) => logs.push(args.join(" ")),
+    warn: (...args: any[]) => logs.push(args.join(" ")),
+  };
+  const hooks = new Map<string, Function>();
+  const mockApi = {
+    registerHook: (event: string, handler: Function, _opts?: any) => {
+      hooks.set(event, handler);
+    },
+  };
+
+  registerSecurityHooks(mockApi, mockLogger, {
+    taintPolicy: { external: "confirm" },
+  });
+
+  // Setup: create graph with external taint
+  hooks.get("context_assembled")!({ systemPrompt: "test", messageCount: 5 }, { sessionKey: "confirm-test" });
+  hooks.get("after_llm_call")!({ toolCalls: [{ name: "message" }], iteration: 0 }, { sessionKey: "confirm-test" });
+
+  // First call: tools should be restricted with pending confirmations
+  const result1 = hooks.get("before_llm_call")!({
+    iteration: 1,
+    tools: [{ name: "exec" }, { name: "Read" }],
+    messages: [{ role: "user", content: "run a command" }],
+  }, { sessionKey: "confirm-test" });
+  assert.ok(result1?.tools, "should return filtered tools");
+  assert.ok(!result1.tools.some((t: any) => t.name === "exec"), "exec should be removed");
+  assert.ok(logs.some(l => l.includes("⚠️ SECURITY")), "should log security warning");
+
+  // Second call: user approves exec
+  const result2 = hooks.get("before_llm_call")!({
+    iteration: 2,
+    tools: [{ name: "exec" }, { name: "Read" }],
+    messages: [{ role: "user", content: "!approve exec" }],
+  }, { sessionKey: "confirm-test" });
+  // exec should now be allowed
+  if (result2?.tools) {
+    assert.ok(result2.tools.some((t: any) => t.name === "exec"), "exec should be allowed after approval");
+  }
+  // If result2 is undefined, that means no tools were removed — also correct
+  assert.ok(logs.some(l => l.includes("✅") && l.includes("exec")), "should log approval");
 }
 
 console.log("✅ policy-engine tests passed");

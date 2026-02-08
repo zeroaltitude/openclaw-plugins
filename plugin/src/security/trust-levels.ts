@@ -70,7 +70,7 @@ export const DEFAULT_TOOL_TRUST: Record<string, TrustLevel> = {
 
 // --- Taint policy modes ---
 
-export type TaintPolicyMode = "allow" | "deny" | "restrict";
+export type TaintPolicyMode = "allow" | "deny" | "restrict" | "confirm";
 
 export interface TaintPolicyConfig {
   /** Policy for system-trust content (default: allow) */

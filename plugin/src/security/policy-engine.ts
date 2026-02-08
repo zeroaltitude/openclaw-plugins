@@ -3,9 +3,10 @@
  * Evaluates policies against the current provenance graph state.
  */
 
-import type { TrustLevel } from "./trust-levels.js";
+import type { TrustLevel, TaintPolicyMode } from "./trust-levels.js";
 import { TRUST_ORDER, DEFAULT_TAINT_POLICY } from "./trust-levels.js";
 import type { TaintPolicyConfig } from "./trust-levels.js";
+import type { ApprovalStore } from "./approval-store.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
 
 export interface SecurityPolicy {
@@ -127,11 +128,88 @@ export function shouldBlockTurn(evaluations: PolicyEvaluation[]): { block: boole
 export function evaluateTaintPolicy(
   graph: TurnProvenanceGraph,
   taintPolicy?: TaintPolicyConfig,
-): { mode: "allow" | "deny" | "restrict"; level: TrustLevel } {
+): { mode: TaintPolicyMode; level: TrustLevel } {
   const config = { ...DEFAULT_TAINT_POLICY, ...taintPolicy };
   const currentTaint = graph.maxTaint;
   const mode = config[currentTaint] ?? "restrict";
   return { mode, level: currentTaint };
+}
+
+/**
+ * Evaluate taint policy with approval support.
+ * Returns which tools to remove after considering user approvals.
+ */
+export function evaluateTaintPolicyWithApprovals(
+  graph: TurnProvenanceGraph,
+  taintConfig: Required<TaintPolicyConfig>,
+  policies: SecurityPolicy[],
+  approvalStore: ApprovalStore,
+  sessionKey: string,
+): {
+  mode: TaintPolicyMode;
+  toolRemovals: Set<string>;
+  pendingConfirmations: Array<{ toolName: string; reason: string }>;
+  block?: boolean;
+  blockReason?: string;
+} {
+  const taintLevel = graph.maxTaint;
+  const mode = taintConfig[taintLevel] ?? "restrict";
+
+  if (mode === "allow") {
+    return { mode, toolRemovals: new Set(), pendingConfirmations: [] };
+  }
+
+  if (mode === "deny") {
+    return {
+      mode,
+      toolRemovals: new Set(),
+      pendingConfirmations: [],
+      block: true,
+      blockReason: `Turn blocked by taint policy: ${taintLevel} content is denied`,
+    };
+  }
+
+  // For both "restrict" and "confirm": evaluate policies to get tool removals
+  const evaluations = evaluatePolicies(policies, graph);
+  const allRemovals = getToolRemovals(evaluations);
+  const blockCheck = shouldBlockTurn(evaluations);
+
+  if (blockCheck.block) {
+    return {
+      mode,
+      toolRemovals: allRemovals,
+      pendingConfirmations: [],
+      block: true,
+      blockReason: blockCheck.reason,
+    };
+  }
+
+  if (mode === "restrict") {
+    return { mode, toolRemovals: allRemovals, pendingConfirmations: [] };
+  }
+
+  // mode === "confirm": check approvals, separate into approved vs pending
+  const effectiveRemovals = new Set<string>();
+  const pendingConfirmations: Array<{ toolName: string; reason: string }> = [];
+
+  for (const toolName of allRemovals) {
+    if (approvalStore.isApproved(sessionKey, toolName)) {
+      // User already approved this tool — don't remove it
+      continue;
+    } else {
+      // Tool is restricted and not yet approved — remove it and mark as pending
+      effectiveRemovals.add(toolName);
+      const matchingPolicy = evaluations.find(e =>
+        e.matched && (e.action?.removeTools?.includes(toolName) || e.action?.blockTools?.includes(toolName))
+      );
+      pendingConfirmations.push({
+        toolName,
+        reason: matchingPolicy?.action?.reason ?? matchingPolicy?.policy.name ?? "security policy",
+      });
+    }
+  }
+
+  return { mode, toolRemovals: effectiveRemovals, pendingConfirmations };
 }
 
 /** Default security policies */

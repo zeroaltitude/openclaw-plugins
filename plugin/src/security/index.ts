@@ -7,9 +7,11 @@
 
 import { ProvenanceStore } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
-import { evaluatePolicies, getToolRemovals, shouldBlockTurn, evaluateTaintPolicy, DEFAULT_POLICIES, type SecurityPolicy } from "./policy-engine.js";
+import { evaluatePolicies, getToolRemovals, shouldBlockTurn, evaluateTaintPolicy, evaluateTaintPolicyWithApprovals, DEFAULT_POLICIES, type SecurityPolicy } from "./policy-engine.js";
 import { getToolTrust } from "./trust-levels.js";
 import type { TrustLevel, TaintPolicyConfig } from "./trust-levels.js";
+import { DEFAULT_TAINT_POLICY } from "./trust-levels.js";
+import { ApprovalStore } from "./approval-store.js";
 
 // Types matching OpenClaw's hook system (from src/plugins/types.ts)
 // We define them here to avoid a hard dependency on the OpenClaw source.
@@ -35,6 +37,8 @@ export interface SecurityPluginConfig {
   verbose?: boolean;
   /** Per-trust-level policy modes */
   taintPolicy?: TaintPolicyConfig;
+  /** Discord channel/DM ID to send confirmation requests to */
+  notifyTarget?: string;
 }
 
 /** Get a short session key for log prefixes */
@@ -53,12 +57,14 @@ export function registerSecurityHooks(
   api: HookApi,
   logger: { info(...args: any[]): void; warn(...args: any[]): void; debug?(...args: any[]): void },
   config?: SecurityPluginConfig,
-): { store: ProvenanceStore } {
+): { store: ProvenanceStore; approvalStore: ApprovalStore } {
   const store = new ProvenanceStore(config?.maxCompletedGraphs ?? 100);
+  const approvalStore = new ApprovalStore();
   const policies = [...DEFAULT_POLICIES, ...(config?.policies ?? [])];
   const toolTrustOverrides = config?.toolTrustOverrides;
   const verbose = config?.verbose ?? false;
   const taintPolicyConfig = config?.taintPolicy;
+  const fullTaintConfig = { ...DEFAULT_TAINT_POLICY, ...taintPolicyConfig };
 
   // Track last LLM node ID per session for edge building
   const lastLlmNodeBySession = new Map<string, string>();
@@ -87,10 +93,32 @@ export function registerSecurityHooks(
     const sk = shortKey(sessionKey);
     const summary = graph.summary();
 
-    // Evaluate taint policy first
-    const taintResult = evaluateTaintPolicy(graph, taintPolicyConfig);
+    // Process !approve commands from the last user message before policy evaluation
+    const messages = event.messages ?? [];
+    const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
+    if (lastUserMsg) {
+      const content = typeof lastUserMsg.content === "string"
+        ? lastUserMsg.content
+        : Array.isArray(lastUserMsg.content)
+          ? lastUserMsg.content.filter((c: any) => c?.type === "text").map((c: any) => c.text).join("")
+          : "";
+      const trimmed = content.trim();
+      if (trimmed.toLowerCase().startsWith("!approve")) {
+        const arg = trimmed.slice("!approve".length).trim().toLowerCase();
+        if (arg === "all") {
+          approvalStore.approveAll(sessionKey);
+          logger.info(`[provenance:${sk}] ✅ All tools approved by user`);
+        } else if (arg) {
+          approvalStore.approve(sessionKey, arg);
+          logger.info(`[provenance:${sk}] ✅ Tool "${arg}" approved by user`);
+        }
+      }
+    }
 
-    if (taintResult.mode === "allow") {
+    // Use the unified policy evaluator that handles all modes including "confirm"
+    const result = evaluateTaintPolicyWithApprovals(graph, fullTaintConfig, policies, approvalStore, sessionKey);
+
+    if (result.mode === "allow") {
       logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
       logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint} (policy: allow — skipping restrictions)`);
       logger.info(`[provenance:${sk}]   Tools available: ${event.tools?.length ?? 0} | Tools removed by policy: (none)`);
@@ -98,44 +126,42 @@ export function registerSecurityHooks(
       return undefined;
     }
 
-    if (taintResult.mode === "deny") {
-      const reason = `Turn blocked by taint policy: ${taintResult.level} content is denied`;
+    if (result.block) {
       logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
-      logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint} (policy: deny — BLOCKED)`);
-      logger.warn(`[provenance:${sk}]   Turn BLOCKED: ${reason}`);
-      return { block: true, blockReason: reason };
+      logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint} (policy: ${result.mode} — BLOCKED)`);
+      logger.warn(`[provenance:${sk}]   Turn BLOCKED: ${result.blockReason}`);
+      return { block: true, blockReason: result.blockReason };
     }
 
-    // "restrict" mode — evaluate policies normally
-    const evaluations = evaluatePolicies(policies, graph);
-    const toolRemovals = getToolRemovals(evaluations);
-    const blockCheck = shouldBlockTurn(evaluations);
-
-    if (blockCheck.block) {
-      logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
-      logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint}`);
-      logger.warn(`[provenance:${sk}]   Turn BLOCKED: ${blockCheck.reason}`);
-      return { block: true, blockReason: blockCheck.reason };
-    }
-
+    const toolRemovals = result.toolRemovals;
     const currentTools: Array<{ name: string }> = event.tools ?? [];
     const removedTools = currentTools.filter((t: any) => toolRemovals.has(t.name)).map((t: any) => t.name);
-    // Find which policies caused each removal
-    const removedWithPolicies = removedTools.map((toolName: string) => {
-      const matchingPolicy = evaluations.find(e => e.matched && (e.action?.removeTools?.includes(toolName) || e.action?.blockTools?.includes(toolName)));
-      return toolName;
-    });
-    const policyNames = removedTools.map((toolName: string) => {
-      const matchingPolicy = evaluations.find(e => e.matched && (e.action?.removeTools?.includes(toolName) || e.action?.blockTools?.includes(toolName)));
-      return matchingPolicy?.policy.name ?? "policy";
-    });
+
+    // Log confirm-mode pending confirmations prominently
+    if (result.mode === "confirm" && result.pendingConfirmations.length > 0) {
+      const pendingNames = result.pendingConfirmations.map(p => p.toolName);
+      logger.warn(`[provenance:${sk}] ⚠️ SECURITY: Tools restricted due to ${graph.maxTaint} content in context.`);
+      logger.warn(`[provenance:${sk}]   Restricted: ${pendingNames.join(", ")}`);
+      logger.warn(`[provenance:${sk}]   Approve with: !approve <tool> or !approve all`);
+
+      // Track pending approvals in the store
+      for (const pc of result.pendingConfirmations) {
+        approvalStore.addPending({
+          sessionKey,
+          toolName: pc.toolName,
+          taintLevel: graph.maxTaint,
+          reason: pc.reason,
+          requestedAt: Date.now(),
+        });
+      }
+    }
 
     const removedStr = removedTools.length > 0
-      ? `${removedTools.join(", ")} (${[...new Set(policyNames)].join(", ")})`
+      ? removedTools.join(", ")
       : "(none)";
 
     logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
-    logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint}`);
+    logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint} (policy: ${result.mode})`);
     logger.info(`[provenance:${sk}]   Tools available: ${currentTools.length - removedTools.length} | Tools removed by policy: ${removedStr}`);
     logger.info(`[provenance:${sk}]   Graph: ${summary.nodeCount} nodes, ${summary.edgeCount} edges`);
 
@@ -143,8 +169,7 @@ export function registerSecurityHooks(
       const allowedTools = currentTools.filter((t: any) => !toolRemovals.has(t.name));
       // Record policy decisions
       for (const toolName of toolRemovals) {
-        const matchingPolicy = evaluations.find(e => e.matched && (e.action?.removeTools?.includes(toolName) || e.action?.blockTools?.includes(toolName)));
-        graph.recordBlockedTool(toolName, matchingPolicy?.policy.name ?? "policy", event.iteration ?? 0);
+        graph.recordBlockedTool(toolName, "policy", event.iteration ?? 0);
       }
       return { tools: allowedTools };
     }
@@ -223,5 +248,20 @@ export function registerSecurityHooks(
     return undefined;
   });
 
-  return { store };
+  // --- before_agent_start ---
+  // Inject approval instructions into the system prompt when tools are pending confirmation
+  api.registerHook("before_agent_start", (_event: any, ctx: AgentContext) => {
+    const sessionKey = ctx.sessionKey ?? "unknown";
+    const pending = approvalStore.getPending(sessionKey);
+    if (pending.length > 0) {
+      const toolList = pending.map(p => p.toolName).join(", ");
+      const reasons = [...new Set(pending.map(p => p.reason))].join("; ");
+      return {
+        prependContext: `⚠️ SECURITY NOTICE: The following tools are restricted pending user approval: ${toolList}\nTo approve, the user can say: !approve <tool> or !approve all\nRestricted due to: ${reasons}`,
+      };
+    }
+    return undefined;
+  });
+
+  return { store, approvalStore };
 }
