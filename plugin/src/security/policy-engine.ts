@@ -21,8 +21,8 @@ import type { TurnProvenanceGraph } from "./provenance-graph.js";
 export type { TaintPolicyConfig };
 
 /** Policy modes in order of strictness */
-export type PolicyMode = "allow" | "confirm" | "restrict" | "deny";
-const MODE_ORDER: PolicyMode[] = ["allow", "confirm", "restrict", "deny"];
+export type PolicyMode = "allow" | "confirm" | "restrict";
+const MODE_ORDER: PolicyMode[] = ["allow", "confirm", "restrict"];
 
 /**
  * Per-tool override: maps taint levels (or "*") to a policy mode.
@@ -136,13 +136,6 @@ export function evaluatePolicy(
     maxIterationsExceeded: false,
   };
 
-  // Check deny mode (blocks entire turn)
-  if (defaultMode === "deny") {
-    result.blockTurn = true;
-    result.blockReason = `Turn blocked: taint level "${taintLevel}" is set to deny`;
-    return result;
-  }
-
   // Check max iterations
   if (graph.iterationCount >= config.maxIterations) {
     result.blockTurn = true;
@@ -171,9 +164,6 @@ export function evaluatePolicy(
         });
         break;
       case "restrict":
-        result.restricted.push(tool);
-        break;
-      case "deny":
         result.restricted.push(tool);
         break;
     }

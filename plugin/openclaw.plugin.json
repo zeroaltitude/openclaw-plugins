@@ -20,14 +20,14 @@
       },
       "taintPolicy": {
         "type": "object",
-        "description": "Default policy mode per taint level. Modes: allow (no restrictions), confirm (block + approval codes), restrict (silently remove, no override), deny (block entire turn). Must be monotonically non-decreasing in strictness.",
+        "description": "Default policy mode per taint level. Modes: allow (no restrictions), confirm (block + approval codes), restrict (silently remove, no override), Must be monotonically non-decreasing in strictness.",
         "properties": {
-          "system": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "allow" },
-          "owner": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "allow" },
-          "local": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "allow" },
-          "shared": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "restrict" },
-          "external": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "confirm" },
-          "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "confirm" }
+          "system": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
+          "owner": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
+          "local": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
+          "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "restrict" },
+          "external": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" },
+          "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" }
         }
       },
       "toolOverrides": {
@@ -36,13 +36,13 @@
         "additionalProperties": {
           "type": "object",
           "properties": {
-            "system": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
-            "owner": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
-            "local": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
-            "shared": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
-            "external": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
-            "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
-            "*": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] }
+            "system": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "owner": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "local": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "external": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "*": { "type": "string", "enum": ["allow", "confirm", "restrict"] }
           }
         }
       },
