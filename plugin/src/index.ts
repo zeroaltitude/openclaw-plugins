@@ -17,6 +17,7 @@ interface PluginApi {
     execute: (id: string, params: any) => Promise<{ content: Array<{ type: string; text: string }> }>;
   }): void;
   registerHook(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number }): void;
+  on(hookName: string, handler: (...args: any[]) => any, opts?: { priority?: number }): void;
   pluginConfig: Record<string, unknown> | undefined;
   config: Record<string, unknown>;
   logger: { info(...args: any[]): void; warn(...args: any[]): void; error(...args: any[]): void };

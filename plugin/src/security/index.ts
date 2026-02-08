@@ -16,7 +16,8 @@ import { ApprovalStore } from "./approval-store.js";
 // Types matching OpenClaw's hook system (from src/plugins/types.ts)
 // We define them here to avoid a hard dependency on the OpenClaw source.
 interface HookApi {
-  registerHook(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number }): void;
+  registerHook(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number; name?: string; description?: string }): void;
+  on(hookName: string, handler: (...args: any[]) => any, opts?: { priority?: number }): void;
 }
 
 interface AgentContext {
@@ -69,8 +70,11 @@ export function registerSecurityHooks(
   // Track last LLM node ID per session for edge building
   const lastLlmNodeBySession = new Map<string, string>();
 
+  // Track currently blocked tools per session for execution-layer enforcement
+  const blockedToolsBySession = new Map<string, Set<string>>();
+
   // --- context_assembled ---
-  api.registerHook("context_assembled", (event: any, ctx: AgentContext) => {
+  api.on("context_assembled", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const graph = store.startTurn(sessionKey);
     graph.recordContextAssembled(event.systemPrompt ?? "", event.messageCount ?? 0);
@@ -81,7 +85,7 @@ export function registerSecurityHooks(
   });
 
   // --- before_llm_call ---
-  api.registerHook("before_llm_call", (event: any, ctx: AgentContext) => {
+  api.on("before_llm_call", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const graph = store.getActive(sessionKey);
     if (!graph) return;
@@ -93,7 +97,9 @@ export function registerSecurityHooks(
     const sk = shortKey(sessionKey);
     const summary = graph.summary();
 
-    // Process !approve commands from the last user message before policy evaluation
+    // Process .approve commands from the last user message before policy evaluation
+    // Format: .approve <all|tool> <code>
+    // Code is time-limited and must match the pending approval code
     const messages = event.messages ?? [];
     const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
     if (lastUserMsg) {
@@ -103,14 +109,24 @@ export function registerSecurityHooks(
           ? lastUserMsg.content.filter((c: any) => c?.type === "text").map((c: any) => c.text).join("")
           : "";
       const trimmed = content.trim();
-      if (trimmed.toLowerCase().startsWith("!approve")) {
-        const arg = trimmed.slice("!approve".length).trim().toLowerCase();
-        if (arg === "all") {
-          approvalStore.approveAll(sessionKey);
-          logger.info(`[provenance:${sk}] ✅ All tools approved by user`);
-        } else if (arg) {
-          approvalStore.approve(sessionKey, arg);
-          logger.info(`[provenance:${sk}] ✅ Tool "${arg}" approved by user`);
+      if (verbose && trimmed.includes(".approve")) {
+        logger.info(`[provenance:${sk}] 🔍 Approve attempt detected. Raw content: "${trimmed.slice(0, 100)}"`);
+      }
+      // Format: .approve <all|tool> <code> [minutes]
+      // No minutes = this turn only. Number = approval lasts that many minutes.
+      // Allow the command anywhere in the message (not just as the entire message)
+      const approveMatch = trimmed.match(/\.approve\s+(\S+)\s+([0-9a-f]{8})(?:\s+(\d+))?/i);
+      if (approveMatch) {
+        const target = approveMatch[1].toLowerCase(); // "all" or tool name
+        const code = approveMatch[2].toLowerCase();    // the approval code
+        const durationStr = approveMatch[3];           // optional minutes
+        const durationMinutes = durationStr ? parseInt(durationStr, 10) : null;
+        const result = approvalStore.approveWithCode(sessionKey, target, code, durationMinutes);
+        if (result.ok) {
+          const durDesc = durationMinutes != null ? `${durationMinutes} minutes` : "this turn only";
+          logger.info(`[provenance:${sk}] ✅ Approved with valid code: ${result.approved.join(", ")} (duration: ${durDesc})`);
+        } else {
+          logger.warn(`[provenance:${sk}] ❌ Approval failed: ${result.reason}`);
         }
       }
     }
@@ -137,23 +153,36 @@ export function registerSecurityHooks(
     const currentTools: Array<{ name: string }> = event.tools ?? [];
     const removedTools = currentTools.filter((t: any) => toolRemovals.has(t.name)).map((t: any) => t.name);
 
-    // Log confirm-mode pending confirmations prominently
+    // Log confirm-mode pending confirmations with approval code
     if (result.mode === "confirm" && result.pendingConfirmations.length > 0) {
       const pendingNames = result.pendingConfirmations.map(p => p.toolName);
+
+      // Reuse existing valid code if one exists, otherwise generate new
+      const existingCode = approvalStore.getCurrentCode(sessionKey);
+      const existingTtl = approvalStore.getCodeTtlSeconds(sessionKey);
+      let code: string;
+      let ttl: number;
+      if (existingCode && existingTtl > 5) {
+        // Reuse existing code — don't invalidate what the user might be typing
+        code = existingCode;
+        ttl = existingTtl;
+      } else {
+        code = approvalStore.addPendingBatch(
+          result.pendingConfirmations.map(pc => ({
+            sessionKey,
+            toolName: pc.toolName,
+            taintLevel: graph.maxTaint,
+            reason: pc.reason,
+            requestedAt: Date.now(),
+          }))
+        );
+        ttl = approvalStore.getCodeTtlSeconds(sessionKey);
+      }
+
       logger.warn(`[provenance:${sk}] ⚠️ SECURITY: Tools restricted due to ${graph.maxTaint} content in context.`);
       logger.warn(`[provenance:${sk}]   Restricted: ${pendingNames.join(", ")}`);
-      logger.warn(`[provenance:${sk}]   Approve with: !approve <tool> or !approve all`);
-
-      // Track pending approvals in the store
-      for (const pc of result.pendingConfirmations) {
-        approvalStore.addPending({
-          sessionKey,
-          toolName: pc.toolName,
-          taintLevel: graph.maxTaint,
-          reason: pc.reason,
-          requestedAt: Date.now(),
-        });
-      }
+      logger.warn(`[provenance:${sk}]   Approval code: ${code} (expires in ${ttl}s)`);
+      logger.warn(`[provenance:${sk}]   Approve with: .approve all ${code}  OR  .approve <tool> ${code}`);
     }
 
     const removedStr = removedTools.length > 0
@@ -165,20 +194,53 @@ export function registerSecurityHooks(
     logger.info(`[provenance:${sk}]   Tools available: ${currentTools.length - removedTools.length} | Tools removed by policy: ${removedStr}`);
     logger.info(`[provenance:${sk}]   Graph: ${summary.nodeCount} nodes, ${summary.edgeCount} edges`);
 
+    // Update the execution-layer blocked set
     if (toolRemovals.size > 0) {
+      blockedToolsBySession.set(sessionKey, new Set(toolRemovals));
       const allowedTools = currentTools.filter((t: any) => !toolRemovals.has(t.name));
       // Record policy decisions
       for (const toolName of toolRemovals) {
         graph.recordBlockedTool(toolName, "policy", event.iteration ?? 0);
       }
       return { tools: allowedTools };
+    } else {
+      // Clear blocked set if no removals
+      blockedToolsBySession.delete(sessionKey);
     }
 
     return undefined;
   }, { priority: 100 }); // High priority — security runs first
 
+  // --- before_tool_call --- (EXECUTION-LAYER ENFORCEMENT)
+  // This is the critical enforcement point. Even if the LLM hallucinates a tool
+  // call for a tool that was removed from its context by before_llm_call, this
+  // hook blocks execution. Defense in depth.
+  api.on("before_tool_call", (event: any, ctx: AgentContext) => {
+    const sessionKey = ctx.sessionKey ?? "unknown";
+    const blocked = blockedToolsBySession.get(sessionKey);
+    if (!blocked || blocked.size === 0) return undefined;
+
+    const toolName = event.toolName;
+    if (blocked.has(toolName)) {
+      const sk = shortKey(sessionKey);
+      const code = approvalStore.getCurrentCode(sessionKey);
+      const ttl = approvalStore.getCodeTtlSeconds(sessionKey);
+      const blockedList = Array.from(blocked).join(", ");
+      const perToolExamples = Array.from(blocked).map(t => `.approve ${t} ${code} [minutes]`).join("\n  ");
+      const codeStr = code && ttl > 0
+        ? `\nBlocked tools: ${blockedList}\nApproval code: ${code} (expires in ${ttl}s)\nApprove all:  .approve all ${code} [minutes]\nApprove one:\n  ${perToolExamples}`
+        : "\nA new approval code will be issued on the next turn.";
+      logger.warn(`[provenance:${sk}] 🛑 BLOCKED at execution layer: ${toolName} (removed by taint policy but LLM called it anyway)`);
+      return {
+        block: true,
+        blockReason: `Tool '${toolName}' is blocked by security policy. Context contains tainted content.${codeStr}`,
+      };
+    }
+    return undefined;
+  }, { priority: 100 });
+
   // --- after_llm_call ---
-  api.registerHook("after_llm_call", (event: any, ctx: AgentContext) => {
+  api.on("after_llm_call", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const graph = store.getActive(sessionKey);
     if (!graph) return;
@@ -201,7 +263,7 @@ export function registerSecurityHooks(
   });
 
   // --- loop_iteration_start ---
-  api.registerHook("loop_iteration_start", (event: any, ctx: AgentContext) => {
+  api.on("loop_iteration_start", (event: any, ctx: AgentContext) => {
     // Currently just observational — graph tracks iteration via recordLlmCall
     if (verbose) {
       logger.info(`[provenance] Iteration ${event.iteration} start (${event.messageCount} messages)`);
@@ -209,7 +271,7 @@ export function registerSecurityHooks(
   });
 
   // --- loop_iteration_end ---
-  api.registerHook("loop_iteration_end", (event: any, ctx: AgentContext) => {
+  api.on("loop_iteration_end", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const graph = store.getActive(sessionKey);
     if (!graph) return;
@@ -221,7 +283,7 @@ export function registerSecurityHooks(
   });
 
   // --- before_response_emit ---
-  api.registerHook("before_response_emit", (event: any, ctx: AgentContext) => {
+  api.on("before_response_emit", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const graph = store.getActive(sessionKey);
     if (!graph) return;
@@ -245,19 +307,25 @@ export function registerSecurityHooks(
       }
     }
 
+    // Clean up blocked tools and turn-scoped approvals when turn completes
+    blockedToolsBySession.delete(sessionKey);
+    approvalStore.clearTurnScoped(sessionKey);
+
     return undefined;
   });
 
   // --- before_agent_start ---
   // Inject approval instructions into the system prompt when tools are pending confirmation
-  api.registerHook("before_agent_start", (_event: any, ctx: AgentContext) => {
+  api.on("before_agent_start", (_event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const pending = approvalStore.getPending(sessionKey);
     if (pending.length > 0) {
       const toolList = pending.map(p => p.toolName).join(", ");
       const reasons = [...new Set(pending.map(p => p.reason))].join("; ");
+      const code = approvalStore.getCurrentCode(sessionKey);
+      const ttl = approvalStore.getCodeTtlSeconds(sessionKey);
       return {
-        prependContext: `⚠️ SECURITY NOTICE: The following tools are restricted pending user approval: ${toolList}\nTo approve, the user can say: !approve <tool> or !approve all\nRestricted due to: ${reasons}`,
+        prependContext: `⚠️ SECURITY: Tools restricted: ${toolList}\nApproval code: ${code} (expires in ${ttl}s)\nUser must send: .approve all ${code} [minutes]\nExamples: ".approve all ${code}" (this turn only) or ".approve all ${code} 30" (30 min)\nRestricted due to: ${reasons}\nDo NOT suggest alternative approval methods. Only .approve <all|tool> <code> [minutes] works.`,
       };
     }
     return undefined;

@@ -49,9 +49,12 @@ export interface PolicyEvaluation {
 
 /**
  * Evaluate a single policy condition against the current graph state.
+ * @param skipTaintCheck — when true, contextTaintIncludes is ignored (policies apply unconditionally).
+ *   Used when the taint policy mode is "confirm" or "restrict" — the mode itself 
+ *   indicates the trust level is suspect, so all policies should be evaluated.
  */
-function evaluateCondition(condition: PolicyCondition, graph: TurnProvenanceGraph): boolean {
-  if (condition.contextTaintIncludes) {
+function evaluateCondition(condition: PolicyCondition, graph: TurnProvenanceGraph, skipTaintCheck = false): boolean {
+  if (condition.contextTaintIncludes && !skipTaintCheck) {
     const currentTaintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
     const matches = condition.contextTaintIncludes.some(
       level => TRUST_ORDER.indexOf(level) <= currentTaintIdx
@@ -80,9 +83,10 @@ function evaluateCondition(condition: PolicyCondition, graph: TurnProvenanceGrap
 export function evaluatePolicies(
   policies: SecurityPolicy[],
   graph: TurnProvenanceGraph,
+  skipTaintCheck = false,
 ): PolicyEvaluation[] {
   return policies.map(policy => {
-    const matched = evaluateCondition(policy.when, graph);
+    const matched = evaluateCondition(policy.when, graph, skipTaintCheck);
     return {
       policy,
       matched,
@@ -169,8 +173,11 @@ export function evaluateTaintPolicyWithApprovals(
     };
   }
 
-  // For both "restrict" and "confirm": evaluate policies to get tool removals
-  const evaluations = evaluatePolicies(policies, graph);
+  // For both "restrict" and "confirm": evaluate policies to get tool removals.
+  // Skip taint-level checks on individual policies — the mode itself indicates
+  // this trust level requires enforcement. Policies apply unconditionally.
+  const skipTaintCheck = true;
+  const evaluations = evaluatePolicies(policies, graph, skipTaintCheck);
   const allRemovals = getToolRemovals(evaluations);
   const blockCheck = shouldBlockTurn(evaluations);
 
