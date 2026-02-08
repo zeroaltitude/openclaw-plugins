@@ -265,8 +265,8 @@ export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
  * taint-level default at certain levels.
  */
 export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {
-  // Gateway config must be restricted even at local level (prevents policy circumvention)
-  "gateway":  { "local": "restrict", "shared": "restrict", "external": "restrict", "untrusted": "restrict" },
+  // Gateway config requires approval even at local level (prevents policy circumvention)
+  "gateway":  { "local": "confirm", "shared": "confirm", "external": "confirm", "untrusted": "confirm" },
 };
 
 /**
