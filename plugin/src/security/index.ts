@@ -7,14 +7,12 @@
 
 import { ProvenanceStore } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
-import { evaluatePolicies, getToolRemovals, shouldBlockTurn, evaluateTaintPolicy, evaluateTaintPolicyWithApprovals, DEFAULT_POLICIES, type SecurityPolicy } from "./policy-engine.js";
+import { buildPolicyConfig, evaluateWithApprovals, type PolicyMode, type ToolOverride } from "./policy-engine.js";
 import { getToolTrust } from "./trust-levels.js";
 import type { TrustLevel, TaintPolicyConfig } from "./trust-levels.js";
-import { DEFAULT_TAINT_POLICY } from "./trust-levels.js";
 import { ApprovalStore } from "./approval-store.js";
 
 // Types matching OpenClaw's hook system (from src/plugins/types.ts)
-// We define them here to avoid a hard dependency on the OpenClaw source.
 interface HookApi {
   registerHook(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number; name?: string; description?: string }): void;
   on(hookName: string, handler: (...args: any[]) => any, opts?: { priority?: number }): void;
@@ -28,18 +26,16 @@ interface AgentContext {
 }
 
 export interface SecurityPluginConfig {
-  /** Custom policies (merged with defaults) */
-  policies?: SecurityPolicy[];
+  /** Per-tool overrides: { "gateway": { "local": "restrict" }, "read": { "*": "allow" } } */
+  toolOverrides?: Record<string, ToolOverride>;
   /** Override default tool trust classifications */
   toolTrustOverrides?: Record<string, TrustLevel>;
   /** Max completed graphs to keep in memory */
   maxCompletedGraphs?: number;
   /** Whether to log policy evaluations */
   verbose?: boolean;
-  /** Per-trust-level policy modes */
-  taintPolicy?: TaintPolicyConfig;
-  /** Discord channel/DM ID to send confirmation requests to */
-  notifyTarget?: string;
+  /** Per-trust-level default policy modes */
+  taintPolicy?: Partial<Record<TrustLevel, PolicyMode>>;
   /** Approval code TTL in seconds (default: 60) */
   approvalTtlSeconds?: number;
   /** Max agent loop iterations before blocking (default: 10) */
@@ -48,7 +44,6 @@ export interface SecurityPluginConfig {
 
 /** Get a short session key for log prefixes */
 function shortKey(sessionKey: string): string {
-  // Use last 8 chars, or the label portion if it contains a colon
   const parts = sessionKey.split(":");
   if (parts.length > 1) return parts[parts.length - 1].slice(0, 16);
   return sessionKey.slice(-8);
@@ -56,7 +51,6 @@ function shortKey(sessionKey: string): string {
 
 /**
  * Register the security/provenance hooks.
- * Call this from the main plugin setup function with the plugin API.
  */
 export function registerSecurityHooks(
   api: HookApi,
@@ -66,17 +60,21 @@ export function registerSecurityHooks(
   const store = new ProvenanceStore(config?.maxCompletedGraphs ?? 100);
   const approvalTtlMs = (config?.approvalTtlSeconds ?? 60) * 1000;
   const approvalStore = new ApprovalStore(approvalTtlMs);
-  const maxIterations = config?.maxIterations ?? 10;
-  const basePolicies = DEFAULT_POLICIES.map(p => 
-    p.name === "max-recursion" 
-      ? { ...p, when: { ...p.when, iterationGte: maxIterations } }
-      : p
-  );
-  const policies = [...basePolicies, ...(config?.policies ?? [])];
   const toolTrustOverrides = config?.toolTrustOverrides;
   const verbose = config?.verbose ?? false;
-  const taintPolicyConfig = config?.taintPolicy;
-  const fullTaintConfig = { ...DEFAULT_TAINT_POLICY, ...taintPolicyConfig };
+
+  // Build the unified policy config
+  const policyConfig = buildPolicyConfig(
+    config?.taintPolicy as any,
+    config?.toolOverrides,
+    config?.maxIterations,
+  );
+
+  // Log policy config at startup
+  logger.info(`[provenance] Policy config loaded:`);
+  logger.info(`[provenance]   Taint policy: ${JSON.stringify(policyConfig.taintPolicy)}`);
+  logger.info(`[provenance]   Tool overrides: ${Object.keys(policyConfig.toolOverrides).length} tools configured`);
+  logger.info(`[provenance]   Max iterations: ${policyConfig.maxIterations}`);
 
   // Track last LLM node ID per session for edge building
   const lastLlmNodeBySession = new Map<string, string>();
@@ -106,11 +104,8 @@ export function registerSecurityHooks(
     lastLlmNodeBySession.set(sessionKey, llmNodeId);
 
     const sk = shortKey(sessionKey);
-    const summary = graph.summary();
 
-    // Process .approve commands from the last user message before policy evaluation
-    // Format: .approve <all|tool> <code>
-    // Code is time-limited and must match the pending approval code
+    // Process .approve commands from the last user message
     const messages = event.messages ?? [];
     const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
     if (lastUserMsg) {
@@ -123,14 +118,11 @@ export function registerSecurityHooks(
       if (verbose && trimmed.includes(".approve")) {
         logger.info(`[provenance:${sk}] 🔍 Approve attempt detected. Raw content: "${trimmed.slice(0, 100)}"`);
       }
-      // Format: .approve <all|tool> <code> [minutes]
-      // No minutes = this turn only. Number = approval lasts that many minutes.
-      // Allow the command anywhere in the message (not just as the entire message)
       const approveMatch = trimmed.match(/\.approve\s+(\S+)\s+([0-9a-f]{8})(?:\s+(\d+))?/i);
       if (approveMatch) {
-        const target = approveMatch[1].toLowerCase(); // "all" or tool name
-        const code = approveMatch[2].toLowerCase();    // the approval code
-        const durationStr = approveMatch[3];           // optional minutes
+        const target = approveMatch[1].toLowerCase();
+        const code = approveMatch[2].toLowerCase();
+        const durationStr = approveMatch[3];
         const durationMinutes = durationStr ? parseInt(durationStr, 10) : null;
         const result = approvalStore.approveWithCode(sessionKey, target, code, durationMinutes);
         if (result.ok) {
@@ -142,42 +134,33 @@ export function registerSecurityHooks(
       }
     }
 
-    // Use the unified policy evaluator that handles all modes including "confirm"
-    const currentToolNames = (event.tools ?? []).map((t: any) => t.name);
-    const result = evaluateTaintPolicyWithApprovals(graph, fullTaintConfig, policies, approvalStore, sessionKey, currentToolNames);
+    // Evaluate policy
+    const currentTools: Array<{ name: string }> = event.tools ?? [];
+    const currentToolNames = currentTools.map((t: any) => t.name);
+    const result = evaluateWithApprovals(graph, currentToolNames, policyConfig, approvalStore, sessionKey);
 
     if (result.mode === "allow") {
       logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
-      logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint} (policy: allow — skipping restrictions)`);
-      logger.info(`[provenance:${sk}]   Tools available: ${event.tools?.length ?? 0} | Tools removed by policy: (none)`);
-      logger.info(`[provenance:${sk}]   Graph: ${summary.nodeCount} nodes, ${summary.edgeCount} edges`);
+      logger.info(`[provenance:${sk}]   Taint: ${graph.maxTaint} | Mode: allow | Tools: ${currentToolNames.length}`);
       return undefined;
     }
 
     if (result.block) {
       logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
-      logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint} (policy: ${result.mode} — BLOCKED)`);
       logger.warn(`[provenance:${sk}]   Turn BLOCKED: ${result.blockReason}`);
       return { block: true, blockReason: result.blockReason };
     }
 
-    const toolRemovals = result.toolRemovals;
-    const currentTools: Array<{ name: string }> = event.tools ?? [];
-    // Case-insensitive matching: policies may use "Write" but OpenClaw tools use "write"
-    const toolRemovalsLower = new Set(Array.from(toolRemovals).map(t => t.toLowerCase()));
-    const removedTools = currentTools.filter((t: any) => toolRemovalsLower.has(t.name.toLowerCase())).map((t: any) => t.name);
-
     // Log confirm-mode pending confirmations with approval code
-    if (result.mode === "confirm" && result.pendingConfirmations.length > 0) {
+    if (result.pendingConfirmations.length > 0) {
       const pendingNames = result.pendingConfirmations.map(p => p.toolName);
 
-      // Reuse existing valid code if one exists, otherwise generate new
+      // Reuse existing valid code if one exists
       const existingCode = approvalStore.getCurrentCode(sessionKey);
       const existingTtl = approvalStore.getCodeTtlSeconds(sessionKey);
       let code: string;
       let ttl: number;
       if (existingCode && existingTtl > 5) {
-        // Reuse existing code — don't invalidate what the user might be typing
         code = existingCode;
         ttl = existingTtl;
       } else {
@@ -199,44 +182,39 @@ export function registerSecurityHooks(
       logger.warn(`[provenance:${sk}]   Approve with: .approve all ${code}  OR  .approve <tool> ${code}`);
     }
 
-    const removedStr = removedTools.length > 0
-      ? removedTools.join(", ")
-      : "(none)";
+    const removedTools = Array.from(result.toolRemovals);
+    const removedStr = removedTools.length > 0 ? removedTools.join(", ") : "(none)";
 
     logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
-    logger.info(`[provenance:${sk}]   Accumulated taint: ${graph.maxTaint} (policy: ${result.mode})`);
-    logger.info(`[provenance:${sk}]   Tools available: ${currentTools.length - removedTools.length} | Tools removed by policy: ${removedStr}`);
-    logger.info(`[provenance:${sk}]   Graph: ${summary.nodeCount} nodes, ${summary.edgeCount} edges`);
+    logger.info(`[provenance:${sk}]   Taint: ${graph.maxTaint} | Mode: ${result.mode} | Tools: ${currentToolNames.length - removedTools.length}/${currentToolNames.length} | Removed: ${removedStr}`);
 
-    // Update the execution-layer blocked set
-    if (toolRemovals.size > 0) {
-      blockedToolsBySession.set(sessionKey, new Set(toolRemovals));
-      const allowedTools = currentTools.filter((t: any) => !toolRemovalsLower.has(t.name.toLowerCase()));
-      // Record policy decisions
-      for (const toolName of toolRemovals) {
+    // Update the execution-layer blocked set and filter tools
+    if (result.toolRemovals.size > 0) {
+      blockedToolsBySession.set(sessionKey, new Set(result.toolRemovals));
+
+      // Case-insensitive filtering
+      const removalsLower = new Set(Array.from(result.toolRemovals).map(t => t.toLowerCase()));
+      const allowedTools = currentTools.filter((t: any) => !removalsLower.has(t.name.toLowerCase()));
+
+      // Record policy decisions in graph
+      for (const toolName of result.toolRemovals) {
         graph.recordBlockedTool(toolName, "policy", event.iteration ?? 0);
       }
       return { tools: allowedTools };
     } else {
-      // Clear blocked set if no removals
       blockedToolsBySession.delete(sessionKey);
     }
 
     return undefined;
-  }, { priority: 100 }); // High priority — security runs first
+  }, { priority: 100 });
 
   // --- before_tool_call --- (EXECUTION-LAYER ENFORCEMENT)
-  // This is the critical enforcement point. Even if the LLM hallucinates a tool
-  // call for a tool that was removed from its context by before_llm_call, this
-  // hook blocks execution. Defense in depth.
   api.on("before_tool_call", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const blocked = blockedToolsBySession.get(sessionKey);
     if (!blocked || blocked.size === 0) return undefined;
 
     const toolName = event.toolName;
-    // Case-insensitive check: OpenClaw may send lowercase tool names
-    // while policies use capitalized names (e.g., "Write" vs "write")
     const toolNameLower = toolName.toLowerCase();
     const isBlocked = Array.from(blocked).some(b => b.toLowerCase() === toolNameLower);
     if (isBlocked) {
@@ -248,7 +226,7 @@ export function registerSecurityHooks(
       const codeStr = code && ttl > 0
         ? `\nBlocked tools: ${blockedList}\nApproval code: ${code} (expires in ${ttl}s)\nApprove all:  .approve all ${code} [minutes]\nApprove one:\n  ${perToolExamples}`
         : "\nA new approval code will be issued on the next turn.";
-      logger.warn(`[provenance:${sk}] 🛑 BLOCKED at execution layer: ${toolName} (removed by taint policy but LLM called it anyway)`);
+      logger.warn(`[provenance:${sk}] 🛑 BLOCKED at execution layer: ${toolName}`);
       return {
         block: true,
         blockReason: `Tool '${toolName}' is blocked by security policy. Context contains tainted content.${codeStr}`,
@@ -282,7 +260,6 @@ export function registerSecurityHooks(
 
   // --- loop_iteration_start ---
   api.on("loop_iteration_start", (event: any, ctx: AgentContext) => {
-    // Currently just observational — graph tracks iteration via recordLlmCall
     if (verbose) {
       logger.info(`[provenance] Iteration ${event.iteration} start (${event.messageCount} messages)`);
     }
@@ -307,46 +284,25 @@ export function registerSecurityHooks(
     if (!graph) return;
 
     graph.recordOutput(event.content?.length ?? 0);
-    const summary = store.completeTurn(sessionKey);
-    
-    if (summary) {
-      const sk = shortKey(sessionKey);
-      logger.info(`[provenance:${sk}] ── Turn Complete ──`);
-      logger.info(`[provenance:${sk}]   Final taint: ${summary.maxTaint}`);
-      logger.info(`[provenance:${sk}]   External sources: ${summary.externalSources.length > 0 ? summary.externalSources.join(", ") : "(none)"}`);
-      logger.info(`[provenance:${sk}]   Tools used: ${summary.toolsUsed.length > 0 ? summary.toolsUsed.join(", ") : "(none)"}`);
-      logger.info(`[provenance:${sk}]   Tools blocked: ${summary.toolsBlocked.length > 0 ? summary.toolsBlocked.join(", ") : "(none)"}`);
-      logger.info(`[provenance:${sk}]   Iterations: ${summary.iterationCount} | Nodes: ${summary.nodeCount} | Edges: ${summary.edgeCount}`);
-      // Full graph dump — get from completed graphs
-      const completed = store.getCompleted(1);
-      const lastGraph = completed[completed.length - 1];
-      if (lastGraph) {
-        logger.info(`[provenance:${sk}]   Graph: ${JSON.stringify(lastGraph.toJSON())}`);
-      }
-    }
 
-    // Clean up blocked tools and turn-scoped approvals when turn completes
-    blockedToolsBySession.delete(sessionKey);
+    // Clear turn-scoped approvals
     approvalStore.clearTurnScoped(sessionKey);
 
-    return undefined;
-  });
+    // Seal the graph
+    const summary = store.completeTurn(sessionKey);
+    if (!summary) return;
 
-  // --- before_agent_start ---
-  // Inject approval instructions into the system prompt when tools are pending confirmation
-  api.on("before_agent_start", (_event: any, ctx: AgentContext) => {
-    const sessionKey = ctx.sessionKey ?? "unknown";
-    const pending = approvalStore.getPending(sessionKey);
-    if (pending.length > 0) {
-      const toolList = pending.map(p => p.toolName).join(", ");
-      const reasons = [...new Set(pending.map(p => p.reason))].join("; ");
-      const code = approvalStore.getCurrentCode(sessionKey);
-      const ttl = approvalStore.getCodeTtlSeconds(sessionKey);
-      return {
-        prependContext: `⚠️ SECURITY: Tools restricted: ${toolList}\nApproval code: ${code} (expires in ${ttl}s)\nUser must send: .approve all ${code} [minutes]\nExamples: ".approve all ${code}" (this turn only) or ".approve all ${code} 30" (30 min)\nRestricted due to: ${reasons}\nDo NOT suggest alternative approval methods. Only .approve <all|tool> <code> [minutes] works.`,
-      };
-    }
-    return undefined;
+    const sk = shortKey(sessionKey);
+
+    logger.info(`[provenance:${sk}] ── Turn Complete ──`);
+    logger.info(`[provenance:${sk}]   Final taint: ${summary.maxTaint}`);
+    logger.info(`[provenance:${sk}]   External sources: ${summary.externalSources.length > 0 ? summary.externalSources.join(", ") : "(none)"}`);
+    logger.info(`[provenance:${sk}]   Tools used: ${summary.toolsUsed.length > 0 ? summary.toolsUsed.join(", ") : "(none)"}`);
+    logger.info(`[provenance:${sk}]   Tools blocked: ${summary.toolsBlocked.length > 0 ? summary.toolsBlocked.join(", ") : "(none)"}`);
+    logger.info(`[provenance:${sk}]   Iterations: ${summary.iterationCount} | Nodes: ${summary.nodeCount} | Edges: ${summary.edgeCount}`);
+
+    // Clear blocked tools for this session
+    blockedToolsBySession.delete(sessionKey);
   });
 
   return { store, approvalStore };

@@ -1,412 +1,323 @@
 /**
- * Declarative security policy engine.
- * Evaluates policies against the current provenance graph state.
+ * Security Policy Engine — Simplified Model
+ * 
+ * The policy model is:
+ *   1. Determine taint level from provenance graph (e.g., "untrusted")
+ *   2. Look up default mode for that taint level (e.g., "confirm")
+ *   3. For each tool, check toolOverrides for a stricter mode
+ *   4. Apply: allow = pass, confirm = prompt with code, restrict = silently remove, deny = block turn
+ * 
+ * Overrides can only make things STRICTER, never more permissive.
+ * Monotonicity is enforced: stricter taint levels must have equal or stricter modes.
  */
 
-import type { TrustLevel, TaintPolicyMode } from "./trust-levels.js";
+import type { TrustLevel } from "./trust-levels.js";
 import { TRUST_ORDER, DEFAULT_TAINT_POLICY } from "./trust-levels.js";
 import type { TaintPolicyConfig } from "./trust-levels.js";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
 
-export interface SecurityPolicy {
-  name: string;
-  /** Policy is evaluated when this condition is true */
-  when: PolicyCondition;
-  /** Action to take when condition is met */
-  action: PolicyAction;
+// Re-export for backward compat
+export type { TaintPolicyConfig };
+
+/** Policy modes in order of strictness */
+export type PolicyMode = "allow" | "confirm" | "restrict" | "deny";
+const MODE_ORDER: PolicyMode[] = ["allow", "confirm", "restrict", "deny"];
+
+/**
+ * Per-tool override: maps taint levels (or "*") to a policy mode.
+ * Can only make things stricter than the taint-level default.
+ */
+export type ToolOverride = Partial<Record<TrustLevel | "*", PolicyMode>>;
+
+export interface PolicyConfig {
+  /** Default mode per taint level */
+  taintPolicy: Record<TrustLevel, PolicyMode>;
+  /** Per-tool overrides (key = lowercase tool name) */
+  toolOverrides: Record<string, ToolOverride>;
+  /** Max iterations before blocking turn (default: 10) */
+  maxIterations: number;
 }
 
-export interface PolicyCondition {
-  /** Taint level includes any of these trust levels */
-  contextTaintIncludes?: TrustLevel[];
-  /** Iteration count >= this value */
-  iterationGte?: number;
-  /** Specific tools were used */
-  toolsUsed?: string[];
+/** Return the stricter of two modes */
+export function strictest(a: PolicyMode, b: PolicyMode): PolicyMode {
+  return MODE_ORDER.indexOf(a) >= MODE_ORDER.indexOf(b) ? a : b;
 }
 
-export interface PolicyAction {
-  /** Remove these tools from the available set. Use ["*"] for catch-all (everything not in allowTools). */
-  removeTools?: string[];
-  /** Explicitly allow these tools (exempt from glob "*" removal) */
-  allowTools?: string[];
-  /** Block these tools entirely */
-  blockTools?: string[];
-  /** Block the entire turn */
-  blockTurn?: boolean;
-  /** Reason for the action */
-  reason?: string;
-  /** Log the full context */
-  logFullContext?: boolean;
-  /** Persist the provenance graph */
-  persistGraph?: boolean;
-}
-
-export interface PolicyEvaluation {
-  policy: SecurityPolicy;
-  matched: boolean;
-  action?: PolicyAction;
+/** Return the more permissive of two modes */
+function mostPermissive(a: PolicyMode, b: PolicyMode): PolicyMode {
+  return MODE_ORDER.indexOf(a) <= MODE_ORDER.indexOf(b) ? a : b;
 }
 
 /**
- * Evaluate a single policy condition against the current graph state.
- * @param skipTaintCheck — when true, contextTaintIncludes is ignored (policies apply unconditionally).
- *   Used when the taint policy mode is "confirm" or "restrict" — the mode itself 
- *   indicates the trust level is suspect, so all policies should be evaluated.
+ * Validate and fix monotonicity: stricter taint levels must have equal or stricter modes.
+ * Returns the corrected config and any warnings.
  */
-function evaluateCondition(condition: PolicyCondition, graph: TurnProvenanceGraph, skipTaintCheck = false): boolean {
-  if (condition.contextTaintIncludes && !skipTaintCheck) {
-    const currentTaintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
-    const matches = condition.contextTaintIncludes.some(
-      level => TRUST_ORDER.indexOf(level) <= currentTaintIdx
-    );
-    // The condition means: "is the context tainted at this level or worse?"
-    // We match if the current taint is at or below any specified level
-    if (!matches) return false;
+export function validateMonotonicity(
+  taintPolicy: Record<TrustLevel, PolicyMode>,
+): { corrected: Record<TrustLevel, PolicyMode>; warnings: string[] } {
+  const corrected = { ...taintPolicy };
+  const warnings: string[] = [];
+
+  // Walk from most trusted to least trusted
+  // Each level must be >= the previous level in strictness
+  let prevMode: PolicyMode = "allow";
+  for (const level of TRUST_ORDER) {
+    const current = corrected[level];
+    if (MODE_ORDER.indexOf(current) < MODE_ORDER.indexOf(prevMode)) {
+      warnings.push(
+        `taintPolicy.${level} (${current}) is less strict than a more-trusted level (${prevMode}). Auto-corrected to ${prevMode}.`
+      );
+      corrected[level] = prevMode;
+    }
+    prevMode = corrected[level];
   }
 
-  if (condition.iterationGte !== undefined) {
-    if (graph.iterationCount < condition.iterationGte) return false;
-  }
-
-  if (condition.toolsUsed) {
-    const summary = graph.summary();
-    const hasAll = condition.toolsUsed.every(t => summary.toolsUsed.includes(t));
-    if (!hasAll) return false;
-  }
-
-  return true;
+  return { corrected, warnings };
 }
 
 /**
- * Evaluate all policies and return matching actions.
+ * Get the effective policy mode for a specific tool at a specific taint level.
  */
-export function evaluatePolicies(
-  policies: SecurityPolicy[],
+export function getToolMode(
+  toolName: string,
+  taintLevel: TrustLevel,
+  config: PolicyConfig,
+): PolicyMode {
+  const defaultMode = config.taintPolicy[taintLevel] ?? "restrict";
+  const override = config.toolOverrides[toolName.toLowerCase()];
+  if (!override) return defaultMode;
+
+  // Check specific taint level, then glob "*"
+  const overrideMode = override[taintLevel] ?? override["*"];
+  if (!overrideMode) return defaultMode;
+
+  // Override can only be stricter than default
+  return strictest(defaultMode, overrideMode);
+}
+
+/**
+ * Evaluate all tools and return categorized results.
+ */
+export interface PolicyResult {
+  /** The taint level that triggered evaluation */
+  taintLevel: TrustLevel;
+  /** The default mode for this taint level */
+  defaultMode: PolicyMode;
+  /** Tools that are allowed (no restriction) */
+  allowed: string[];
+  /** Tools that need confirmation (approval code) */
+  confirm: Array<{ tool: string; reason: string }>;
+  /** Tools that are silently restricted (no override possible) */
+  restricted: string[];
+  /** Whether the entire turn should be blocked */
+  blockTurn: boolean;
+  /** Block reason if applicable */
+  blockReason?: string;
+  /** Whether max iterations was exceeded */
+  maxIterationsExceeded: boolean;
+}
+
+export function evaluatePolicy(
   graph: TurnProvenanceGraph,
-  skipTaintCheck = false,
-): PolicyEvaluation[] {
-  return policies.map(policy => {
-    const matched = evaluateCondition(policy.when, graph, skipTaintCheck);
-    return {
-      policy,
-      matched,
-      action: matched ? policy.action : undefined,
-    };
-  });
+  availableTools: string[],
+  config: PolicyConfig,
+): PolicyResult {
+  const taintLevel = graph.maxTaint;
+  const defaultMode = config.taintPolicy[taintLevel] ?? "restrict";
+
+  const result: PolicyResult = {
+    taintLevel,
+    defaultMode,
+    allowed: [],
+    confirm: [],
+    restricted: [],
+    blockTurn: false,
+    maxIterationsExceeded: false,
+  };
+
+  // Check deny mode (blocks entire turn)
+  if (defaultMode === "deny") {
+    result.blockTurn = true;
+    result.blockReason = `Turn blocked: taint level "${taintLevel}" is set to deny`;
+    return result;
+  }
+
+  // Check max iterations
+  if (graph.iterationCount >= config.maxIterations) {
+    result.blockTurn = true;
+    result.blockReason = `Max iterations exceeded (${config.maxIterations})`;
+    result.maxIterationsExceeded = true;
+    return result;
+  }
+
+  // If allow mode, everything passes
+  if (defaultMode === "allow") {
+    result.allowed = [...availableTools];
+    return result;
+  }
+
+  // For confirm/restrict: evaluate each tool
+  for (const tool of availableTools) {
+    const mode = getToolMode(tool, taintLevel, config);
+    switch (mode) {
+      case "allow":
+        result.allowed.push(tool);
+        break;
+      case "confirm":
+        result.confirm.push({
+          tool,
+          reason: `${tool} requires approval at taint level "${taintLevel}"`,
+        });
+        break;
+      case "restrict":
+        result.restricted.push(tool);
+        break;
+      case "deny":
+        result.restricted.push(tool);
+        break;
+    }
+  }
+
+  return result;
 }
 
 /**
- * Get the set of tools to remove based on policy evaluations.
- * @param evaluations - evaluated policies
- * @param availableTools - current tool names (needed for glob "*" expansion)
+ * Evaluate policy with approval support.
+ * Returns the final set of tools to remove after considering approvals.
  */
-export function getToolRemovals(evaluations: PolicyEvaluation[], availableTools?: string[]): Set<string> {
-  const removals = new Set<string>();
-  const allowed = new Set<string>(); // tools explicitly allowed (exempt from glob)
-
-  // First pass: collect all allowTools across matched policies
-  for (const eval_ of evaluations) {
-    if (eval_.matched && eval_.action?.allowTools) {
-      for (const tool of eval_.action.allowTools) {
-        allowed.add(tool.toLowerCase());
-      }
-    }
-  }
-
-  // Second pass: collect removals, expanding "*" glob
-  for (const eval_ of evaluations) {
-    if (eval_.matched && eval_.action) {
-      for (const tool of eval_.action.removeTools ?? []) {
-        if (tool === "*") {
-          // Glob: add all available tools not in the allowed set
-          if (availableTools) {
-            for (const t of availableTools) {
-              if (!allowed.has(t.toLowerCase())) {
-                removals.add(t);
-              }
-            }
-          }
-        } else {
-          removals.add(tool);
-        }
-      }
-      for (const tool of eval_.action.blockTools ?? []) {
-        removals.add(tool);
-      }
-    }
-  }
-
-  // Remove any explicitly allowed tools from the removal set
-  for (const tool of removals) {
-    if (allowed.has(tool.toLowerCase())) {
-      removals.delete(tool);
-    }
-  }
-
-  return removals;
-}
-
-/**
- * Check if any policy wants to block the entire turn.
- */
-export function shouldBlockTurn(evaluations: PolicyEvaluation[]): { block: boolean; reason?: string } {
-  for (const eval_ of evaluations) {
-    if (eval_.matched && eval_.action?.blockTurn) {
-      return { block: true, reason: eval_.action.reason ?? eval_.policy.name };
-    }
-  }
-  return { block: false };
-}
-
-/**
- * Evaluate the taint policy for the current graph state.
- * Returns "allow" (skip policies), "deny" (block turn), or "restrict" (normal evaluation).
- */
-export function evaluateTaintPolicy(
+export function evaluateWithApprovals(
   graph: TurnProvenanceGraph,
-  taintPolicy?: TaintPolicyConfig,
-): { mode: TaintPolicyMode; level: TrustLevel } {
-  const config = { ...DEFAULT_TAINT_POLICY, ...taintPolicy };
-  const currentTaint = graph.maxTaint;
-  const mode = config[currentTaint] ?? "restrict";
-  return { mode, level: currentTaint };
-}
-
-/**
- * Evaluate taint policy with approval support.
- * Returns which tools to remove after considering user approvals.
- */
-export function evaluateTaintPolicyWithApprovals(
-  graph: TurnProvenanceGraph,
-  taintConfig: Required<TaintPolicyConfig>,
-  policies: SecurityPolicy[],
+  availableTools: string[],
+  config: PolicyConfig,
   approvalStore: ApprovalStore,
   sessionKey: string,
-  availableTools?: string[],
 ): {
-  mode: TaintPolicyMode;
+  mode: PolicyMode;
   toolRemovals: Set<string>;
   pendingConfirmations: Array<{ toolName: string; reason: string }>;
   block?: boolean;
   blockReason?: string;
 } {
-  const taintLevel = graph.maxTaint;
-  const mode = taintConfig[taintLevel] ?? "restrict";
+  const result = evaluatePolicy(graph, availableTools, config);
 
-  if (mode === "allow") {
-    return { mode, toolRemovals: new Set(), pendingConfirmations: [] };
-  }
-
-  if (mode === "deny") {
+  if (result.blockTurn) {
     return {
-      mode,
+      mode: result.defaultMode,
       toolRemovals: new Set(),
       pendingConfirmations: [],
       block: true,
-      blockReason: `Turn blocked by taint policy: ${taintLevel} content is denied`,
+      blockReason: result.blockReason,
     };
   }
 
-  // For both "restrict" and "confirm": evaluate policies to get tool removals.
-  // Skip taint-level checks on individual policies — the mode itself indicates
-  // this trust level requires enforcement. Policies apply unconditionally.
-  const skipTaintCheck = true;
-  const evaluations = evaluatePolicies(policies, graph, skipTaintCheck);
-  const allRemovals = getToolRemovals(evaluations, availableTools);
-  const blockCheck = shouldBlockTurn(evaluations);
-
-  if (blockCheck.block) {
+  if (result.defaultMode === "allow") {
     return {
-      mode,
-      toolRemovals: allRemovals,
+      mode: "allow",
+      toolRemovals: new Set(),
       pendingConfirmations: [],
-      block: true,
-      blockReason: blockCheck.reason,
     };
   }
 
-  if (mode === "restrict") {
-    return { mode, toolRemovals: allRemovals, pendingConfirmations: [] };
-  }
-
-  // mode === "confirm": check approvals, separate into approved vs pending
-  const effectiveRemovals = new Set<string>();
+  const toolRemovals = new Set<string>();
   const pendingConfirmations: Array<{ toolName: string; reason: string }> = [];
 
-  for (const toolName of allRemovals) {
-    if (approvalStore.isApproved(sessionKey, toolName)) {
-      // User already approved this tool — don't remove it
+  // Restricted tools are always removed (no override)
+  for (const tool of result.restricted) {
+    toolRemovals.add(tool);
+  }
+
+  // Confirm tools: check if already approved
+  for (const { tool, reason } of result.confirm) {
+    if (approvalStore.isApproved(sessionKey, tool)) {
+      // Already approved — allow it
       continue;
-    } else {
-      // Tool is restricted and not yet approved — remove it and mark as pending
-      effectiveRemovals.add(toolName);
-      const matchingPolicy = evaluations.find(e =>
-        e.matched && (e.action?.removeTools?.includes(toolName) || e.action?.blockTools?.includes(toolName))
-      );
-      pendingConfirmations.push({
-        toolName,
-        reason: matchingPolicy?.action?.reason ?? matchingPolicy?.policy.name ?? "security policy",
-      });
+    }
+    toolRemovals.add(tool);
+    pendingConfirmations.push({ toolName: tool, reason });
+  }
+
+  return {
+    mode: result.defaultMode,
+    toolRemovals,
+    pendingConfirmations,
+  };
+}
+
+/**
+ * Default safe tools that should always be allowed regardless of taint.
+ * These are read-only tools with no side effects.
+ */
+export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
+  // Read-only filesystem
+  "read":              { "*": "allow" },
+  // Memory (read-only)  
+  "memory_search":     { "*": "allow" },
+  "memory_get":        { "*": "allow" },
+  // Web read (these ARE the taint sources — blocking them is pointless)
+  "web_fetch":         { "*": "allow" },
+  "web_search":        { "*": "allow" },
+  // Image analysis (read-only)
+  "image":             { "*": "allow" },
+  // Session introspection (read-only)
+  "session_status":    { "*": "allow" },
+  "sessions_list":     { "*": "allow" },
+  "sessions_history":  { "*": "allow" },
+  "agents_list":       { "*": "allow" },
+  // Vestige memory (search + promote/demote are read-only-ish)
+  "vestige_search":    { "*": "allow" },
+  "vestige_promote":   { "*": "allow" },
+  "vestige_demote":    { "*": "allow" },
+};
+
+/**
+ * Default dangerous tool overrides — tools that should be stricter than the
+ * taint-level default at certain levels.
+ */
+export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {
+  // Gateway config must be restricted even at local level (prevents policy circumvention)
+  "gateway":  { "local": "restrict", "shared": "restrict", "external": "restrict", "untrusted": "restrict" },
+};
+
+/**
+ * Build a complete PolicyConfig from user-provided config, merging with defaults.
+ */
+export function buildPolicyConfig(
+  taintPolicy?: Partial<Record<TrustLevel, PolicyMode>>,
+  toolOverrides?: Record<string, ToolOverride>,
+  maxIterations?: number,
+): PolicyConfig {
+  // Merge taint policy with defaults
+  const rawPolicy: Record<TrustLevel, PolicyMode> = {
+    system: "allow",
+    owner: "allow",
+    local: "allow",
+    shared: "restrict",
+    external: "confirm",
+    untrusted: "confirm",
+    ...taintPolicy,
+  };
+
+  // Validate monotonicity
+  const { corrected, warnings } = validateMonotonicity(rawPolicy);
+
+  // Merge tool overrides: defaults first, then user overrides on top
+  const mergedOverrides: Record<string, ToolOverride> = {
+    ...DEFAULT_SAFE_TOOLS,
+    ...DEFAULT_DANGEROUS_TOOLS,
+  };
+
+  // User overrides merge per-tool (user values take precedence per taint level)
+  if (toolOverrides) {
+    for (const [tool, override] of Object.entries(toolOverrides)) {
+      const key = tool.toLowerCase();
+      mergedOverrides[key] = { ...mergedOverrides[key], ...override };
     }
   }
 
-  return { mode, toolRemovals: effectiveRemovals, pendingConfirmations };
+  return {
+    taintPolicy: corrected,
+    toolOverrides: mergedOverrides,
+    maxIterations: maxIterations ?? 10,
+  };
 }
-
-/** Default security policies */
-/**
- * Default security policies for all built-in OpenClaw tools.
- * These are always present and config policies merge on top.
- * 
- * Tool categories:
- *   - Execution:  exec (shell), browser (web automation)
- *   - Messaging:  message (send to channels/DMs)
- *   - Filesystem: Write, Edit (modify files)
- *   - Config:     gateway (change runtime config, restart)
- *   - Scheduling: cron (create persistent jobs)
- *   - Network:    web_fetch, web_search (read-only, these ARE the taint sources)
- *   - Memory:     Read, memory_search, memory_get (read-only local)
- *   - Agents:     sessions_spawn, sessions_send (delegate to sub-agents)
- *   - Nodes:      nodes (control paired devices)
- * 
- * Read-only tools (Read, web_fetch, web_search, memory_*, image, session_status,
- * sessions_list, sessions_history, agents_list) are not restricted — they are
- * either the taint source itself or read-only with no side effects.
- */
-export const DEFAULT_POLICIES: SecurityPolicy[] = [
-  // --- Execution ---
-  {
-    name: "no-exec-when-external",
-    when: { contextTaintIncludes: ["external", "untrusted"] },
-    action: {
-      removeTools: ["exec"],
-      reason: "exec disabled: context contains external content",
-    },
-  },
-  {
-    name: "no-browser-when-untrusted",
-    when: { contextTaintIncludes: ["untrusted"] },
-    action: {
-      removeTools: ["browser"],
-      reason: "browser disabled: context contains untrusted content",
-    },
-  },
-
-  // --- Messaging ---
-  {
-    name: "no-message-when-untrusted",
-    when: { contextTaintIncludes: ["untrusted"] },
-    action: {
-      removeTools: ["message"],
-      reason: "messaging disabled: context contains untrusted content",
-    },
-  },
-
-  // --- Filesystem ---
-  {
-    name: "no-write-when-external",
-    when: { contextTaintIncludes: ["external", "untrusted"] },
-    action: {
-      removeTools: ["Write", "Edit"],
-      reason: "file writes disabled: context contains external content",
-    },
-  },
-
-  // --- Config ---
-  {
-    name: "no-config-change",
-    when: { contextTaintIncludes: ["local", "shared", "external", "untrusted"] },
-    action: {
-      removeTools: ["gateway"],
-      reason: "config changes disabled: prevents policy circumvention via config.patch",
-    },
-  },
-
-  // --- Scheduling ---
-  {
-    name: "no-cron-when-external",
-    when: { contextTaintIncludes: ["external", "untrusted"] },
-    action: {
-      removeTools: ["cron"],
-      reason: "cron disabled: prevents scheduling persistent backdoors via tainted context",
-    },
-  },
-
-  // --- Agent delegation ---
-  {
-    name: "no-spawn-when-untrusted",
-    when: { contextTaintIncludes: ["untrusted"] },
-    action: {
-      removeTools: ["sessions_spawn", "sessions_send"],
-      reason: "agent delegation disabled: prevents propagating untrusted content to sub-agents",
-    },
-  },
-
-  // --- Device control ---
-  {
-    name: "no-nodes-when-external",
-    when: { contextTaintIncludes: ["external", "untrusted"] },
-    action: {
-      removeTools: ["nodes"],
-      reason: "node control disabled: context contains external content",
-    },
-  },
-
-  // --- TTS (exfiltration vector) ---
-  {
-    name: "no-tts-when-untrusted",
-    when: { contextTaintIncludes: ["untrusted"] },
-    action: {
-      removeTools: ["tts"],
-      reason: "TTS disabled: prevents audio exfiltration of untrusted content",
-    },
-  },
-
-  // --- Canvas ---
-  {
-    name: "no-canvas-when-untrusted",
-    when: { contextTaintIncludes: ["untrusted"] },
-    action: {
-      removeTools: ["canvas"],
-      reason: "canvas disabled: prevents rendering untrusted content",
-    },
-  },
-
-  // --- Catch-all: block any unlisted tool ---
-  // This MUST be last. Any tool not explicitly allowed above gets blocked.
-  // The allowTools list covers read-only / safe tools that should always work.
-  {
-    name: "default-catchall",
-    when: { contextTaintIncludes: ["external", "untrusted"] },
-    action: {
-      removeTools: ["*"],
-      allowTools: [
-        // Read-only filesystem
-        "Read", "read",
-        // Memory (read-only)
-        "memory_search", "memory_get",
-        // Web read (these ARE the taint sources — blocking them is pointless)
-        "web_fetch", "web_search",
-        // Image analysis (read-only)
-        "image",
-        // Session introspection (read-only)
-        "session_status", "sessions_list", "sessions_history", "agents_list",
-        // Vestige memory (read-only search + promote/demote)
-        "vestige_search", "vestige_promote", "vestige_demote",
-      ],
-      reason: "tool blocked by catch-all: no explicit policy allows this tool with tainted context",
-    },
-  },
-
-  // --- Recursion limit ---
-  {
-    name: "max-recursion",
-    when: { iterationGte: 10 },
-    action: {
-      blockTurn: true,
-      reason: "Max recursion depth exceeded (10 iterations)",
-    },
-  },
-];

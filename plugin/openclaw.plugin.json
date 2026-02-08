@@ -1,8 +1,8 @@
 {
   "id": "vestige",
   "name": "Vestige Cognitive Memory",
-  "version": "0.1.0",
-  "description": "Shared cognitive memory for OpenClaw agents powered by Vestige — FSRS-6 spaced repetition, dual-strength memory, and prediction error gating.",
+  "version": "0.2.0",
+  "description": "Shared cognitive memory for OpenClaw agents powered by Vestige — FSRS-6 spaced repetition, dual-strength memory, and prediction error gating. Includes content provenance taint tracking and security policy enforcement.",
   "author": "BigHat Biosciences",
   "main": "dist/index.js",
   "configSchema": {
@@ -20,65 +20,30 @@
       },
       "taintPolicy": {
         "type": "object",
-        "description": "Per-trust-level policy modes: allow (no restrictions), deny (block turn), restrict (apply tool removal policies), confirm (restrict with interactive approval)",
+        "description": "Default policy mode per taint level. Modes: allow (no restrictions), confirm (block + approval codes), restrict (silently remove, no override), deny (block entire turn). Must be monotonically non-decreasing in strictness.",
         "properties": {
-          "system": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "allow" },
-          "owner": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "allow" },
-          "local": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "allow" },
-          "shared": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "restrict" },
-          "external": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "restrict" },
-          "untrusted": { "type": "string", "enum": ["allow", "deny", "restrict", "confirm"], "default": "restrict" }
+          "system": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "allow" },
+          "owner": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "allow" },
+          "local": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "allow" },
+          "shared": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "restrict" },
+          "external": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "confirm" },
+          "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"], "default": "confirm" }
         }
       },
-      "policies": {
-        "type": "array",
-        "description": "Custom security policies. Merged with defaults (no-exec-when-external, no-send-when-untrusted, max-recursion). Each policy has a name, condition (when), and action.",
-        "items": {
+      "toolOverrides": {
+        "type": "object",
+        "description": "Per-tool policy overrides. Key = tool name (lowercase). Value = object mapping taint levels (or '*') to modes. Overrides can only make things STRICTER than the taint-level default. Example: { \"gateway\": { \"local\": \"restrict\" }, \"read\": { \"*\": \"allow\" } }",
+        "additionalProperties": {
           "type": "object",
           "properties": {
-            "name": { "type": "string", "description": "Policy name for logging" },
-            "when": {
-              "type": "object",
-              "description": "Condition that triggers this policy",
-              "properties": {
-                "contextTaintIncludes": {
-                  "type": "array",
-                  "items": { "type": "string", "enum": ["system", "owner", "local", "shared", "external", "untrusted"] },
-                  "description": "Policy triggers if context taint includes any of these levels. Ignored when taint policy mode is confirm/restrict."
-                },
-                "iterationGte": { "type": "number", "description": "Policy triggers if iteration count >= this value" },
-                "toolsUsed": {
-                  "type": "array",
-                  "items": { "type": "string" },
-                  "description": "Policy triggers if all of these tools have been used in the turn"
-                }
-              }
-            },
-            "action": {
-              "type": "object",
-              "description": "What to do when the policy matches",
-              "properties": {
-                "removeTools": {
-                  "type": "array",
-                  "items": { "type": "string" },
-                  "description": "Remove these tools from the available set. Use [\"*\"] for catch-all."
-                },
-                "allowTools": {
-                  "type": "array",
-                  "items": { "type": "string" },
-                  "description": "Explicitly allow these tools (exempt from glob * removal)"
-                },
-                "blockTools": {
-                  "type": "array",
-                  "items": { "type": "string" },
-                  "description": "Block these tools entirely"
-                },
-                "blockTurn": { "type": "boolean", "description": "Block the entire turn" },
-                "reason": { "type": "string", "description": "Human-readable reason for the action" }
-              }
-            }
-          },
-          "required": ["name", "when", "action"]
+            "system": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
+            "owner": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
+            "local": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
+            "shared": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
+            "external": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
+            "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] },
+            "*": { "type": "string", "enum": ["allow", "confirm", "restrict", "deny"] }
+          }
         }
       },
       "approvalTtlSeconds": {
