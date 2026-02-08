@@ -96,9 +96,8 @@ function textResult(text: string) {
 }
 
 // ── Plugin entry point ───────────────────────────────────────────────────────
-// Uses module.exports for CJS compatibility (tsconfig targets CommonJS)
-
-module.exports = function (api: PluginApi) {
+// Named export for OpenClaw plugin loader (expects `register` or `activate`)
+export function register(api: PluginApi) {
   // ── vestige_search ─────────────────────────────────────────────────────
   api.registerTool({
     name: "vestige_search",
@@ -177,11 +176,13 @@ module.exports = function (api: PluginApi) {
   });
 
   // Register security/provenance hooks
+  const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
   registerSecurityHooks(
     api,
     api.logger,
     {
-      verbose: true, // TODO: make configurable
+      verbose: true,
+      taintPolicy: (cfg.taintPolicy as any) ?? undefined,
     },
   );
 };
