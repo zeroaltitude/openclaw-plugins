@@ -11,8 +11,8 @@
 
 import { randomBytes } from "crypto";
 
-/** How long an approval code is valid (ms) */
-const APPROVAL_TTL_MS = 60_000; // 60 seconds
+/** Default approval code TTL (ms) */
+const DEFAULT_APPROVAL_TTL_MS = 60_000; // 60 seconds
 
 /** Length of the hex approval code */
 const CODE_LENGTH = 4; // 4 bytes = 8 hex chars
@@ -36,6 +36,12 @@ export interface ActiveApproval {
 }
 
 export class ApprovalStore {
+  private readonly ttlMs: number;
+
+  constructor(ttlMs?: number) {
+    this.ttlMs = ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
+  }
+
   /** Map<sessionKey, ActiveApproval[]> — approved tools per session */
   private approvals: Map<string, ActiveApproval[]> = new Map();
 
@@ -169,7 +175,7 @@ export class ApprovalStore {
     
     const code = this.generateCode();
     const now = Date.now();
-    const expiresAt = now + APPROVAL_TTL_MS;
+    const expiresAt = now + this.ttlMs;
 
     for (const item of items) {
       let list = this.pending.get(item.sessionKey);

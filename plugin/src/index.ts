@@ -184,6 +184,8 @@ export function register(api: PluginApi) {
     {
       verbose: true,
       taintPolicy: (cfg.taintPolicy as any) ?? undefined,
+      policies: (cfg.policies as any[]) ?? undefined,
+      approvalTtlSeconds: (cfg.approvalTtlSeconds as number) ?? undefined,
     },
   );
 };

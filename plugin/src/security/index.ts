@@ -40,6 +40,8 @@ export interface SecurityPluginConfig {
   taintPolicy?: TaintPolicyConfig;
   /** Discord channel/DM ID to send confirmation requests to */
   notifyTarget?: string;
+  /** Approval code TTL in seconds (default: 60) */
+  approvalTtlSeconds?: number;
 }
 
 /** Get a short session key for log prefixes */
@@ -60,7 +62,8 @@ export function registerSecurityHooks(
   config?: SecurityPluginConfig,
 ): { store: ProvenanceStore; approvalStore: ApprovalStore } {
   const store = new ProvenanceStore(config?.maxCompletedGraphs ?? 100);
-  const approvalStore = new ApprovalStore();
+  const approvalTtlMs = (config?.approvalTtlSeconds ?? 60) * 1000;
+  const approvalStore = new ApprovalStore(approvalTtlMs);
   const policies = [...DEFAULT_POLICIES, ...(config?.policies ?? [])];
   const toolTrustOverrides = config?.toolTrustOverrides;
   const verbose = config?.verbose ?? false;
