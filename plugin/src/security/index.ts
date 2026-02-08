@@ -179,7 +179,7 @@ export function registerSecurityHooks(
       logger.warn(`[provenance:${sk}] ⚠️ SECURITY: Tools restricted due to ${graph.maxTaint} content in context.`);
       logger.warn(`[provenance:${sk}]   Restricted: ${pendingNames.join(", ")}`);
       logger.warn(`[provenance:${sk}]   Approval code: ${code} (expires in ${ttl}s)`);
-      logger.warn(`[provenance:${sk}]   Approve with: .approve all ${code}  OR  .approve <tool> ${code}`);
+      logger.warn(`[provenance:${sk}]   Approve with: .approve <tool> ${code}  (or .approve all ${code})`);
     }
 
     const removedTools = Array.from(result.toolRemovals);
@@ -224,7 +224,7 @@ export function registerSecurityHooks(
       const blockedList = Array.from(blocked).join(", ");
       const perToolExamples = Array.from(blocked).map(t => `.approve ${t} ${code} [minutes]`).join("\n  ");
       const codeStr = code && ttl > 0
-        ? `\nBlocked tools: ${blockedList}\nApproval code: ${code} (expires in ${ttl}s)\nApprove all:  .approve all ${code} [minutes]\nApprove one:\n  ${perToolExamples}`
+        ? `\nBlocked tools: ${blockedList}\nApproval code: ${code} (expires in ${ttl}s)\nApprove:  .approve ${toolName} ${code} [minutes]${blocked.size > 1 ? `\nOther blocked tools:\n  ${perToolExamples}` : ""}\nApprove all:  .approve all ${code} [minutes]`
         : "\nA new approval code will be issued on the next turn.";
       logger.warn(`[provenance:${sk}] 🛑 BLOCKED at execution layer: ${toolName}`);
       return {
