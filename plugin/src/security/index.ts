@@ -162,7 +162,9 @@ export function registerSecurityHooks(
 
     const toolRemovals = result.toolRemovals;
     const currentTools: Array<{ name: string }> = event.tools ?? [];
-    const removedTools = currentTools.filter((t: any) => toolRemovals.has(t.name)).map((t: any) => t.name);
+    // Case-insensitive matching: policies may use "Write" but OpenClaw tools use "write"
+    const toolRemovalsLower = new Set(Array.from(toolRemovals).map(t => t.toLowerCase()));
+    const removedTools = currentTools.filter((t: any) => toolRemovalsLower.has(t.name.toLowerCase())).map((t: any) => t.name);
 
     // Log confirm-mode pending confirmations with approval code
     if (result.mode === "confirm" && result.pendingConfirmations.length > 0) {
@@ -208,7 +210,7 @@ export function registerSecurityHooks(
     // Update the execution-layer blocked set
     if (toolRemovals.size > 0) {
       blockedToolsBySession.set(sessionKey, new Set(toolRemovals));
-      const allowedTools = currentTools.filter((t: any) => !toolRemovals.has(t.name));
+      const allowedTools = currentTools.filter((t: any) => !toolRemovalsLower.has(t.name.toLowerCase()));
       // Record policy decisions
       for (const toolName of toolRemovals) {
         graph.recordBlockedTool(toolName, "policy", event.iteration ?? 0);
@@ -232,7 +234,11 @@ export function registerSecurityHooks(
     if (!blocked || blocked.size === 0) return undefined;
 
     const toolName = event.toolName;
-    if (blocked.has(toolName)) {
+    // Case-insensitive check: OpenClaw may send lowercase tool names
+    // while policies use capitalized names (e.g., "Write" vs "write")
+    const toolNameLower = toolName.toLowerCase();
+    const isBlocked = Array.from(blocked).some(b => b.toLowerCase() === toolNameLower);
+    if (isBlocked) {
       const sk = shortKey(sessionKey);
       const code = approvalStore.getCurrentCode(sessionKey);
       const ttl = approvalStore.getCodeTtlSeconds(sessionKey);
