@@ -14,7 +14,7 @@ This means:
 - A single agent that searches aggressively inflates retention strength for everyone
 - There's no way to distinguish "the team collectively trusts this memory" from "one agent used it once"
 
-As more BigHatters (and their agents) share the same Vestige instance, this becomes a real limitation. An engineer's agent debugging a pipeline issue shouldn't affect the memory landscape for a scientist's agent reviewing experiment results.
+As more people (and their agents) share the same Vestige instance, this becomes a real limitation. An engineer's agent debugging a pipeline issue shouldn't affect the memory landscape for a scientist's agent reviewing experiment results.
 
 ## Goals
 
@@ -60,7 +60,7 @@ OpenClaw users configure it in `openclaw.json`:
 }
 ```
 
-Each BigHatter's OpenClaw instance gets a unique name. If unconfigured, falls back to `"default"`.
+Each OpenClaw instance gets a unique name. If unconfigured, falls back to `"default"`.
 
 **Effort:** ~10 minutes. Ship independently as a quick win.
 

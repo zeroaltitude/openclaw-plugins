@@ -167,7 +167,7 @@ We don't just claim it works — we prove it, continuously.
 ## Traction & Status
 
 - **Working prototype:** FastAPI sidecar + OpenClaw plugin + Helm chart (deployed on EKS)
-- **Two agents live:** Tabitha and Hatbot sharing a Vestige instance at BigHat Biosciences
+- **Two agents live:** Tabitha and Hatbot sharing a Vestige instance 
 - **Evaluation protocol designed:** Spaced retrieval testing, A/B framework spec'd
 - **Experiment layer spec'd:** Feature flags, parameter tuning, analytics pipeline (design-only, implementation pending)
 - **Open-source foundation:** Built on Vestige (MIT), zero upstream modifications required
@@ -176,7 +176,7 @@ We don't just claim it works — we prove it, continuously.
 
 ## Team
 
-- **Eddie Abrams** — CIO, BigHat Biosciences. PhD in Philosophy (modal semantics, agent theory). Built BigHat's AI/data infrastructure from scratch.
+- **Eddie Abrams** — CIO, BigHat Biosciences. PhD in Philosophy (modal semantics, agent theory). Built BigHat's AI/data infrastructure from the ground up (with a great team!).
 - **Anisha Keshavan** — Data Science. Evaluation protocol design, experimental methodology.
 - **Jeremy Hert** — Engineering. Infrastructure, Kubernetes, deployment.
 - **Tabitha** — AI Agent. Built the prototype, wrote this pitch. (Yes, really.)

@@ -119,7 +119,7 @@ for feedback and analytics.
 
 ### Tasks
 
-1. **Fork vestige-mcp** into `BigHat-Biosciences/vestige-mcp` (or a `vestige/`
+1. **Fork vestige-mcp** into `vestige-mcp` (or a `vestige/`
    subdirectory in this repo)
 2. **Enable rmcp HTTP transport** — the `rmcp` crate already has a Streamable
    HTTP feature; it's just not enabled in the upstream build
@@ -396,7 +396,7 @@ Phases 1-2 and Phase 3 can proceed in parallel.
 
 ## Open Questions
 
-1. **Repo structure:** Separate repo (`BigHat-Biosciences/vestige-mcp`) or
+1. **Repo structure:** Separate repo (`vestige-mcp`) or
    subdirectory in this monorepo? Separate repo is cleaner for CI/releases;
    subdirectory is easier for cross-cutting changes.
 

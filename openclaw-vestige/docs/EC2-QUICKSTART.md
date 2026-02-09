@@ -171,7 +171,7 @@ curl http://localhost:3100/health
 
 ```bash
 # Clone the repo
-git clone https://github.com/BigHat-Biosciences/openclaw-vestige.git /opt/openclaw-vestige
+git clone https://github.com/zeroaltitude/openclaw-vestige.git /opt/openclaw-vestige
 cd /opt/openclaw-vestige/server
 
 # Create a Python virtual environment — DO NOT use system Python
