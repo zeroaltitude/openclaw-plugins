@@ -148,13 +148,15 @@ Key design decision: `read` with `{ "*": "allow" }` overrides `restrict` back to
 
 These tools are always `{ "*": "allow" }` regardless of taint level:
 
-`read`, `memory_search`, `memory_get`, `web_fetch`, `web_search`, `browser`, `image`, `session_status`, `sessions_list`, `sessions_history`, `agents_list`, `vestige_search`, `vestige_promote`, `vestige_demote`
+`read`, `memory_search`, `memory_get`, `web_fetch`, `web_search`, `image`, `session_status`, `sessions_list`, `sessions_history`, `agents_list`, `vestige_search`, `vestige_promote`, `vestige_demote`
 
 Rationale: these are read-only or observability tools. Blocking them when tainted would prevent the agent from doing useful work (reading files, searching memory) without creating new attack surface.
 
 **Important distinction — tool call safety vs. response trust:**
 
-A tool being "safe to call" is different from its response being "trusted." `web_fetch`, `web_search`, and `browser` are all safe to *call* (read-only, no side effects), but their *responses* introduce `untrusted` taint into the context. The taint doesn't restrict the tool that introduced it — it restricts what happens *after*:
+A tool being "safe to call" is different from its response being "trusted." `web_fetch` and `web_search` are safe to *call* (read-only, no side effects), but their *responses* introduce `untrusted` taint into the context. The taint doesn't restrict the tool that introduced it — it restricts what happens *after*:
+
+Note: `browser` is intentionally NOT a safe tool despite being a taint source. Unlike `web_fetch`, the browser can take *actions* — clicking buttons, submitting forms, executing JavaScript — on authenticated pages. A prompt injection could direct the agent to delete repos, approve PRs, or post content using the owner's browser session. It stays in confirm/restrict at elevated taint levels.
 
 ```
 Iteration 1: taint=owner → browser allowed (safe tool) → page content enters context
