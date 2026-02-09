@@ -184,6 +184,24 @@ export function registerSecurityHooks(
           logger.warn(`[provenance:${sk}] ❌ Approval failed: ${result.reason}`);
         }
       }
+
+      // Process .reset-trust command — owner declares context is trustworthy
+      const resetMatch = trimmed.match(/\.reset-trust(?:\s+([a-z]+))?/i);
+      if (resetMatch) {
+        const targetLevel = (resetMatch[1]?.toLowerCase() ?? "system") as TrustLevel;
+        const validLevels: TrustLevel[] = ["system", "owner", "local", "shared", "external", "untrusted"];
+        if (validLevels.includes(targetLevel)) {
+          const previousTaint = graph.maxTaint;
+          graph.resetTaint(targetLevel);
+          // Clear blocked tools since taint has been reset
+          blockedToolsBySession.delete(sessionKey);
+          // Clear any pending approvals (no longer needed)
+          approvalStore.clearTurnScoped(sessionKey);
+          logger.info(`[provenance:${sk}] 🔄 Trust reset: ${previousTaint} → ${targetLevel} (owner override)`);
+        } else {
+          logger.warn(`[provenance:${sk}] ❌ Invalid trust level for .reset-trust: ${targetLevel}`);
+        }
+      }
     }
 
     // Evaluate policy

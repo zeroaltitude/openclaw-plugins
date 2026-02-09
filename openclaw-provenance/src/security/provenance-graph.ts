@@ -76,6 +76,12 @@ export class TurnProvenanceGraph {
     this._maxTaint = minTrust(this._maxTaint, trust);
   }
 
+  /** Reset taint to a specific level (owner override via .reset-trust) */
+  resetTaint(level: TrustLevel): void {
+    if (this._sealed) throw new Error("Cannot modify sealed graph");
+    this._maxTaint = level;
+  }
+
   /** Add a node to the graph */
   addNode(node: Omit<GraphNode, "timestamp"> & { timestamp?: number }): GraphNode {
     if (this._sealed) throw new Error("Cannot modify sealed graph");
