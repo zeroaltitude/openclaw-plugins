@@ -67,8 +67,8 @@ function shortKey(sessionKey: string): string {
  * 6. Unknown sender → untrusted
  */
 function classifyInitialTrust(ctx: AgentContext): TrustLevel {
-  // System events: no message provider means cron, heartbeat, or internal trigger
-  if (!ctx.messageProvider) {
+  // System events: no message provider, or internal providers (heartbeat, cron)
+  if (!ctx.messageProvider || ctx.messageProvider === "heartbeat" || ctx.messageProvider === "cron") {
     return "system";
   }
 
