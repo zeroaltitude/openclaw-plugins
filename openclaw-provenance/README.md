@@ -72,6 +72,81 @@ Content is classified into six trust levels, ordered from most to least trusted:
 | `external` | Known external sources | Email (Gmail), Slack messages, calendar |
 | `untrusted` | Unknown/adversarial sources | Web pages (`web_fetch`), `browser` content |
 
+### Three Sources of Taint
+
+A turn's taint level can be escalated by three distinct mechanisms:
+
+1. **Initial trust classification** — determined at turn start from sender/channel metadata
+2. **Tool response trust** — determined when a tool returns results (from `DEFAULT_TOOL_TRUST`)
+3. **History content** — the conversation history node inherits the initial trust classification
+
+Each of these adds nodes to the provenance graph, and each node's trust level feeds into the high-water mark. The rest of this section explains each mechanism in detail.
+
+### Initial Trust: Sender & Channel Classification
+
+When a turn begins, the plugin classifies the **initial trust level** from the metadata OpenClaw provides about who sent the message and what channel it arrived on. This is the `context_assembled` hook, which fires once per turn before any LLM calls.
+
+The classification logic (`classifyInitialTrust()` in `security/index.ts`):
+
+```
+1. No messageProvider (cron, heartbeat, system event)     → system
+2. Sub-agent session (spawnedBy is set)                   → local
+3. Owner in DM (senderIsOwner=true, no groupId)           → owner
+4. Owner in group chat (senderIsOwner=true, groupId set)  → shared
+5. Known non-owner sender (senderId present)              → external
+6. Unknown sender (no metadata)                           → untrusted
+```
+
+This classification sets the trust on the `history` node in the provenance graph. Since the history node is added before any tools run, it establishes the **floor** for the turn's taint — subsequent tool calls can only escalate it further, never reduce it.
+
+#### How OpenClaw channels map to trust levels
+
+OpenClaw supports many communication channels. Here's how each maps to the classification:
+
+| Channel | Scenario | Initial Trust | Rationale |
+|---------|----------|---------------|-----------|
+| Discord DM | Owner sends a message | `owner` | `senderIsOwner=true`, no `groupId` |
+| Discord DM | Non-owner sends a DM | `external` | `senderIsOwner=false`, `senderId` present |
+| Discord server channel | Owner sends in #general | `shared` | `senderIsOwner=true`, but `groupId` is set — other users' messages are in the conversation history |
+| Discord server channel | Non-owner sends in #general | `external` | Known sender, not the owner |
+| Slack DM | Owner sends a message | `owner` | Same as Discord DM |
+| Slack channel | Owner sends in #eng-general | `shared` | Group context contains messages from other users |
+| Slack channel | Non-owner sends | `external` | Known sender, not the owner |
+| Telegram DM | Owner sends | `owner` | `senderIsOwner=true`, no group |
+| Telegram group | Anyone sends | `shared` or `external` | Depends on whether sender is owner |
+| Signal DM | Owner sends | `owner` | `senderIsOwner=true` |
+| Cron job | Scheduled task fires | `system` | No `messageProvider` — this is an internal system event |
+| Heartbeat | Periodic check | `system` | No `messageProvider` |
+| Sub-agent | `sessions_spawn` task | `local` | `spawnedBy` is set — parent session authorized this work |
+| Webhook | External webhook trigger | `untrusted` | No sender metadata available |
+
+#### Why "owner in group" is `shared`, not `owner`
+
+When the owner sends a message in a group chat (Discord server, Slack channel, Telegram group), the initial trust is `shared` rather than `owner`. This is because the **conversation history** in a group chat contains messages from all participants — not just the owner. The LLM will see those messages in its context window.
+
+Even though the *triggering* message is from the owner, the context also contains:
+- Messages from other group members (potentially untrusted)
+- Bot messages
+- Webhook-delivered content
+
+If we classified this as `owner`, the turn would start with full trust, and a prompt injection embedded in another user's earlier message (already in history) would have unrestricted tool access. By classifying as `shared`, we ensure that group-context turns start with appropriate restrictions.
+
+**Note:** This is conservative. If the owner is in a private channel with only trusted colleagues, `shared` may over-restrict. The owner can adjust this via `taintPolicy.shared` — setting it to `allow` if they trust all participants in their configured channels.
+
+#### Metadata availability
+
+The classification depends on fields exposed by OpenClaw's `PluginHookAgentContext`:
+
+| Field | Source | Available since |
+|-------|--------|----------------|
+| `messageProvider` | Channel plugin (discord, slack, telegram, etc.) | Always |
+| `senderId` | Channel plugin — platform-specific user ID | `feature/extended-security-hooks` branch |
+| `senderIsOwner` | Computed from `ownerNumbers` config | `feature/extended-security-hooks` branch |
+| `groupId` | Channel plugin — channel/group ID | `feature/extended-security-hooks` branch |
+| `spawnedBy` | Agent runner — parent session key | `feature/extended-security-hooks` branch |
+
+Without these fields (e.g., on older OpenClaw versions), the classification falls through to the default: `owner`. This maintains backward compatibility but provides no sender-based trust differentiation.
+
 ### Taint Propagation (High-Water Mark)
 
 Each agent turn maintains a **maximum taint level** (`maxTaint`) — the lowest-trust content seen across all nodes in the turn's provenance graph. The taint is updated every time a node is added to the graph:
