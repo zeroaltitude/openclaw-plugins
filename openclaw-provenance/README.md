@@ -36,6 +36,29 @@ The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37
 
 ## Architecture
 
+### Two Independent Axes: Tool Response Trust vs. Tool Call Permission
+
+The plugin tracks two completely independent properties for each tool:
+
+1. **Response trust** (`DEFAULT_TOOL_TRUST` in `trust-levels.ts`): What taint level does this tool's **response** introduce into the context? This is a property of the data the tool returns — not whether the tool is safe to invoke.
+
+2. **Call permission** (`DEFAULT_SAFE_TOOLS` / `toolOverrides` in `policy-engine.ts`): Is this tool **allowed to be called** at the current taint level? This is a property of what the tool can *do* — its side effects.
+
+These are orthogonal:
+
+| Tool | Response trust | Call permission (default) | Rationale |
+|------|---------------|--------------------------|-----------|
+| `web_fetch` | `untrusted` | always allowed | Read-only HTTP GET. No side effects. But the response is untrusted web content. |
+| `web_search` | `untrusted` | always allowed | Read-only search API. No side effects. Response is untrusted. |
+| `read` | `local` | always allowed | Read-only file access. Response is local content. |
+| `browser` | `untrusted` | blocked when tainted | Can click, submit forms, execute JS on authenticated pages. Response is untrusted. |
+| `exec` | `local` | blocked when tainted | Arbitrary command execution. Response is local but the *action* is dangerous. |
+| `message` | `external` | blocked when tainted | Sends messages as the owner. Response is external content (channel messages). |
+| `vestige_search` | `shared` | always allowed | Read-only memory search. Response is shared cross-agent data. |
+| `gateway` | `system` | always requires approval | Can disable security plugins. Response is system-level config. |
+
+A tool's response trust determines **how it taints the context for future iterations**. A tool's call permission determines **whether it can be invoked in the current iteration**.
+
 ### Trust Levels
 
 Content is classified into six trust levels, ordered from most to least trusted:
@@ -51,14 +74,45 @@ Content is classified into six trust levels, ordered from most to least trusted:
 
 ### Taint Propagation (High-Water Mark)
 
-Each agent turn maintains a **maximum taint level** — the lowest-trust content seen anywhere in the turn. This is a conservative model:
+Each agent turn maintains a **maximum taint level** (`maxTaint`) — the lowest-trust content seen across all nodes in the turn's provenance graph. The taint is updated every time a node is added to the graph:
+
+```typescript
+updateTaint(trust: TrustLevel): void {
+    this._maxTaint = minTrust(this._maxTaint, trust);
+}
+```
+
+When a tool is called, `recordToolCall()` looks up the tool's **response trust** from `DEFAULT_TOOL_TRUST` and adds a node with that trust level. This may escalate the turn's `maxTaint`:
 
 ```
-Turn starts at: owner (user sent a message)
-Agent calls read() → taint: local (file content entered context)
-Agent calls web_fetch() → taint: untrusted (web content entered context)
-Agent calls exec() → still untrusted (taint never decreases within a turn)
+Turn starts:
+  context_assembled → node(trust: system)
+  history → node(trust: owner)              maxTaint = owner
+
+Iteration 1:
+  LLM call → node(trust: owner)            maxTaint = owner (inherits current maxTaint)
+  Tool: read("file.txt") → node(trust: local)    maxTaint = local  ← escalated by read's response trust
+  [LLM sees file contents in next call]
+
+Iteration 2:
+  LLM call → node(trust: local)            maxTaint = local
+  Tool: web_fetch(url) → node(trust: untrusted)  maxTaint = untrusted  ← escalated by web_fetch's response trust
+  [LLM sees web content in next call]
+
+Iteration 3:
+  LLM call → node(trust: untrusted)        maxTaint = untrusted
+  Tool: exec("cmd") → BLOCKED              ← policy evaluation sees maxTaint=untrusted, blocks exec
 ```
+
+**Key timing detail:** The taint escalation from a tool happens when `recordToolCall()` is invoked in the `after_llm_call` hook — i.e., after the LLM has decided to call the tool and the tool has returned results. The policy enforcement happens in `before_llm_call` on the *next* iteration, when those results are in the context. This means:
+
+- A tool's response taints the context for **subsequent** iterations, not the current one.
+- The tool that introduces taint is always allowed to complete (it was evaluated against the *previous* taint level).
+- Policy enforcement catches the escalated taint on the next `before_llm_call`.
+
+**Consequence:** If `web_fetch` is called in iteration 1 and returns untrusted content, `exec` is blocked starting in iteration 2. The LLM cannot call both `web_fetch` and `exec` in the same iteration and have `exec` be blocked — the blocking happens one iteration later. This is currently acceptable because the LLM processes tool results sequentially (not in parallel branches).
+
+**Taint never decreases within a turn.** `minTrust()` is a one-way ratchet. If one tool returns untrusted content, the entire remainder of the turn is tainted, even if subsequent tools return local content.
 
 The high-water mark is correct for current LLM architectures because the context window is a shared memory space. Once untrusted content enters the context, every subsequent LLM call has access to it — there's no isolation between "the part that read the email" and "the part that runs exec."
 
@@ -69,20 +123,17 @@ A more granular per-branch model would require **agent forks** — branching the
 The plugin builds a directed acyclic graph for each turn:
 
 ```
-context_assembled (owner)
-    │
-    ▼
-llm_call_1 (owner)
-    │
-    ├── tool: web_fetch (untrusted)     ← taint escalates here
-    │
-    ▼
-llm_call_2 (untrusted)                 ← inherits worst taint
-    │
-    ├── tool: exec → BLOCKED            ← policy enforcement
-    │
-    ▼
-output (untrusted)
+context_assembled
+  ├── node: system_prompt (trust: system)
+  └── node: history (trust: owner)
+                                            maxTaint: owner
+llm_call_1 (trust: owner)
+  └── tool: web_fetch (trust: untrusted)  ← response trust escalates maxTaint
+                                            maxTaint: untrusted
+llm_call_2 (trust: untrusted)            ← inherits maxTaint
+  └── tool: exec → BLOCKED               ← policy sees maxTaint=untrusted, blocks exec
+                                            maxTaint: untrusted
+output (trust: untrusted)
 ```
 
 Currently all DAGs are linear chains (one LLM call → one or more tool calls → next LLM call). The infrastructure supports branching for future agent fork architectures.
@@ -144,21 +195,29 @@ Per-tool overrides that set the mode directly for specific taint levels. Overrid
 
 Key design decision: `read` with `{ "*": "allow" }` overrides `restrict` back to `allow`. If overrides used `strictest()`, safe tools would be blocked when the taint policy is restrictive — making the agent unable to read files to help the user understand what's happening.
 
-### Default Safe Tools
+### Default Safe Tools (Call Permission)
 
-These tools are always `{ "*": "allow" }` regardless of taint level:
+These tools have override `{ "*": "allow" }` — they are **allowed to be called** regardless of the current taint level:
 
 `read`, `memory_search`, `memory_get`, `web_fetch`, `web_search`, `image`, `session_status`, `sessions_list`, `sessions_history`, `agents_list`, `vestige_search`, `vestige_promote`, `vestige_demote`
 
-Rationale: these are read-only or observability tools. Blocking them when tainted would prevent the agent from doing useful work (reading files, searching memory) without creating new attack surface.
+A tool is "safe to call" when it has **no dangerous side effects** — it cannot modify state, send messages, execute commands, or take actions on authenticated services. Being safe to call says nothing about the trust level of the tool's *response*:
 
-**Important distinction — tool call safety vs. response trust:**
+| Safe tool | Response trust | Why safe to call | Why response is less trusted |
+|-----------|---------------|------------------|------------------------------|
+| `read` | `local` | Read-only file access | File could contain anything |
+| `web_fetch` | `untrusted` | HTTP GET, no side effects | Web pages are adversarial |
+| `web_search` | `untrusted` | Search API query | Results are adversarial |
+| `vestige_search` | `shared` | Read-only memory query | Cross-agent data, not verified |
+| `image` | `external` | Analyze an image | External image content |
 
-A tool being "safe to call" is different from its response being "trusted." `web_fetch` and `web_search` are safe to *call* (read-only, no side effects), but their *responses* introduce `untrusted` taint into the context. The taint doesn't restrict the tool that introduced it — it restricts what happens *after*:
+The safe tool's response still taints the context via `recordToolCall()`. After a `web_fetch` completes, the turn's `maxTaint` escalates to `untrusted`, and subsequent iterations will restrict dangerous tools. The safe tool itself is never blocked — only tools called *after* its tainted response enters the context.
 
-Note: `browser` is intentionally NOT a safe tool despite being a taint source. Unlike `web_fetch`, the browser can take *actions* — clicking buttons, submitting forms, executing JavaScript — on authenticated pages. A prompt injection could direct the agent to delete repos, approve PRs, or post content using the owner's browser session. It defaults to confirm/restrict at elevated taint levels.
+### Browser: A Special Case
 
-However, the owner can override this for their own use via `toolOverrides`:
+`browser` is intentionally **NOT** a safe tool. Unlike `web_fetch`, the browser has side effects — it can click buttons, submit forms, execute JavaScript, and take actions on authenticated pages. Its response trust is `untrusted` (same as `web_fetch`), but it is restricted by default when tainted because a prompt injection could direct the agent to take destructive actions via the owner's browser session.
+
+The owner can override this for direct use via `toolOverrides`:
 
 ```json
 {
@@ -174,14 +233,22 @@ However, the owner can override this for their own use via `toolOverrides`:
 }
 ```
 
-This means: when the owner directly asks the agent to browse something (taint is `owner` or `local`), browser is allowed without approval. But once external or untrusted content enters the context, browser requires approval — preventing an injection from using the browser to take actions on authenticated pages.
+This gives a precise behavior:
 
 ```
-Iteration 1: taint=owner → browser allowed (owner override) → page content enters context
-Iteration 2: taint=untrusted (from browser response) → browser now requires approval, exec blocked, message blocked
+Iteration 1: maxTaint=owner
+  → browser call permission: allowed (owner override)
+  → browser called, returns page content
+  → recordToolCall("browser") adds node with trust=untrusted
+  → maxTaint escalates: owner → untrusted
+
+Iteration 2: maxTaint=untrusted
+  → browser call permission: confirm (untrusted override)
+  → browser BLOCKED unless approved
+  → exec, message, etc. also blocked
 ```
 
-This correctly models the threat: the danger isn't in reading a web page, it's in what the LLM does after adversarial content enters its context window.
+The first browser call succeeds because it was evaluated against the pre-escalation taint (`owner`). The second browser call is blocked because the first call's response tainted the context to `untrusted`. An injection in the first page cannot direct a second browser action without owner approval.
 
 ### Default Dangerous Tools
 
