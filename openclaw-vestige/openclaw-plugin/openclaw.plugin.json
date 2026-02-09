@@ -1,0 +1,27 @@
+{
+  "id": "vestige",
+  "name": "Vestige Cognitive Memory",
+  "version": "0.2.0",
+  "description": "Shared cognitive memory for OpenClaw agents powered by Vestige — FSRS-6 spaced repetition, dual-strength memory, and prediction error gating.",
+  "author": "BigHat Biosciences",
+  "main": "dist/index.js",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serverUrl": {
+        "type": "string",
+        "description": "Vestige bridge server URL",
+        "default": "http://vestige.internal:8000"
+      },
+      "authToken": {
+        "type": "string",
+        "description": "Bearer token for Vestige API authentication"
+      }
+    }
+  },
+  "uiHints": {
+    "serverUrl": { "label": "Server URL", "placeholder": "https://vestige.bighatbio.me/api" },
+    "authToken": { "label": "Auth Token", "sensitive": true }
+  }
+}

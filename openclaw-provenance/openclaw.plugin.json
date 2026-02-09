@@ -1,38 +1,29 @@
 {
-  "id": "vestige",
-  "name": "Vestige Cognitive Memory",
+  "id": "provenance",
+  "name": "Content Provenance & Security",
   "version": "0.2.0",
-  "description": "Shared cognitive memory for OpenClaw agents powered by Vestige — FSRS-6 spaced repetition, dual-strength memory, and prediction error gating. Includes content provenance taint tracking and security policy enforcement.",
+  "description": "Content provenance taint tracking with per-turn DAGs and declarative security policy enforcement for OpenClaw agents.",
   "author": "BigHat Biosciences",
   "main": "dist/index.js",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "serverUrl": {
-        "type": "string",
-        "description": "Vestige bridge server URL",
-        "default": "http://vestige.internal:8000"
-      },
-      "authToken": {
-        "type": "string",
-        "description": "Bearer token for Vestige API authentication"
-      },
       "taintPolicy": {
         "type": "object",
-        "description": "Default policy mode per taint level. Modes: allow (no restrictions), confirm (block + approval codes), restrict (silently remove, no override), Must be monotonically non-decreasing in strictness.",
+        "description": "Default policy mode per taint level. Modes: allow, confirm, restrict. Must be monotonically non-decreasing in strictness.",
         "properties": {
           "system": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
           "owner": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
           "local": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
-          "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "restrict" },
+          "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" },
           "external": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" },
           "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" }
         }
       },
       "toolOverrides": {
         "type": "object",
-        "description": "Per-tool policy overrides. Key = tool name (lowercase). Value = object mapping taint levels (or '*') to modes. Overrides can only make things STRICTER than the taint-level default. Example: { \"gateway\": { \"local\": \"restrict\" }, \"read\": { \"*\": \"allow\" } }",
+        "description": "Per-tool policy overrides. Key = tool name (lowercase). Value = object mapping taint levels (or '*') to modes.",
         "additionalProperties": {
           "type": "object",
           "properties": {
@@ -57,9 +48,5 @@
         "default": 10
       }
     }
-  },
-  "uiHints": {
-    "serverUrl": { "label": "Server URL", "placeholder": "https://vestige.bighatbio.me/api" },
-    "authToken": { "label": "Auth Token", "sensitive": true }
   }
 }

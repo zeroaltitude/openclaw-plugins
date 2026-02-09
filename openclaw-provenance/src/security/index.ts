@@ -14,7 +14,7 @@ import { ApprovalStore } from "./approval-store.js";
 
 // Types matching OpenClaw's hook system (from src/plugins/types.ts)
 interface HookApi {
-  registerHook(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number; name?: string; description?: string }): void;
+  registerHook?(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number; name?: string; description?: string }): void;
   on(hookName: string, handler: (...args: any[]) => any, opts?: { priority?: number }): void;
 }
 
