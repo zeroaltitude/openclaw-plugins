@@ -111,20 +111,22 @@ export class TurnProvenanceGraph {
   // =========================================================================
 
   /** Record the initial context assembly (called from context_assembled hook) */
-  recordContextAssembled(systemPrompt: string, messageCount: number): string {
+  recordContextAssembled(systemPrompt: string, messageCount: number, initialTrust?: TrustLevel): string {
     const nodeId = this.nextNodeId("ctx");
     this.addNode({
       id: nodeId,
       kind: "system_prompt",
       trust: "system",
     });
-    // Add a history node representing all prior messages
+    // Add a history node representing all prior messages.
+    // Trust is classified from sender/channel metadata when available,
+    // falling back to "owner" for backward compatibility.
     if (messageCount > 0) {
       const histId = this.nextNodeId("hist");
       this.addNode({
         id: histId,
         kind: "history",
-        trust: "owner", // history contains owner messages at minimum
+        trust: initialTrust ?? "owner",
         metadata: { messageCount },
       });
     }

@@ -23,6 +23,11 @@ interface AgentContext {
   sessionKey?: string;
   workspaceDir?: string;
   messageProvider?: string;
+  senderId?: string | null;
+  senderName?: string | null;
+  senderIsOwner?: boolean;
+  groupId?: string | null;
+  spawnedBy?: string | null;
 }
 
 export interface SecurityPluginConfig {
@@ -47,6 +52,48 @@ function shortKey(sessionKey: string): string {
   const parts = sessionKey.split(":");
   if (parts.length > 1) return parts[parts.length - 1].slice(0, 16);
   return sessionKey.slice(-8);
+}
+
+/**
+ * Classify initial trust level from sender/channel metadata.
+ * 
+ * Priority:
+ * 1. No messageProvider (cron, heartbeat, system event) → system
+ * 2. Sub-agent session (spawnedBy set) → local (inherits parent's permissions)
+ * 3. Owner in DM (senderIsOwner=true, no groupId) → owner
+ * 4. Owner in group (senderIsOwner=true, groupId set) → shared
+ *    (group context may contain messages from non-owners)
+ * 5. Known sender, not owner → external
+ * 6. Unknown sender → untrusted
+ */
+function classifyInitialTrust(ctx: AgentContext): TrustLevel {
+  // System events: no message provider means cron, heartbeat, or internal trigger
+  if (!ctx.messageProvider) {
+    return "system";
+  }
+
+  // Sub-agent sessions inherit local trust (parent already authorized the work)
+  if (ctx.spawnedBy) {
+    return "local";
+  }
+
+  // Owner detection
+  if (ctx.senderIsOwner) {
+    // Owner in a group chat: other participants' messages are in context
+    if (ctx.groupId) {
+      return "shared";
+    }
+    // Owner in DM: highest user trust
+    return "owner";
+  }
+
+  // Non-owner with a known sender ID: external (known source, not controlled)
+  if (ctx.senderId) {
+    return "external";
+  }
+
+  // Unknown sender (no metadata available): untrusted
+  return "untrusted";
 }
 
 /**
@@ -86,11 +133,16 @@ export function registerSecurityHooks(
   api.on("context_assembled", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
     const graph = store.startTurn(sessionKey);
-    graph.recordContextAssembled(event.systemPrompt ?? "", event.messageCount ?? 0);
+
+    // Classify initial trust from sender/channel metadata
+    const initialTrust = classifyInitialTrust(ctx);
+
+    graph.recordContextAssembled(event.systemPrompt ?? "", event.messageCount ?? 0, initialTrust);
 
     const sk = shortKey(sessionKey);
     logger.info(`[provenance:${sk}] ── Turn Start ──`);
     logger.info(`[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`);
+    logger.info(`[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"})`);
   });
 
   // --- before_llm_call ---
