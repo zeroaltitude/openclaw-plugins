@@ -143,6 +143,9 @@ export function registerSecurityHooks(
     logger.info(`[provenance:${sk}] ── Turn Start ──`);
     logger.info(`[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`);
     logger.info(`[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"})`);
+    if (verbose) {
+      logger.info(`[provenance:${sk}]   ctx keys: ${Object.keys(ctx).join(", ")}`);
+    }
   });
 
   // --- before_llm_call ---
