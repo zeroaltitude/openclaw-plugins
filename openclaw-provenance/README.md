@@ -148,11 +148,20 @@ Key design decision: `read` with `{ "*": "allow" }` overrides `restrict` back to
 
 These tools are always `{ "*": "allow" }` regardless of taint level:
 
-`read`, `memory_search`, `memory_get`, `web_fetch`, `web_search`, `image`, `session_status`, `sessions_list`, `sessions_history`, `agents_list`, `vestige_search`, `vestige_promote`, `vestige_demote`
+`read`, `memory_search`, `memory_get`, `web_fetch`, `web_search`, `browser`, `image`, `session_status`, `sessions_list`, `sessions_history`, `agents_list`, `vestige_search`, `vestige_promote`, `vestige_demote`
 
 Rationale: these are read-only or observability tools. Blocking them when tainted would prevent the agent from doing useful work (reading files, searching memory) without creating new attack surface.
 
-Note: `web_fetch` and `web_search` are safe tools even though they *introduce* taint — they're safe to *call*, and their results are what escalate the taint level for subsequent tool calls.
+**Important distinction — tool call safety vs. response trust:**
+
+A tool being "safe to call" is different from its response being "trusted." `web_fetch`, `web_search`, and `browser` are all safe to *call* (read-only, no side effects), but their *responses* introduce `untrusted` taint into the context. The taint doesn't restrict the tool that introduced it — it restricts what happens *after*:
+
+```
+Iteration 1: taint=owner → browser allowed (safe tool) → page content enters context
+Iteration 2: taint=untrusted (from browser response) → exec blocked, message blocked
+```
+
+This correctly models the threat: the danger isn't in reading a web page, it's in what the LLM does after adversarial content enters its context window.
 
 ### Default Dangerous Tools
 

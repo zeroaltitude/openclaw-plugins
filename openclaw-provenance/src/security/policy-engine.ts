@@ -248,9 +248,11 @@ export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
   // Memory (read-only)  
   "memory_search":     { "*": "allow" },
   "memory_get":        { "*": "allow" },
-  // Web read (these ARE the taint sources — blocking them is pointless)
+  // Web/browser read (these ARE the taint sources — safe to call, but their
+  // responses taint the context for subsequent tool calls)
   "web_fetch":         { "*": "allow" },
   "web_search":        { "*": "allow" },
+  "browser":           { "*": "allow" },
   // Image analysis (read-only)
   "image":             { "*": "allow" },
   // Session introspection (read-only)
