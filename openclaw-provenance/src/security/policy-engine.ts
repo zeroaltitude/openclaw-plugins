@@ -313,6 +313,6 @@ export function buildPolicyConfig(
   return {
     taintPolicy: corrected,
     toolOverrides: mergedOverrides,
-    maxIterations: maxIterations ?? 10,
+    maxIterations: maxIterations ?? 30,
   };
 }

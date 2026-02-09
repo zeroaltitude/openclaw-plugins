@@ -230,6 +230,13 @@ export function registerSecurityHooks(
     }
 
     if (result.block) {
+      if (result.blockReason?.startsWith("Max iterations exceeded")) {
+        // Don't hard-block on max iterations — the agent loop has its own limits.
+        // Hard-blocking causes unhandled rejections and gateway crashes.
+        logger.warn(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
+        logger.warn(`[provenance:${sk}]   Max iterations warning: ${result.blockReason} — allowing agent loop to handle`);
+        return undefined;
+      }
       logger.info(`[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`);
       logger.warn(`[provenance:${sk}]   Turn BLOCKED: ${result.blockReason}`);
       return { block: true, blockReason: result.blockReason };
