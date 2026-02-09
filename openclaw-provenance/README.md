@@ -475,4 +475,4 @@ MIT
 
 ## Authors
 
-Eddie Abrams and Tabitha — BigHat Biosciences
+Eddie Abrams and Tabitha
