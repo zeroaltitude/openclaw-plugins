@@ -356,6 +356,11 @@ Approve all:  .approve all bf619df9 [minutes]
 - **Duration**: `.approve exec bf619df9 30` — approval lasts 30 minutes
 - **Turn-scoped** (default): `.approve exec bf619df9` — approval expires when the turn ends
 
+Example interaction:
+
+<img width="814" height="798" alt="image" src="https://github.com/user-attachments/assets/dacd2bc1-48a5-4d1a-9986-86351e6069ed" />
+
+
 ### Why Codes?
 
 A simple `!approve exec` command could be injected by prompt injection in the very content that triggered the restriction. The 8-character hex code is:
