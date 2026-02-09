@@ -372,6 +372,40 @@ A simple `!approve exec` command could be injected by prompt injection in the ve
 
 An attacker would need to guess an 8-character hex code within the TTL window — 4 billion possibilities in 120 seconds.
 
+## Trust Reset
+
+Sometimes the owner has reviewed tainted content and is satisfied it's safe — they shouldn't need to approve every tool individually for the rest of the turn. The `.reset-trust` command resets the turn's taint level:
+
+```
+.reset-trust           # Reset to system (full trust, all tools available)
+.reset-trust owner     # Reset to owner level
+.reset-trust local     # Reset to local level
+```
+
+When `.reset-trust` is processed:
+1. The provenance graph's `maxTaint` is set to the specified level
+2. The blocked tools set is cleared
+3. Any pending approval codes are cleared
+4. All tools become immediately available (subject to normal policy at the new taint level)
+
+### Security
+
+**Owner-only:** `.reset-trust` is only processed when `senderIsOwner=true` in the hook context. Non-owner messages containing `.reset-trust` are ignored and logged as a warning.
+
+**No code required:** Unlike `.approve`, `.reset-trust` does not require an approval code. The rationale: `.approve` uses codes to prevent injection attacks from approving their own tools. `.reset-trust` is a broader statement ("I trust everything in this context now") that only the owner can make. Since it requires verified owner identity rather than a guessable code, it's actually a stronger authentication mechanism.
+
+**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw versions without extended hook context), `.reset-trust` falls back to allowing the command. In this degraded mode, the approval code on `.approve` provides the security guarantee instead.
+
+### When to use `.reset-trust` vs `.approve`
+
+| Scenario | Use |
+|----------|-----|
+| One specific tool needs unblocking | `.approve exec <code>` |
+| You've reviewed the content and trust it all | `.reset-trust` |
+| You want time-limited access to a tool | `.approve exec <code> 30` |
+| You want to restore full trust for the rest of the turn | `.reset-trust` |
+| Content is from a known-safe source that happens to be classified as untrusted | `.reset-trust owner` |
+
 ## Configuration
 
 ### Installation

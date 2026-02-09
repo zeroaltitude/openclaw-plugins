@@ -157,10 +157,15 @@ export function registerSecurityHooks(
 
     const sk = shortKey(sessionKey);
 
-    // Process .approve commands from the last user message
+    // Process owner commands (.approve, .reset-trust) from the last user message.
+    // SECURITY: These commands are only processed when senderIsOwner is true.
+    // When senderIsOwner is unavailable (older OpenClaw without the extended hook
+    // context), we fall back to allowing commands — the approval code itself
+    // provides security for .approve, and .reset-trust is an explicit override.
+    const isOwner = ctx.senderIsOwner !== undefined ? ctx.senderIsOwner : true;
     const messages = event.messages ?? [];
     const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
-    if (lastUserMsg) {
+    if (lastUserMsg && isOwner) {
       const content = typeof lastUserMsg.content === "string"
         ? lastUserMsg.content
         : Array.isArray(lastUserMsg.content)
@@ -201,6 +206,12 @@ export function registerSecurityHooks(
         } else {
           logger.warn(`[provenance:${sk}] ❌ Invalid trust level for .reset-trust: ${targetLevel}`);
         }
+      }
+    } else if (lastUserMsg && !isOwner) {
+      // Log if a non-owner tried to use a command
+      const content = typeof lastUserMsg.content === "string" ? lastUserMsg.content : "";
+      if (content.includes(".approve") || content.includes(".reset-trust")) {
+        logger.warn(`[provenance:${sk}] 🚫 Non-owner attempted security command (senderId: ${ctx.senderId ?? "unknown"})`);
       }
     }
 
