@@ -18,9 +18,8 @@ Internet (HTTPS)
 │  :443                                                │
 │                                                      │
 │  ┌─── /mcp* ──────────────────┐                      │
-│  │   supergateway :3100       │  ← Claude Code, MCP  │
-│  │   └─ vestige-mcp (stdio)  │     clients, Vestige  │
-│  │                            │     UI                │
+│  │   vestige-mcp :3100        │  ← Claude Code, MCP  │
+│  │   (native HTTP, --http)    │     clients           │
 │  └────────────────────────────┘                      │
 │                                                      │
 │  ┌─── /api/* ─────────────────┐                      │
@@ -34,20 +33,20 @@ Internet (HTTPS)
 **Key points:**
 - Everything except Caddy binds to `127.0.0.1` (localhost only)
 - Caddy handles all HTTPS/TLS (auto Let's Encrypt)
-- **Claude Code** connects directly to supergateway at `/mcp` (native MCP, no bridge needed)
+- vestige-mcp serves HTTP natively (`--http` flag) — **no supergateway or Node.js needed**
+- **Claude Code** connects directly to vestige-mcp at `/mcp` (native MCP)
 - **OpenClaw agents** connect through the FastAPI bridge at `/api/*` (auth + ACL + identity tracking)
-- **Vestige UI** accessible through Caddy (if applicable)
-- Three paths, one public HTTPS endpoint
+- Two processes, one public HTTPS endpoint
 
 ## Why the FastAPI Bridge Still Matters
 
-Supergateway exposes Vestige over HTTP — but it has no auth, no ACL, no agent identity tracking. For Claude Code on your laptop, that's fine (local trust). For OpenClaw agents hitting a public endpoint, you need:
+vestige-mcp serves raw MCP over HTTP — but it has no auth, no ACL, no agent identity tracking. For Claude Code on your laptop, that's fine (local trust). For OpenClaw agents hitting a public endpoint, you need:
 
-1. **Auth** — Bearer token verification (supergateway has none)
+1. **Auth** — Bearer token verification (vestige-mcp has none)
 2. **ACL** — Namespace-based memory scoping (Phase 2)
 3. **Identity** — `X-Agent-Id` / `X-User-Id` tracking (who wrote what)
 
-The bridge handles all three. Supergateway is the raw MCP transport; the bridge is the governed access layer.
+The bridge handles all three. vestige-mcp is the raw MCP transport; the bridge is the governed access layer.
 
 ---
 
@@ -70,10 +69,6 @@ sudo apt update && sudo apt install -y build-essential curl git pkg-config libss
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 
-# Node.js 22 (for supergateway)
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt install -y nodejs
-
 # Python 3.12 + pip (for FastAPI bridge)
 sudo apt install -y python3.12 python3.12-venv python3-pip
 
@@ -85,6 +80,8 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
   sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update && sudo apt install caddy
 ```
+
+> **Note:** Node.js is no longer required — vestige-mcp serves HTTP natively.
 
 ## Step 2: Build & Install Vestige
 
@@ -106,10 +103,8 @@ which vestige-mcp
 # Should output: /usr/local/bin/vestige-mcp
 ```
 
-> **⚠️ PATH is critical.** Supergateway spawns `vestige-mcp` as a child process. If the binary
-> isn't in PATH, supergateway will exit with code 1 and no obvious error message. Always verify
-> with `which vestige-mcp` before proceeding. If you installed to a non-standard location,
-> use the full path in the supergateway command (Step 4).
+> **⚠️ PATH matters.** The run scripts search PATH first, then `./target/release/`, then
+> `/usr/local/bin/`. If you installed to a non-standard location, set `VESTIGE_BIN=/path/to/vestige-mcp`.
 
 ## Step 3: Create Data Directory
 
@@ -122,55 +117,44 @@ sudo chown $USER:$USER /data/vestige
 > Vestige will create the `.db` file at this path. If you point it at an existing directory,
 > you'll get `unable to open database file` errors. Use e.g. `/data/vestige/vestige.db`.
 
-## Step 4: Start Supergateway (Vestige over Streamable HTTP)
+## Step 4: Start Vestige MCP (Native HTTP)
 
 ```bash
-# Install supergateway globally
-sudo npm install -g supergateway
+# Option A: Using the run script (recommended)
+cd /opt/openclaw-vestige
+./scripts/run-vestige.sh --background
 
-# Run (binds to localhost only)
-# If vestige-mcp is in PATH:
-supergateway \
-  --stdio "vestige-mcp --data-dir /data/vestige/vestige.db" \
-  --port 3100 \
-  --outputTransport streamableHttp \
-  --streamableHttpPath /mcp \
-  --healthEndpoint /health \
-  --stateful \
-  --sessionTimeout 300000 &
+# Option B: Manual nohup
+mkdir -p /data/vestige/logs
+nohup vestige-mcp \
+    --http \
+    --host 127.0.0.1 \
+    --port 3100 \
+    --data-dir /data/vestige/vestige.db \
+    >> /data/vestige/logs/vestige-mcp.stdout.log \
+    2>> /data/vestige/logs/vestige-mcp.stderr.log &
+echo $! > /tmp/vestige-mcp.pid
 
-# If vestige-mcp is NOT in PATH, use the full path:
-# supergateway \
-#   --stdio "/usr/local/bin/vestige-mcp --data-dir /data/vestige/vestige.db" \
-#   --port 3100 \
-#   --outputTransport streamableHttp \
-#   --streamableHttpPath /mcp \
-#   --healthEndpoint /health \
-#   --stateful \
-#   --sessionTimeout 300000 &
-
-# Verify
-curl http://localhost:3100/health
-# → "ok"
+# Verify (send an MCP initialize request)
+curl -s -X POST http://localhost:3100/mcp \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' \
+    | python3 -m json.tool
+# → Should return {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26",...}}
 ```
 
-> **⚠️ If supergateway exits immediately with code 1**, check:
-> 1. Is `vestige-mcp` in PATH? (`which vestige-mcp`)
-> 2. Check stderr: if running via nohup, look at your stderr log file
-> 3. Try running vestige-mcp standalone first: `echo '{}' | vestige-mcp --data-dir /data/vestige`
-
 **Flags explained:**
-- `--stateful` — Manages session lifecycle. Without this, each MCP connection spawns a new
-  vestige-mcp process (~900MB each) that never gets cleaned up.
-- `--sessionTimeout 300000` — Kills idle sessions after 5 minutes, reclaiming memory.
-  Adjust based on your usage pattern.
+- `--http` — Enable native HTTP transport (default is stdio for piped MCP usage)
+- `--host 127.0.0.1` — Bind to localhost only (Caddy handles public access)
+- `--port 3100` — MCP endpoint at `http://localhost:3100/mcp`
+- `--data-dir` — Path to the SQLite database **file** (not directory)
 
 **First boot note:** Vestige will download the Nomic Embed model (~130MB) on the first request. This takes 1-3 minutes depending on bandwidth. Subsequent boots use the cached model.
 
 ## Step 5: Start the FastAPI Bridge
 
 ```bash
-# Clone the repo
+# Clone the repo (if not already done)
 git clone https://github.com/zeroaltitude/openclaw-vestige.git /opt/openclaw-vestige
 cd /opt/openclaw-vestige/server
 
@@ -193,11 +177,22 @@ export VESTIGE_AUTH_TOKEN=$(openssl rand -hex 32)
 echo "Auth token: $VESTIGE_AUTH_TOKEN"
 echo "$VESTIGE_AUTH_TOKEN" > /data/vestige/auth-token  # save it
 
-# Configure bridge to connect to supergateway
+# Configure bridge to connect to vestige-mcp native HTTP
 export VESTIGE_MCP_URL=http://localhost:3100/mcp
 
-# Start — use the venv's uvicorn, NOT the system one
-.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+# Option A: Using the run script (recommended)
+cd /opt/openclaw-vestige
+./scripts/run-bridge.sh --background
+
+# Option B: Manual nohup
+cd /opt/openclaw-vestige/server
+mkdir -p /data/vestige/logs
+nohup .venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    >> /data/vestige/logs/vestige-bridge.stdout.log \
+    2>> /data/vestige/logs/vestige-bridge.stderr.log &
+echo $! > /tmp/vestige-bridge.pid
 
 # Verify
 curl -H "Authorization: Bearer $VESTIGE_AUTH_TOKEN" http://localhost:8000/health
@@ -287,19 +282,20 @@ Install the plugin from the repo's `plugin/` directory.
 
 For persistence across reboots:
 
-### supergateway.service
+### vestige-mcp.service
 
 ```bash
-sudo tee /etc/systemd/system/supergateway.service << 'EOF'
+sudo tee /etc/systemd/system/vestige-mcp.service << 'EOF'
 [Unit]
-Description=Supergateway (Vestige MCP over Streamable HTTP)
+Description=Vestige MCP Server (native HTTP)
 After=network.target
 
 [Service]
 Type=simple
 User=ubuntu
+Environment=RUST_LOG=info
 Environment=FASTEMBED_CACHE_PATH=/data/vestige/.cache/vestige/fastembed
-ExecStart=/usr/bin/npx supergateway --stdio "vestige-mcp --data-dir /data/vestige/vestige.db" --port 3100 --outputTransport streamableHttp --streamableHttpPath /mcp --healthEndpoint /health --stateful --sessionTimeout 300000
+ExecStart=/usr/local/bin/vestige-mcp --http --host 127.0.0.1 --port 3100 --data-dir /data/vestige/vestige.db
 Restart=always
 RestartSec=5
 
@@ -314,8 +310,8 @@ EOF
 sudo tee /etc/systemd/system/vestige-bridge.service << 'EOF'
 [Unit]
 Description=OpenClaw Vestige Bridge (FastAPI)
-After=supergateway.service
-Requires=supergateway.service
+After=vestige-mcp.service
+Requires=vestige-mcp.service
 
 [Service]
 Type=simple
@@ -334,7 +330,7 @@ EOF
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now supergateway vestige-bridge
+sudo systemctl enable --now vestige-mcp vestige-bridge
 ```
 
 ---
@@ -343,10 +339,9 @@ sudo systemctl enable --now supergateway vestige-bridge
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Vestige alive | `curl localhost:3100/health` | `"ok"` |
+| Vestige alive | `curl -s -X POST localhost:3100/mcp -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'` | Tool list JSON |
 | Bridge alive | `curl -H "Auth..." localhost:8000/health` | `{"status":"healthy",...}` |
-| HTTPS working | `curl https://vestige.yourdomain.com/health` | `"ok"` |
-| MCP endpoint | `curl -X POST https://vestige.yourdomain.com/mcp -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'` | Tool list |
+| HTTPS working | `curl -s -X POST https://vestige.yourdomain.com/mcp -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'` | Tool list JSON |
 | Bridge search | `curl -X POST https://vestige.yourdomain.com/api/search -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"query":"test"}'` | Search results |
 | Claude Code | `claude mcp add vestige --url https://vestige.yourdomain.com/mcp` | Connected |
 
@@ -354,7 +349,7 @@ sudo systemctl enable --now supergateway vestige-bridge
 
 ## Security Notes
 
-- **Supergateway has no auth.** It's bound to localhost and accessed either directly (Claude Code via Caddy) or through the bridge. If you want to restrict direct MCP access, add Caddy `basic_auth` or IP allowlisting on the `/mcp*` route.
+- **vestige-mcp has no auth.** It's bound to localhost and accessed either directly (Claude Code via Caddy) or through the bridge. If you want to restrict direct MCP access, add Caddy `basic_auth` or IP allowlisting on the `/mcp*` route.
 - **The bridge enforces bearer auth** on all `/api/*` routes. Token is required.
 - **Caddy auto-HTTPS** handles TLS certificates and renewal. No manual cert management.
 - **SQLite data** lives in `/data/vestige/`. Back up this directory regularly (cron + `cp` or EBS snapshots).
@@ -365,15 +360,13 @@ sudo systemctl enable --now supergateway vestige-bridge
 
 | Issue | Fix |
 |-------|-----|
-| `vestige-mcp: command not found` | Ensure it's in PATH: `which vestige-mcp` or use full path in supergateway `--stdio` arg |
-| Supergateway exits with code 1 immediately | Almost always: `vestige-mcp` not in PATH. Check stderr log. |
+| `vestige-mcp: command not found` | Ensure it's in PATH: `which vestige-mcp` or use full path in run script (`VESTIGE_BIN=...`) |
 | `ModuleNotFoundError: No module named 'fastapi'` | You're using system Python, not the venv. Run `source .venv/bin/activate` or use `.venv/bin/uvicorn` |
-| `curl: transfer closed with outstanding read data remaining` | Supergateway crashed mid-response. Check if process is still running (`ps aux | grep supergateway`) |
 | First request hangs (~2 min) | Normal — downloading Nomic Embed model (~130MB). Check `FASTEMBED_CACHE_PATH`. |
 | Caddy fails to get cert | Ensure ports 80+443 are open in security group AND DNS A record resolves to the EC2 public IP |
 | Claude Desktop: `SSE stream disconnected` | Caddy is buffering SSE responses. Add `flush_interval -1` to the reverse_proxy block (see Step 6) |
-| Bridge can't reach supergateway | Check `VESTIGE_MCP_URL` env var. Verify supergateway is running: `curl localhost:3100/health` |
+| Bridge can't reach vestige-mcp | Check `VESTIGE_MCP_URL` env var. Verify vestige is running: `curl -s -X POST localhost:3100/mcp -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'` |
 | GLIBC version error | Pre-built binary needs GLIBC 2.38+. Use Ubuntu 24.04 or build from source. |
 | Pre-built binary on Graviton/ARM | No aarch64 pre-built binaries available. Must build from source with `cargo build --release`. |
-| Many vestige-mcp processes (~900MB each) | Missing `--stateful` flag. Without it, supergateway spawns a new process per session and never cleans up. Add `--stateful --sessionTimeout 300000`. |
 | `unable to open database file: /data/vestige` | `--data-dir` is a file path, not a directory. Use `/data/vestige/vestige.db` not `/data/vestige`. |
+| vestige-mcp exits immediately | Check stderr log: `tail /data/vestige/logs/vestige-mcp.stderr.log`. Common: port already in use, bad `--data-dir` path. |
