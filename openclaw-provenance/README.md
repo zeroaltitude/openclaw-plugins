@@ -406,6 +406,84 @@ When `.reset-trust` is processed:
 | You want to restore full trust for the rest of the turn | `.reset-trust` |
 | Content is from a known-safe source that happens to be classified as untrusted | `.reset-trust owner` |
 
+## Session Taint Watermark (Cross-Turn Persistence)
+
+By default, the high-water mark taint resets at the start of each turn. But within a session, tainted content from a previous turn persists in the LLM's conversation history — the agent can still "see" the untrusted web page from three turns ago. Without cross-turn tracking, taint restrictions would silently disappear on the next turn.
+
+The **session taint watermark** solves this. It's a persistent record of the worst taint level seen in a session, stored to disk at `<workspaceDir>/.provenance/watermarks.json`. At the start of each turn, the watermark is loaded and applied to the provenance graph as an inherited taint node — ensuring that restrictions carry forward.
+
+### How It Works
+
+1. When a tool call escalates the turn's taint (e.g., `web_fetch` → `untrusted`), the watermark store records the new level, reason, and timestamp.
+2. On the next turn's `context_assembled`, the watermark is loaded from disk and injected as a provenance node. The turn starts at the watermark's taint level (or the initial classification, whichever is stricter).
+3. The watermark only escalates — it never decreases on its own within a session.
+4. The watermark survives gateway restarts (it's persisted to disk with debounced writes).
+
+### Clearing the Watermark
+
+The watermark is cleared in two scenarios:
+
+**`.reset-trust`** — When the owner issues a `.reset-trust` command, it clears both the in-memory taint and the persistent watermark. The reset is recorded in the watermark's `resetHistory` array for audit purposes.
+
+**`/new` or `/reset`** — When a fresh session starts (detected by `before_agent_start` seeing ≤1 messages), the watermark is automatically cleared. A fresh session is a fresh trust boundary — there's no conversation history to inherit taint from.
+
+### Watermark File Format
+
+```json
+{
+  "version": 1,
+  "watermarks": {
+    "session:abc123": {
+      "level": "untrusted",
+      "reason": "web_fetch response",
+      "escalatedAt": "2026-02-10T20:15:00.000Z",
+      "escalatedBy": "web_fetch",
+      "lastImpactedTool": "exec",
+      "resetHistory": []
+    }
+  }
+}
+```
+
+The file is stored at `<workspaceDir>/.provenance/watermarks.json` and is created automatically on first use.
+
+## Developer Mode
+
+When `developerMode` is enabled in the plugin config, the plugin prepends a taint header to every outbound message. This makes the current taint state visible in the conversation for debugging and development:
+
+```
+🟢 [taint: owner | reason: owner DM | last impacted: none]
+Here's what I found...
+```
+
+```
+🔴 [taint: untrusted | reason: web_fetch response | last impacted: exec]
+I can see the page content, but exec is currently blocked.
+```
+
+The taint emoji indicates severity:
+- 🟢 `system`, `owner`, `local` — no restrictions
+- 🟡 `shared` — mild restrictions (depends on policy)
+- 🔴 `external`, `untrusted` — significant restrictions active
+
+### Enabling Developer Mode
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "provenance": {
+        "config": {
+          "developerMode": true
+        }
+      }
+    }
+  }
+}
+```
+
+Developer mode is for debugging only. It exposes internal taint state in messages, which could leak security metadata to other participants in group chats. **Do not enable in production.**
+
 ## Configuration
 
 ### Installation
@@ -464,6 +542,8 @@ Add to your `openclaw.json`:
 | `toolOverrides` | object | `{}` | Per-tool mode overrides |
 | `approvalTtlSeconds` | number | `60` | Approval code expiry |
 | `maxIterations` | number | `10` | Max agent loop iterations |
+| `developerMode` | boolean | `false` | Prepend taint header to outbound messages (debugging) |
+| `workspaceDir` | string | `process.cwd()` | Directory for persistent state (`.provenance/watermarks.json`) |
 
 ### Example Configurations
 
@@ -558,7 +638,7 @@ The "no write down" property is the novel contribution. Without it, an untrusted
 
 2. **Trust classification is static**: Tool trust levels are hardcoded. A `web_fetch` to `https://internal-api.company.com` gets the same `untrusted` classification as `https://random-blog.com`. Future work could support URL-based trust rules.
 
-3. **No cross-turn tracking**: Taint resets each turn. If an agent reads a malicious email in turn 1, turn 2 starts clean (at `owner` trust). The malicious content may still be in the conversation history, but the plugin doesn't track this. Cross-turn taint would require persistent session-level tracking.
+3. **Cross-turn tracking is session-scoped**: The persistent watermark store tracks taint across turns within a session, but taint is cleared on `/new` or `/reset` (fresh session start). If a user starts a new session, inherited taint from the previous session is discarded — even if the LLM's conversation history still contains tainted content from before. This is intentional: a fresh session is a fresh trust boundary.
 
 4. **LLM context is shared**: The fundamental limitation. Until agent frameworks support isolated execution branches (agent forks), the high-water mark is the correct model.
 
@@ -578,6 +658,7 @@ openclaw-provenance/
         ├── approval-store.ts # Code-based approval state management
         ├── provenance-graph.ts # Per-turn DAG construction
         ├── trust-levels.ts  # Trust level definitions and tool classification
+        ├── watermark-store.ts # Persistent session taint watermarks (disk-backed)
         ├── SECURITY.md      # Internal security documentation
         └── __tests__/
             └── policy-engine.test.ts  # 58 tests covering all components
