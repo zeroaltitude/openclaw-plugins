@@ -45,6 +45,8 @@ export interface SecurityPluginConfig {
   approvalTtlSeconds?: number;
   /** Max agent loop iterations before blocking (default: 10) */
   maxIterations?: number;
+  /** When true, prepend taint-level header to every outbound message */
+  developerMode?: boolean;
 }
 
 /** Get a short session key for log prefixes */
@@ -97,6 +99,53 @@ function classifyInitialTrust(ctx: AgentContext): TrustLevel {
 }
 
 /**
+ * Build a short human-readable reason for the current taint level.
+ * Truncated to 30 chars max for the developer mode header.
+ */
+function buildTaintReason(graph: TurnProvenanceGraph): string {
+  const nodes = graph.getAllNodes();
+
+  // Find the node that caused the worst taint
+  const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
+
+  // Check for inherited watermark
+  const inherited = nodes.find(n => n.id === "inherited-taint");
+  if (inherited && TRUST_ORDER.indexOf(inherited.trust) >= taintIdx) {
+    return truncate("inherited from prev turn", 30);
+  }
+
+  // Check for content scan detection
+  const contentScan = nodes.find(n => n.id === "content-scan-taint");
+  if (contentScan && TRUST_ORDER.indexOf(contentScan.trust) >= taintIdx) {
+    return truncate("external markers in history", 30);
+  }
+
+  // Check for tool calls that escalated taint
+  const toolNodes = nodes.filter(n => n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (toolNodes.length > 0) {
+    const toolNames = toolNodes.map(n => n.tool).filter(Boolean);
+    return truncate(toolNames.join(", ") || "tool call", 30);
+  }
+
+  // Check history node
+  const histNode = nodes.find(n => n.kind === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (histNode) {
+    const reason = (histNode.metadata?.reason as string) ?? "context classification";
+    return truncate(reason, 30);
+  }
+
+  // Fallback
+  if (graph.maxTaint === "system" || graph.maxTaint === "owner") {
+    return truncate("clean context", 30);
+  }
+  return truncate("unknown", 30);
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + "…";
+}
+
+/**
  * Register the security/provenance hooks.
  */
 export function registerSecurityHooks(
@@ -110,6 +159,8 @@ export function registerSecurityHooks(
   const toolTrustOverrides = config?.toolTrustOverrides;
   const verbose = config?.verbose ?? false;
 
+  const developerMode = config?.developerMode ?? false;
+
   // Build the unified policy config
   const policyConfig = buildPolicyConfig(
     config?.taintPolicy as any,
@@ -122,6 +173,9 @@ export function registerSecurityHooks(
   logger.info(`[provenance]   Taint policy: ${JSON.stringify(policyConfig.taintPolicy)}`);
   logger.info(`[provenance]   Tool overrides: ${Object.keys(policyConfig.toolOverrides).length} tools configured`);
   logger.info(`[provenance]   Max iterations: ${policyConfig.maxIterations}`);
+  if (developerMode) {
+    logger.info(`[provenance]   Developer mode: ON (taint headers will be prepended to outbound messages)`);
+  }
 
   // Track last LLM node ID per session for edge building
   const lastLlmNodeBySession = new Map<string, string>();
@@ -434,6 +488,10 @@ export function registerSecurityHooks(
 
     graph.recordOutput(event.content?.length ?? 0);
 
+    // Capture taint info BEFORE sealing for developer mode header
+    const taintLevel = graph.maxTaint;
+    const taintReason = buildTaintReason(graph);
+
     // Clear turn-scoped approvals
     approvalStore.clearTurnScoped(sessionKey);
 
@@ -452,6 +510,12 @@ export function registerSecurityHooks(
 
     // Clear blocked tools for this session
     blockedToolsBySession.delete(sessionKey);
+
+    // Developer mode: prepend taint header to outbound message
+    if (developerMode && event.content) {
+      const header = `[taint: ${taintLevel} | ${taintReason}]`;
+      return { content: `${header}\n${event.content}` };
+    }
   });
 
   return { store, approvalStore };
