@@ -521,7 +521,7 @@ export function registerSecurityHooks(
     if (developerMode && event.content) {
       const lastImpacted = lastImpactedToolBySession.get(sessionKey) ?? "none";
       const header = `[current context taint: ${taintLevel} | reason: ${taintReason} | last impacted command: ${lastImpacted}]`;
-      return { content: `${header}\n${event.content}` };
+      return { content: header + "\n" + event.content };
     }
   });
 
