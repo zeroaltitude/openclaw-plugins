@@ -248,6 +248,31 @@ export class TurnProvenanceGraph {
  * Global graph store — maintains per-session active graphs.
  * Plugin-scoped (closure over module state).
  */
+/** Extract the root cause reason from a turn's provenance graph for watermark storage */
+function buildWatermarkReason(graph: TurnProvenanceGraph): string {
+  const nodes = graph.getAllNodes();
+  const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
+
+  // Content scan detection (external markers in history)
+  const contentScan = nodes.find(n => n.id === "content-scan-taint");
+  if (contentScan && TRUST_ORDER.indexOf(contentScan.trust) >= taintIdx) {
+    return "external markers in history";
+  }
+
+  // Tool calls that escalated taint
+  const toolNodes = nodes.filter(n => n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (toolNodes.length > 0) {
+    const toolNames = toolNodes.map(n => n.tool).filter(Boolean);
+    return toolNames.join(", ") || "tool call";
+  }
+
+  // History contamination
+  const historyNode = nodes.find(n => n.id === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (historyNode) return "history contamination";
+
+  return "unknown";
+}
+
 export class ProvenanceStore {
   private activeGraphs: Map<string, TurnProvenanceGraph> = new Map();
   private completedGraphs: TurnProvenanceGraph[] = [];
@@ -262,6 +287,7 @@ export class ProvenanceStore {
    * Cleared explicitly by .reset-trust or when the session ends.
    */
   private sessionTaintWatermark: Map<string, TrustLevel> = new Map();
+  private sessionTaintWatermarkReason: Map<string, string> = new Map();
 
   constructor(maxCompletedGraphs = 100) {
     this.maxCompletedGraphs = maxCompletedGraphs;
@@ -296,13 +322,16 @@ export class ProvenanceStore {
   }
 
   /** Get the session taint watermark (worst taint across all turns) */
-  getSessionTaintWatermark(sessionKey: string): TrustLevel | undefined {
-    return this.sessionTaintWatermark.get(sessionKey);
+  getSessionTaintWatermark(sessionKey: string): { level: TrustLevel; reason: string } | undefined {
+    const level = this.sessionTaintWatermark.get(sessionKey);
+    if (!level) return undefined;
+    return { level, reason: this.sessionTaintWatermarkReason.get(sessionKey) ?? "unknown" };
   }
 
   /** Clear the session taint watermark (used by .reset-trust) */
   clearSessionTaintWatermark(sessionKey: string): void {
     this.sessionTaintWatermark.delete(sessionKey);
+    this.sessionTaintWatermarkReason.delete(sessionKey);
   }
 
   /** Get recent completed graphs */
@@ -319,9 +348,15 @@ export class ProvenanceStore {
     const turnTaint = graph.maxTaint;
     const existing = this.sessionTaintWatermark.get(sessionKey);
     if (existing) {
-      this.sessionTaintWatermark.set(sessionKey, minTrust(existing, turnTaint));
+      const merged = minTrust(existing, turnTaint);
+      this.sessionTaintWatermark.set(sessionKey, merged);
+      // Update reason if taint escalated (got worse)
+      if (merged !== existing) {
+        this.sessionTaintWatermarkReason.set(sessionKey, buildWatermarkReason(graph));
+      }
     } else {
       this.sessionTaintWatermark.set(sessionKey, turnTaint);
+      this.sessionTaintWatermarkReason.set(sessionKey, buildWatermarkReason(graph));
     }
   }
 }

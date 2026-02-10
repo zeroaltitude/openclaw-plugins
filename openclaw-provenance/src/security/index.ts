@@ -102,16 +102,16 @@ function classifyInitialTrust(ctx: AgentContext): TrustLevel {
  * Build a short human-readable reason for the current taint level.
  * Truncated to 30 chars max for the developer mode header.
  */
-function buildTaintReason(graph: TurnProvenanceGraph): string {
+function buildTaintReason(graph: TurnProvenanceGraph, watermarkReason?: string): string {
   const nodes = graph.getAllNodes();
 
   // Find the node that caused the worst taint
   const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
 
-  // Check for inherited watermark
+  // Check for inherited watermark — use the original root cause reason
   const inherited = nodes.find(n => n.id === "inherited-taint");
   if (inherited && TRUST_ORDER.indexOf(inherited.trust) >= taintIdx) {
-    return truncate("inherited from prev turn", 30);
+    return truncate(watermarkReason ?? "inherited from prev turn", 30);
   }
 
   // Check for content scan detection
@@ -203,15 +203,15 @@ export function registerSecurityHooks(
     // the approval code system.
     const watermark = store.getSessionTaintWatermark(sessionKey);
     if (watermark) {
-      const watermarkIdx = TRUST_ORDER.indexOf(watermark);
+      const watermarkIdx = TRUST_ORDER.indexOf(watermark.level);
       const initialIdx = TRUST_ORDER.indexOf(initialTrust);
       // Only apply watermark if it's stricter than the current trust
       if (watermarkIdx > initialIdx) {
         graph.addNode({
           id: "inherited-taint",
           kind: "history",
-          trust: watermark,
-          metadata: { reason: "inherited taint watermark from previous turn" },
+          trust: watermark.level,
+          metadata: { reason: watermark.reason ?? "inherited taint watermark from previous turn" },
         });
       }
     }
@@ -246,8 +246,8 @@ export function registerSecurityHooks(
     logger.info(`[provenance:${sk}] ── Turn Start ──`);
     logger.info(`[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`);
     logger.info(`[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"})`);
-    if (watermark && watermark !== initialTrust) {
-      logger.info(`[provenance:${sk}]   Inherited taint watermark: ${watermark}`);
+    if (watermark && watermark.level !== initialTrust) {
+      logger.info(`[provenance:${sk}]   Inherited taint watermark: ${watermark.level} (reason: ${watermark.reason})`);
     }
     if (foundExternalMarker) {
       logger.info(`[provenance:${sk}]   Content scan: external content markers found in history`);
@@ -496,7 +496,8 @@ export function registerSecurityHooks(
 
     // Capture taint info BEFORE sealing for developer mode header
     const taintLevel = graph.maxTaint;
-    const taintReason = buildTaintReason(graph);
+    const currentWatermark = store.getSessionTaintWatermark(sessionKey);
+    const taintReason = buildTaintReason(graph, currentWatermark?.reason);
 
     // Clear turn-scoped approvals
     approvalStore.clearTurnScoped(sessionKey);

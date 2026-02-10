@@ -739,7 +739,7 @@ describe("ProvenanceStore session taint watermark", () => {
     store.completeTurn(sk);
 
     // Watermark should be "external"
-    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+    expect(store.getSessionTaintWatermark(sk)?.level).toBe("external");
 
     // Turn 2: starts fresh, but watermark is available
     const g2 = store.startTurn(sk);
@@ -749,7 +749,7 @@ describe("ProvenanceStore session taint watermark", () => {
 
     // After inheriting watermark (as the hook handler would do):
     const watermark = store.getSessionTaintWatermark(sk);
-    expect(watermark).toBe("external");
+    expect(watermark?.level).toBe("external");
   });
 
   it("watermark tracks worst taint across multiple turns", () => {
@@ -760,20 +760,20 @@ describe("ProvenanceStore session taint watermark", () => {
     const g1 = store.startTurn(sk);
     g1.recordContextAssembled("prompt", 1, "shared");
     store.completeTurn(sk);
-    expect(store.getSessionTaintWatermark(sk)).toBe("shared");
+    expect(store.getSessionTaintWatermark(sk)?.level).toBe("shared");
 
     // Turn 2: external taint (worse)
     const g2 = store.startTurn(sk);
     g2.recordContextAssembled("prompt", 1, "owner");
     g2.addNode({ id: "tool-1", kind: "tool_call", trust: "external", tool: "web_fetch" });
     store.completeTurn(sk);
-    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+    expect(store.getSessionTaintWatermark(sk)?.level).toBe("external");
 
     // Turn 3: owner only — watermark stays at "external"
     const g3 = store.startTurn(sk);
     g3.recordContextAssembled("prompt", 1, "owner");
     store.completeTurn(sk);
-    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+    expect(store.getSessionTaintWatermark(sk)?.level).toBe("external");
   });
 
   it("clearSessionTaintWatermark resets the watermark", () => {
@@ -784,7 +784,7 @@ describe("ProvenanceStore session taint watermark", () => {
     g1.recordContextAssembled("prompt", 1);
     g1.addNode({ id: "tool-1", kind: "tool_call", trust: "external", tool: "web_fetch" });
     store.completeTurn(sk);
-    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+    expect(store.getSessionTaintWatermark(sk)?.level).toBe("external");
 
     store.clearSessionTaintWatermark(sk);
     expect(store.getSessionTaintWatermark(sk)).toBeUndefined();
@@ -802,7 +802,7 @@ describe("ProvenanceStore session taint watermark", () => {
     g2.recordContextAssembled("prompt", 1, "owner");
     store.completeTurn("session-b");
 
-    expect(store.getSessionTaintWatermark("session-a")).toBe("external");
-    expect(store.getSessionTaintWatermark("session-b")).toBe("owner");
+    expect(store.getSessionTaintWatermark("session-a")?.level).toBe("external");
+    expect(store.getSessionTaintWatermark("session-b")?.level).toBe("owner");
   });
 });
