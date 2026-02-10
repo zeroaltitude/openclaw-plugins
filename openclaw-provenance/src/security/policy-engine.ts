@@ -86,7 +86,15 @@ export function getToolMode(
 ): PolicyMode {
   const defaultMode = config.taintPolicy[taintLevel] ?? "restrict";
   const override = config.toolOverrides[toolName.toLowerCase()];
-  if (!override) return defaultMode;
+
+  if (!override) {
+    // Unknown tool (not in DEFAULT_SAFE_TOOLS, DEFAULT_DANGEROUS_TOOLS, or user overrides).
+    // Default to the *untrusted* policy mode regardless of current taint level.
+    // This prevents tool rename attacks where a dangerous tool is re-registered
+    // under an unlisted name to bypass restrictions.
+    const untrustedMode = config.taintPolicy["untrusted"] ?? "restrict";
+    return strictest(defaultMode, untrustedMode);
+  }
 
   // Check specific taint level, then glob "*"
   const overrideMode = override[taintLevel] ?? override["*"];
@@ -266,6 +274,34 @@ export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
 };
 
 /**
+ * Default taint-level-default tools — known tools that follow the taint-level
+ * default policy (no per-tool override). Explicitly listing them ensures they
+ * are recognized as "known" and don't fall through to the unknown-tool policy.
+ * 
+ * An empty override {} means "use the taint-level default for all levels."
+ */
+export const DEFAULT_TAINT_DEFAULT_TOOLS: Record<string, ToolOverride> = {
+  // Dangerous action tools — follow taint-level default
+  "exec":              {},
+  "edit":              {},
+  "write":             {},
+  "process":           {},
+  "browser":           {},
+  "message":           {},
+  "canvas":            {},
+  "nodes":             {},
+  "tts":               {},
+  "cron":              {},
+  "sessions_send":     {},
+  "sessions_spawn":    {},
+  // Vestige write operations
+  "vestige_ingest":    {},
+  "vestige_smart_ingest": {},
+  // External data tools
+  "gog":               {},
+};
+
+/**
  * Default dangerous tool overrides — tools that should be stricter than the
  * taint-level default at certain levels.
  */
@@ -298,6 +334,7 @@ export function buildPolicyConfig(
 
   // Merge tool overrides: defaults first, then user overrides on top
   const mergedOverrides: Record<string, ToolOverride> = {
+    ...DEFAULT_TAINT_DEFAULT_TOOLS,
     ...DEFAULT_SAFE_TOOLS,
     ...DEFAULT_DANGEROUS_TOOLS,
   };

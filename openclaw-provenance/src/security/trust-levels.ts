@@ -117,8 +117,12 @@ export function buildToolOutputTaintMap(overrides?: Record<string, TrustLevel>):
   return { ...DEFAULT_TOOL_OUTPUT_TAINTS, ...overrides };
 }
 
-/** Get trust level for a tool's output. Uses a pre-merged map if provided, otherwise defaults. */
+/**
+ * Get trust level for a tool's output. Uses a pre-merged map if provided, otherwise defaults.
+ * Unknown tools (not in defaults or overrides) default to "untrusted" — this prevents
+ * tool rename attacks where a dangerous tool is re-registered under an unlisted name.
+ */
 export function getToolTrust(toolName: string, resolvedMap?: Record<string, TrustLevel>): TrustLevel {
   if (resolvedMap?.[toolName]) return resolvedMap[toolName];
-  return DEFAULT_TOOL_OUTPUT_TAINTS[toolName] ?? "local";
+  return DEFAULT_TOOL_OUTPUT_TAINTS[toolName] ?? "untrusted";
 }

@@ -74,7 +74,7 @@ When a tool returns a response, the plugin looks up the tool's **output taint** 
 
 #### Default Output Taints
 
-Every tool has a built-in default output taint. Unknown tools default to `local`.
+Every tool has a built-in default output taint. Unknown tools default to `untrusted` (see [Unknown Tools](#unknown-tools-secure-by-default)).
 
 | Trust Level | Tools |
 |-------------|-------|
@@ -389,9 +389,19 @@ The first browser call succeeds because it was evaluated against the pre-escalat
 
 `gateway` defaults to `{ local: "confirm", shared: "confirm", external: "confirm", untrusted: "confirm" }` — requiring approval even at local trust level, because config changes can disable the security plugin itself.
 
-### Unknown Tools
+### Unknown Tools (Secure by Default)
 
-Tools with no override get the taint-level default mode. At `confirm` or `restrict`, unknown tools are blocked by default. This is secure-by-default: new tools added to OpenClaw are automatically restricted in tainted contexts until explicitly overridden.
+Tools not listed in any defaults list (`DEFAULT_SAFE_TOOLS`, `DEFAULT_TAINT_DEFAULT_TOOLS`, `DEFAULT_DANGEROUS_TOOLS`) or user `toolOverrides` are treated as **unknown** and receive the strictest possible handling on both axes:
+
+- **Output taint**: `untrusted` — an unknown tool's response is assumed adversarial
+- **Call permission**: the `untrusted` policy mode (or the current taint-level default, whichever is stricter) — regardless of the session's actual taint level
+
+This prevents **tool rename attacks** where a dangerous tool (e.g., `exec`) is re-registered under an unlisted name to bypass restrictions. It also ensures that new tools added by skills or plugins are automatically restricted until explicitly classified.
+
+To make an unknown tool usable, add it to either:
+- `toolOutputTaints` in plugin config (to set its output taint level)
+- `toolOverrides` in plugin config (to set its call permission per taint level)
+- Or both, depending on your needs
 
 ## Code-Based Approval
 
