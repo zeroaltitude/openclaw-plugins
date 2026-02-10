@@ -1,7 +1,7 @@
 """MCP JSON-RPC 2.0 client communicating with an external Vestige MCP server.
 
 Transport: Connects to vestige-mcp's native HTTP endpoint (Streamable HTTP,
-protocol version 2024-11-05). No subprocess management, no supergateway —
+protocol version 2025-03-26). No subprocess management, no supergateway —
 vestige-mcp serves HTTP directly via ``--http --port 3100``.
 
 The native HTTP transport returns JSON by default and SSE only when the client
@@ -36,7 +36,7 @@ REQUEST_TIMEOUT = float(os.environ.get("VESTIGE_REQUEST_TIMEOUT", "30"))
 class MCPClient:
     """Connects to vestige-mcp's native HTTP endpoint (Streamable HTTP).
 
-    vestige-mcp serves Streamable HTTP natively (protocol version 2024-11-05)
+    vestige-mcp serves Streamable HTTP natively (protocol version 2025-03-26)
     on POST/GET/DELETE /mcp. Session management uses the Mcp-Session-Id header.
     """
 
