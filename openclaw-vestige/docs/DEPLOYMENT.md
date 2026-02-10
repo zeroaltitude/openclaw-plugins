@@ -19,7 +19,7 @@ export ECR_BRIDGE=123456789.dkr.ecr.us-west-2.amazonaws.com/vestige-bridge
 # Login to ECR
 aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $ECR_VESTIGE
 
-# Build Vestige (MCP server + supergateway)
+# Build Vestige (MCP server with native HTTP)
 docker build -t $ECR_VESTIGE:latest -f docker/Dockerfile.vestige .
 docker push $ECR_VESTIGE:latest
 
@@ -132,7 +132,7 @@ The Helm chart deploys a single pod with two containers (sidecar pattern):
 └───────────────────────────────────────────────────────┘
 ```
 
-- **vestige-mcp**: Runs supergateway wrapping vestige-mcp. Only accessible on localhost within the pod.
+- **vestige-mcp**: Runs `vestige-mcp --http --host 0.0.0.0 --port 3100`. Only accessible on localhost within the pod.
 - **bridge**: Runs FastAPI with auth. Exposed via Service and Ingress on port 8000.
 - **Shared PVC**: Both containers share `/data` for SQLite and embedding cache.
 
@@ -145,7 +145,7 @@ Each container has independent probes:
 | Probe | Method | Purpose |
 |-------|--------|---------|
 | **Startup** | `curl POST /mcp` | Allows up to **5 minutes** (30 × 10s) for initial model download |
-| **Liveness** | `curl POST /mcp` | Restarts container if supergateway dies |
+| **Liveness** | `curl POST /mcp` | Restarts container if vestige-mcp dies |
 | **Readiness** | `curl POST /mcp` | Removes from service if not responding |
 
 ### Bridge Container

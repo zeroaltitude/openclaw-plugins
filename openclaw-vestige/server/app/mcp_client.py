@@ -1,12 +1,17 @@
 """MCP JSON-RPC 2.0 client communicating with an external Vestige MCP server.
 
-Transport: Connects to a standalone Vestige instance exposed via Streamable HTTP
-(supergateway) or SSE. No subprocess management — the Vestige process runs
-independently and the bridge connects as a client.
+Transport: Connects to vestige-mcp's native HTTP endpoint (Streamable HTTP,
+protocol version 2024-11-05). No subprocess management, no supergateway —
+vestige-mcp serves HTTP directly via ``--http --port 3100``.
+
+The native HTTP transport returns JSON by default and SSE only when the client
+sends ``Accept: text/event-stream``. This client sends
+``Accept: application/json, text/event-stream`` so JSON is preferred, with SSE
+as a fallback (kept for backward compatibility with legacy supergateway setups).
 
 Supported transports:
-  - streamable_http (default): POST JSON-RPC to /mcp endpoint
-  - sse: GET /sse for server-sent events, POST /message for requests
+  - streamable_http (default): POST JSON-RPC to /mcp endpoint (native vestige-mcp)
+  - sse (legacy): GET /sse for server-sent events, POST /message for requests
 """
 
 from __future__ import annotations
@@ -29,7 +34,11 @@ REQUEST_TIMEOUT = float(os.environ.get("VESTIGE_REQUEST_TIMEOUT", "30"))
 
 
 class MCPClient:
-    """Connects to an external Vestige MCP server over HTTP (Streamable HTTP or SSE)."""
+    """Connects to vestige-mcp's native HTTP endpoint (Streamable HTTP).
+
+    vestige-mcp serves Streamable HTTP natively (protocol version 2024-11-05)
+    on POST/GET/DELETE /mcp. Session management uses the Mcp-Session-Id header.
+    """
 
     def __init__(
         self,
@@ -51,7 +60,7 @@ class MCPClient:
     # ── lifecycle ──────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """Initialize the HTTP client and perform MCP handshake with Vestige."""
+        """Initialize the HTTP client and perform MCP handshake with vestige-mcp."""
         self._client = httpx.AsyncClient(timeout=self.timeout)
 
         # MCP initialize handshake
@@ -188,11 +197,14 @@ class MCPClient:
     def _parse_sse_json(text: str) -> dict | list | None:
         """Extract JSON data from an SSE-formatted response.
 
-        Supergateway returns Streamable HTTP responses as SSE:
+        When the client sends Accept: text/event-stream (or the server chooses
+        SSE), responses arrive as SSE frames:
             event: message
             data: {"jsonrpc":"2.0","id":1,"result":{...}}
 
-        This extracts and parses the JSON from the 'data:' lines.
+        With native HTTP transport and Accept: application/json first, this
+        path is rarely hit — vestige-mcp returns plain JSON by default.
+        Kept for backward compatibility.
         """
         results = []
         for line in text.splitlines():
@@ -235,7 +247,7 @@ class MCPClient:
         except httpx.HTTPStatusError as exc:
             raise MCPError(f"Vestige returned HTTP {exc.response.status_code}: {exc.response.text}") from exc
 
-        # Capture session ID from response (set by supergateway in stateful mode)
+        # Capture session ID from response (set by vestige-mcp for stateful sessions)
         session_id = response.headers.get("mcp-session-id")
         if session_id:
             if self._session_id and self._session_id != session_id:
@@ -247,7 +259,7 @@ class MCPClient:
         data = None
 
         if "text/event-stream" in content_type:
-            # Supergateway returns SSE-formatted responses
+            # SSE-formatted response (legacy supergateway or explicit SSE request)
             data = self._parse_sse_json(response.text)
             if data is None:
                 raise MCPError(f"No JSON data found in SSE response: {response.text[:200]}")

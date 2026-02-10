@@ -26,19 +26,17 @@ Vestige is a Rust MCP server implementing FSRS-6 spaced repetition, dual-strengt
                                         MCP JSON-RPC (Streamable HTTP)
                                                    │
                                         ┌──────────▼───────────────┐
-                                        │  supergateway            │
-                                        │  (wraps vestige-mcp)     │
-                                        │  port 3100               │
-                                        └──────────┬───────────────┘
-                                                   │ stdio
-                                        ┌──────────▼───────────────┐
                                         │  vestige-mcp             │
-                                        │  (Rust binary, unmodified)│
+                                        │  (Rust, native HTTP)     │
+                                        │  --http --port 3100      │
                                         │                          │
                                         │  SQLite + Nomic Embed    │
                                         │  FSRS-6 + dual-strength  │
                                         └──────────────────────────┘
 ```
+
+> **Recommended:** Use native HTTP transport (`vestige-mcp --http --port 3100`).
+> This eliminates the supergateway/Node.js dependency entirely. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
 ## Quick Start (Local Dev)
 
@@ -77,7 +75,7 @@ openclaw-vestige/
 ├── server/              # FastAPI HTTP bridge → connects to Vestige over HTTP
 ├── plugin/              # OpenClaw TypeScript plugin (registers agent tools)
 ├── docker/
-│   ├── Dockerfile.vestige   # Vestige MCP + supergateway (Streamable HTTP)
+│   ├── Dockerfile.vestige   # Vestige MCP with native HTTP (no supergateway)
 │   ├── Dockerfile.bridge    # FastAPI bridge (Python, no Vestige binary)
 │   ├── Dockerfile           # Legacy single-container (deprecated)
 │   └── docker-compose.yml   # Two-service setup
@@ -99,10 +97,11 @@ A thin FastAPI application that:
 
 ### Vestige MCP (`docker/Dockerfile.vestige`)
 The Vestige memory engine exposed via HTTP:
-- Runs `vestige-mcp` (unmodified Rust binary) wrapped by `supergateway`
-- Exposes Streamable HTTP on port 3100 at `/mcp`
+- Runs `vestige-mcp --http --port 3100` (native Streamable HTTP, no wrapper needed)
+- Exposes Streamable HTTP on port 3100 at `/mcp` (POST/GET/DELETE)
 - No authentication — the bridge handles auth
 - Manages SQLite database and Nomic Embed model
+- No Node.js or supergateway dependency
 
 ### Plugin (`plugin/`)
 An OpenClaw TypeScript plugin (CommonJS) that registers five tools:
@@ -116,7 +115,7 @@ The plugin includes request timeouts (30s) and parses MCP content from responses
 
 ### Helm Chart (`helm/vestige/`)
 Production k8s deployment with sidecar pattern:
-- **vestige-mcp container**: supergateway + vestige-mcp, port 3100 (localhost only)
+- **vestige-mcp container**: vestige-mcp with native HTTP, port 3100 (localhost only)
 - **bridge container**: FastAPI, port 8000 (exposed via Service/Ingress)
 - Shared PVC for data persistence (including embedding model cache)
 - Internal ALB ingress with optional ACM certificate

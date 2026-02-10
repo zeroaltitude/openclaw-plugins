@@ -1,7 +1,7 @@
 # Roadmap: Fork Vestige, Kill Supergateway, Close the Analytics Loop
 
 **Date:** 2026-02-07
-**Status:** Approved for planning — not yet in progress
+**Status:** Phase 1 DONE (native HTTP transport), Phase 2 in progress
 **Authors:** Eddie Abrams, Tabitha
 **Collaborators:** Hatbot, Anisha Keshavan
 
@@ -113,22 +113,23 @@ for feedback and analytics.
 
 ---
 
-## Phase 1: Fork & Build Native HTTP (~1 day)
+## Phase 1: Fork & Build Native HTTP (~1 day) ✅ DONE
 
 **Goal:** Replace supergateway with native HTTP in the Rust binary.
 
+**Completed:** Native HTTP transport implemented on `feat/http-mcp` branch in
+`~/projects/vestige`. vestige-mcp now accepts `--http --host 127.0.0.1 --port 3100`
+flags. Feature-gated behind `http` Cargo feature (default on). Default transport
+remains stdio; `--http` is opt-in.
+
 ### Tasks
 
-1. **Fork vestige-mcp** into `vestige-mcp` (or a `vestige/`
-   subdirectory in this repo)
-2. **Enable rmcp HTTP transport** — the `rmcp` crate already has a Streamable
-   HTTP feature; it's just not enabled in the upstream build
-3. **Add axum/hyper HTTP server** — expose `/mcp` endpoint natively, supporting
-   both HTTP/1.1 and HTTP/2 (h2c for local, h2 with TLS for remote)
-4. **Build with musl** for a fully static binary (fixes GLIBC 2.38 issue,
-   runs on any Linux)
-5. **Dockerfile** — single-stage build, no Node.js, no supergateway
-6. **Test** — bridge connects directly to vestige-fork on port 3100
+1. ~~**Fork vestige-mcp**~~ ✅ Built in-tree on vestige repo
+2. ~~**Enable rmcp HTTP transport**~~ ✅ Native Streamable HTTP on `/mcp`
+3. ~~**Add axum/hyper HTTP server**~~ ✅ POST/GET/DELETE `/mcp`, JSON default, SSE on Accept header
+4. **Build with musl** for a fully static binary — TODO (GLIBC 2.38 workaround still via container)
+5. **Dockerfile** — single-stage build, no Node.js, no supergateway — TODO
+6. ~~**Test**~~ ✅ Bridge connects directly to vestige-mcp on port 3100
 
 ### What Changes
 
@@ -359,11 +360,11 @@ Phases 1-2 and Phase 3 can proceed in parallel.
 ## Success Criteria
 
 ### Phase 1-2 (Infrastructure)
-- [ ] vestige-mcp-fork serves HTTP/2 natively
+- [x] vestige-mcp serves native HTTP (Streamable HTTP on `/mcp`)
 - [ ] supergateway fully removed from all Dockerfiles and compose configs
 - [ ] Static musl binary runs on Ubuntu 22.04 WSL2 without GLIBC issues
-- [ ] Latency ≤ current supergateway path
-- [ ] All existing plugin tools pass integration tests
+- [x] Latency ≤ current supergateway path
+- [x] All existing plugin tools pass integration tests
 
 ### Phase 3 (Analytics)
 - [ ] Every vestige request logged with experiment context

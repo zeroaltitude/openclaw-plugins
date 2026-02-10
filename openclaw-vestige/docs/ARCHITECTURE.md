@@ -8,9 +8,11 @@ openclaw-vestige is a three-layer system that gives OpenClaw agents persistent c
 2. **FastAPI Bridge** (Python) — HTTP REST API with authentication, connects to Vestige over MCP
 3. **Vestige MCP Server** (Rust) — The actual memory engine, exposed via Streamable HTTP
 
-## Architecture (v0.2 — Decoupled)
+## Architecture (v0.3 — Native HTTP)
 
-In v0.2, the bridge no longer spawns Vestige as a subprocess. Instead, Vestige runs as an independent service (wrapped by [supergateway](https://github.com/nicholasgriffintn/supergateway) to expose Streamable HTTP), and the bridge connects to it as an MCP client over HTTP.
+In v0.3, vestige-mcp serves Streamable HTTP natively via `--http --port 3100`,
+eliminating the supergateway (Node.js) dependency entirely. The bridge connects
+directly to the Rust binary over MCP JSON-RPC.
 
 ```
 ┌──────────────────┐     HTTP/JSON      ┌──────────────────────────┐
@@ -33,31 +35,41 @@ In v0.2, the bridge no longer spawns Vestige as a subprocess. Instead, Vestige r
                                          POST http://vestige:3100/mcp
                                                    │
                                         ┌──────────▼───────────────┐
-                                        │  supergateway            │
-                                        │  (Node.js, port 3100)    │
-                                        │                          │
-                                        │  Wraps vestige-mcp stdio │
-                                        │  → Streamable HTTP       │
-                                        └──────────┬───────────────┘
-                                                   │
-                                            stdio (NDJSON)
-                                                   │
-                                        ┌──────────▼───────────────┐
                                         │  vestige-mcp             │
-                                        │  (Rust binary, unmodified)│
+                                        │  (Rust binary)           │
+                                        │  --http --port 3100      │
                                         │                          │
+                                        │  Native Streamable HTTP  │
                                         │  SQLite + Nomic Embed    │
                                         │  FSRS-6 + dual-strength  │
                                         └──────────────────────────┘
 ```
 
-### Why Decoupled?
+<details>
+<summary>Legacy architecture (v0.2 — supergateway)</summary>
 
+In v0.2, Vestige ran as a stdio process wrapped by
+[supergateway](https://github.com/nicholasgriffintn/supergateway) to expose
+Streamable HTTP. This required Node.js in the vestige container and spawned a
+new vestige-mcp subprocess per MCP session.
+
+```
+  Bridge → supergateway (Node.js, port 3100) → vestige-mcp (stdio)
+```
+
+This is no longer needed — vestige-mcp serves HTTP natively.
+</details>
+
+### Why Native HTTP?
+
+- **No Node.js dependency**: Supergateway and its Node.js runtime are eliminated entirely
+- **Single process**: One persistent vestige-mcp process serves all sessions (no per-session subprocess spawning, no duplicate model loads)
 - **Independent lifecycle**: Vestige can be restarted/upgraded without restarting the bridge
 - **Direct MCP access**: Claude Code can connect to Vestige directly via `claude mcp add vestige --url http://localhost:3100/mcp`
 - **Simpler bridge**: No subprocess management, lifecycle locks, stderr draining
 - **Better observability**: Each component has its own health checks and logs
 - **Flexible deployment**: Can be run as Docker Compose services, k8s sidecar containers, or separate pods
+- **Smaller container image**: No Node.js runtime or npm dependencies needed
 
 ## Data Flow
 
@@ -69,7 +81,7 @@ Agent → vestige_smart_ingest("User prefers TypeScript")
     → Bridge: POST http://vestige:3100/mcp
         {"jsonrpc":"2.0","id":3,"method":"tools/call",
          "params":{"name":"smart_ingest","arguments":{...}}}
-      → supergateway → vestige-mcp (stdio)
+      → vestige-mcp (native HTTP)
         → Prediction Error Gating
           → SIMILARITY CHECK against existing memories
           → Decision: CREATE / UPDATE / REINFORCE / SUPERSEDE
@@ -88,7 +100,7 @@ Agent → vestige_search("TypeScript preferences")
     → Bridge: POST http://vestige:3100/mcp
         {"jsonrpc":"2.0","id":5,"method":"tools/call",
          "params":{"name":"search","arguments":{...}}}
-      → supergateway → vestige-mcp (stdio)
+      → vestige-mcp (native HTTP)
         → Hybrid Search
           → Keyword search (BM25-style)
           → Semantic search (embedding cosine similarity)
@@ -101,14 +113,14 @@ Agent → vestige_search("TypeScript preferences")
 
 ## MCP Protocol Details
 
-The bridge speaks MCP JSON-RPC 2.0 over Streamable HTTP to the supergateway endpoint.
+The bridge speaks MCP JSON-RPC 2.0 over Streamable HTTP directly to vestige-mcp's native HTTP endpoint (protocol version `2024-11-05`).
 
 ### Transport Modes
 
 | Mode | URL Pattern | How It Works |
 |------|-------------|-------------|
-| `streamable_http` (default) | `http://host:3100/mcp` | POST JSON-RPC to `/mcp`, responses as JSON |
-| `sse` | `http://host:3100/sse` | GET `/sse` for events, POST `/message` for requests |
+| `streamable_http` (default) | `http://host:3100/mcp` | POST/GET/DELETE to `/mcp`. Returns JSON by default, SSE when `Accept: text/event-stream` |
+| `sse` (legacy) | `http://host:3100/sse` | GET `/sse` for events, POST `/message` for requests |
 
 Configured via `VESTIGE_TRANSPORT` environment variable.
 
@@ -153,7 +165,7 @@ Two services connected via Docker networking:
 
 ```yaml
 services:
-  vestige:    # supergateway + vestige-mcp, port 3100
+  vestige:    # vestige-mcp --http --port 3100
   bridge:     # FastAPI, port 8000, connects to vestige:3100
 ```
 

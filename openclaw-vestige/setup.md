@@ -1,3 +1,11 @@
+# Local Dev Setup
+
+## Option 1: Native HTTP (recommended for bridge)
+
+```bash
+# Start vestige-mcp with native HTTP transport
+vestige-mcp --http --host 127.0.0.1 --port 3100 &
+
 # Generate and save a token
 export VESTIGE_AUTH_TOKEN=$(openssl rand -hex 32)
 echo "$VESTIGE_AUTH_TOKEN"
@@ -13,3 +21,14 @@ source .venv/bin/activate
 
 # Verify
 curl -H "Authorization: Bearer $VESTIGE_AUTH_TOKEN" http://localhost:8000/health
+```
+
+## Option 2: stdio (for Claude Code / `claude mcp add`)
+
+```bash
+# Add vestige-mcp as a stdio MCP server (no HTTP needed)
+claude mcp add vestige -- vestige-mcp
+
+# Or if you want Claude Code to talk to the HTTP endpoint directly:
+claude mcp add vestige --url http://localhost:3100/mcp
+```
