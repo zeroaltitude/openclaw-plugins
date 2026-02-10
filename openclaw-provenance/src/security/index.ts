@@ -521,7 +521,8 @@ export function registerSecurityHooks(
     // Developer mode: prepend taint header to outbound message
     if (developerMode && event.content) {
       const lastImpacted = lastImpactedToolBySession.get(sessionKey) ?? "none";
-      const header = `[current context taint: ${taintLevel} | reason: ${taintReason} | last impacted command: ${lastImpacted}]`;
+      const taintEmoji = taintLevel === "owner" ? "🟢" : taintLevel === "shared" ? "🟡" : "🔴";
+      const header = `${taintEmoji} [taint: ${taintLevel} | reason: ${taintReason} | last impacted: ${lastImpacted}]`;
       return { content: header + "\n" + event.content };
     }
   });
