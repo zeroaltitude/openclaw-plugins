@@ -34,6 +34,15 @@ The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37
 | AML.T0052 | Confused deputy attacks | Trust classification prevents privilege escalation |
 | AML.T0055 | Social engineering via agent | Block `message` when context contains untrusted content |
 
+**Partially addressed** (plugin reduces impact but does not fully prevent):
+
+| ATLAS Technique | Threat | Partial Mitigation | Gap |
+|----------------|--------|-------------------|-----|
+| AML.T0051.001 | Indirect prompt injection (T-EXEC-002) | Taint tracking restricts tool escalation after injection | Cannot detect or prevent the injection itself — only limits its blast radius |
+| AML.T0043 | Approval prompt manipulation (T-EVADE-003) | Unpredictable 8-char hex codes prevent automated approval bypass | Owner can still be socially engineered into approving a malicious tool call |
+| AML.T0009 | Data theft via `web_fetch` (T-EXFIL-001) | `web_fetch` taints context, restricting subsequent dangerous tools | `web_fetch` itself is always allowed (read-only) — data can be exfiltrated via URL parameters in the request |
+| AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | `shared` trust level restricts actions after reading poisoned memories | Cannot prevent the poisoning itself — malicious content written to shared memory persists across sessions |
+
 ## Architecture
 
 ### Two Independent Axes: Tool Response Trust vs. Tool Call Permission
