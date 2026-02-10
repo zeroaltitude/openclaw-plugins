@@ -25,6 +25,7 @@ interface PluginApi {
 // ── Plugin entry point ───────────────────────────────────────────────────────
 export function register(api: PluginApi) {
   const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
+
   registerSecurityHooks(
     api,
     api.logger,
@@ -34,6 +35,8 @@ export function register(api: PluginApi) {
       toolOverrides: (cfg.toolOverrides as any) ?? undefined,
       approvalTtlSeconds: (cfg.approvalTtlSeconds as number) ?? undefined,
       maxIterations: (cfg.maxIterations as number) ?? undefined,
+      developerMode: (cfg.developerMode as boolean) ?? undefined,
+      workspaceDir: (api.config as any)?.agents?.defaults?.workspace ?? (api.config as any)?.agents?.workspace ?? (api.config as any)?.workspaceDir ?? undefined,
     },
   );
 }

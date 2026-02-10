@@ -2,7 +2,11 @@
  * Security Policy Engine — Test Suite
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { WatermarkStore } from "../watermark-store.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildPolicyConfig,
   evaluatePolicy,
@@ -718,5 +722,91 @@ describe("Integration: taint → policy", () => {
     const result = evaluateWithApprovals(graph, ["exec"], restrictConfig, approvalStore, "s1");
     expect(result.toolRemovals.has("exec")).toBe(true);
     expect(result.pendingConfirmations).toHaveLength(0); // no confirm, just restrict
+  });
+});
+
+// ============================================================
+// WatermarkStore — Persistent Taint Watermarks
+// ============================================================
+
+describe("WatermarkStore", () => {
+  let tmpDir: string;
+  let ws: WatermarkStore;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "watermark-test-"));
+    ws = new WatermarkStore(tmpDir);
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("escalates and retrieves watermark", () => {
+    ws.escalate("session-a", "external", "web_fetch", "web_fetch");
+    const wm = ws.getLevel("session-a");
+    expect(wm?.level).toBe("external");
+    expect(wm?.reason).toBe("web_fetch");
+  });
+
+  it("tracks worst taint (does not downgrade)", () => {
+    ws.escalate("session-a", "shared", "group chat", "group chat");
+    expect(ws.getLevel("session-a")?.level).toBe("shared");
+
+    ws.escalate("session-a", "external", "web_fetch", "web_fetch");
+    expect(ws.getLevel("session-a")?.level).toBe("external");
+
+    // Owner should not downgrade
+    ws.escalate("session-a", "owner", "owner msg", "owner msg");
+    expect(ws.getLevel("session-a")?.level).toBe("external");
+  });
+
+  it("does not create watermark for owner/system taint", () => {
+    ws.escalate("session-a", "owner", "owner", "owner");
+    expect(ws.getLevel("session-a")).toBeUndefined();
+
+    ws.escalate("session-a", "system", "system", "system");
+    expect(ws.getLevel("session-a")).toBeUndefined();
+  });
+
+  it("clear removes watermark", () => {
+    ws.escalate("session-a", "external", "web_fetch", "web_fetch");
+    expect(ws.getLevel("session-a")?.level).toBe("external");
+
+    ws.clear("session-a");
+    expect(ws.getLevel("session-a")).toBeUndefined();
+  });
+
+  it("clearWithAudit returns the cleared entry", () => {
+    ws.escalate("session-a", "external", "web_fetch", "web_fetch");
+    const cleared = ws.clearWithAudit("session-a");
+    expect(cleared?.level).toBe("external");
+    expect(cleared?.reason).toBe("web_fetch");
+    expect(ws.getLevel("session-a")).toBeUndefined();
+  });
+
+  it("independent sessions have independent watermarks", () => {
+    ws.escalate("session-a", "external", "web_fetch", "web_fetch");
+    expect(ws.getLevel("session-a")?.level).toBe("external");
+    expect(ws.getLevel("session-b")).toBeUndefined();
+  });
+
+  it("persists to disk and reloads", () => {
+    ws.escalate("session-a", "external", "web_fetch", "web_fetch");
+    ws.flush();
+
+    // Create a new store pointing at same dir
+    const ws2 = new WatermarkStore(tmpDir);
+    expect(ws2.getLevel("session-a")?.level).toBe("external");
+    expect(ws2.getLevel("session-a")?.reason).toBe("web_fetch");
+  });
+
+  it("survives reload after clear", () => {
+    ws.escalate("session-a", "external", "web_fetch", "web_fetch");
+    ws.clear("session-a");
+    ws.flush();
+
+    const ws2 = new WatermarkStore(tmpDir);
+    expect(ws2.getLevel("session-a")).toBeUndefined();
   });
 });

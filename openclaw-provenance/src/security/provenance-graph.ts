@@ -248,10 +248,44 @@ export class TurnProvenanceGraph {
  * Global graph store — maintains per-session active graphs.
  * Plugin-scoped (closure over module state).
  */
+/** Extract the root cause reason from a turn's provenance graph for watermark storage */
+export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
+  const nodes = graph.getAllNodes();
+  const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
+
+  // Content scan detection (external markers in history)
+  const contentScan = nodes.find(n => n.id === "content-scan-taint");
+  if (contentScan && TRUST_ORDER.indexOf(contentScan.trust) >= taintIdx) {
+    return "external markers in history";
+  }
+
+  // Tool calls that escalated taint
+  const toolNodes = nodes.filter(n => n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (toolNodes.length > 0) {
+    const toolNames = toolNodes.map(n => n.tool).filter(Boolean);
+    return toolNames.join(", ") || "tool call";
+  }
+
+  // History contamination
+  const historyNode = nodes.find(n => n.id === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (historyNode) return "history contamination";
+
+  return "unknown";
+}
+
 export class ProvenanceStore {
   private activeGraphs: Map<string, TurnProvenanceGraph> = new Map();
   private completedGraphs: TurnProvenanceGraph[] = [];
   private maxCompletedGraphs: number;
+
+  /**
+   * Session-level taint watermark — tracks the worst taint level seen
+   * across all turns in a session. This prevents taint amnesia when
+   * tainted content (e.g. web_fetch responses) persists in the LLM
+   * context window across turn boundaries.
+   * 
+   * Cleared explicitly by .reset-trust or when the session ends.
+   */
 
   constructor(maxCompletedGraphs = 100) {
     this.maxCompletedGraphs = maxCompletedGraphs;
@@ -263,7 +297,7 @@ export class ProvenanceStore {
     const existing = this.activeGraphs.get(sessionKey);
     if (existing && !existing.sealed) {
       existing.seal();
-      this.archiveGraph(existing);
+      this.archiveGraph(existing, sessionKey);
     }
     const graph = new TurnProvenanceGraph(sessionKey);
     this.activeGraphs.set(sessionKey, graph);
@@ -281,7 +315,7 @@ export class ProvenanceStore {
     if (!graph) return undefined;
     const summary = graph.seal();
     this.activeGraphs.delete(sessionKey);
-    this.archiveGraph(graph);
+    this.archiveGraph(graph, sessionKey);
     return summary;
   }
 
@@ -290,7 +324,7 @@ export class ProvenanceStore {
     return this.completedGraphs.slice(-(limit ?? this.maxCompletedGraphs));
   }
 
-  private archiveGraph(graph: TurnProvenanceGraph): void {
+  private archiveGraph(graph: TurnProvenanceGraph, _sessionKey: string): void {
     this.completedGraphs.push(graph);
     if (this.completedGraphs.length > this.maxCompletedGraphs) {
       this.completedGraphs.shift();

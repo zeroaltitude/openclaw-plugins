@@ -5,10 +5,11 @@
  * per-turn provenance graphs and enforce declarative security policies.
  */
 
-import { ProvenanceStore } from "./provenance-graph.js";
+import { ProvenanceStore, buildWatermarkReason } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
+import { WatermarkStore } from "./watermark-store.js";
 import { buildPolicyConfig, evaluateWithApprovals, type PolicyMode, type ToolOverride } from "./policy-engine.js";
-import { getToolTrust } from "./trust-levels.js";
+import { getToolTrust, TRUST_ORDER } from "./trust-levels.js";
 import type { TrustLevel, TaintPolicyConfig } from "./trust-levels.js";
 import { ApprovalStore } from "./approval-store.js";
 
@@ -45,6 +46,10 @@ export interface SecurityPluginConfig {
   approvalTtlSeconds?: number;
   /** Max agent loop iterations before blocking (default: 10) */
   maxIterations?: number;
+  /** When true, prepend taint-level header to every outbound message */
+  developerMode?: boolean;
+  /** Workspace directory for persistent state (watermarks, etc.) */
+  workspaceDir?: string;
 }
 
 /** Get a short session key for log prefixes */
@@ -97,6 +102,53 @@ function classifyInitialTrust(ctx: AgentContext): TrustLevel {
 }
 
 /**
+ * Build a short human-readable reason for the current taint level.
+ * Truncated to 30 chars max for the developer mode header.
+ */
+function buildTaintReason(graph: TurnProvenanceGraph, watermarkReason?: string): string {
+  const nodes = graph.getAllNodes();
+
+  // Find the node that caused the worst taint
+  const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
+
+  // Check for inherited watermark — use the original root cause reason
+  const inherited = nodes.find(n => n.id === "inherited-taint");
+  if (inherited && TRUST_ORDER.indexOf(inherited.trust) >= taintIdx) {
+    return truncate(watermarkReason ?? "inherited from prev turn", 30);
+  }
+
+  // Check for content scan detection
+  const contentScan = nodes.find(n => n.id === "content-scan-taint");
+  if (contentScan && TRUST_ORDER.indexOf(contentScan.trust) >= taintIdx) {
+    return truncate("external markers in history", 30);
+  }
+
+  // Check for tool calls that escalated taint
+  const toolNodes = nodes.filter(n => n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (toolNodes.length > 0) {
+    const toolNames = toolNodes.map(n => n.tool).filter(Boolean);
+    return truncate(toolNames.join(", ") || "tool call", 30);
+  }
+
+  // Check history node
+  const histNode = nodes.find(n => n.kind === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (histNode) {
+    const reason = (histNode.metadata?.reason as string) ?? "context classification";
+    return truncate(reason, 30);
+  }
+
+  // Fallback
+  if (graph.maxTaint === "system" || graph.maxTaint === "owner") {
+    return truncate("clean context", 30);
+  }
+  return truncate("unknown", 30);
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + "…";
+}
+
+/**
  * Register the security/provenance hooks.
  */
 export function registerSecurityHooks(
@@ -110,6 +162,12 @@ export function registerSecurityHooks(
   const toolTrustOverrides = config?.toolTrustOverrides;
   const verbose = config?.verbose ?? false;
 
+  const developerMode = config?.developerMode ?? false;
+
+  const workspaceDir = config?.workspaceDir ?? process.cwd();
+  const watermarkStore = new WatermarkStore(workspaceDir);
+  logger.info(`[provenance] Watermark store: ${workspaceDir}/.provenance/watermarks.json`);
+
   // Build the unified policy config
   const policyConfig = buildPolicyConfig(
     config?.taintPolicy as any,
@@ -122,12 +180,36 @@ export function registerSecurityHooks(
   logger.info(`[provenance]   Taint policy: ${JSON.stringify(policyConfig.taintPolicy)}`);
   logger.info(`[provenance]   Tool overrides: ${Object.keys(policyConfig.toolOverrides).length} tools configured`);
   logger.info(`[provenance]   Max iterations: ${policyConfig.maxIterations}`);
+  if (developerMode) {
+    logger.info(`[provenance]   Developer mode: ON (taint headers will be prepended to outbound messages)`);
+  }
 
   // Track last LLM node ID per session for edge building
   const lastLlmNodeBySession = new Map<string, string>();
 
   // Track currently blocked tools per session for execution-layer enforcement
   const blockedToolsBySession = new Map<string, Set<string>>();
+
+  // Track the last tool that was denied or required authorization per session
+  const lastImpactedToolBySession = new Map<string, string>();
+
+  // --- before_agent_start ---
+  // Clear watermarks on fresh sessions (e.g. after /new or /reset).
+  // A fresh session has no prior messages, so inherited taint is meaningless.
+  api.on("before_agent_start", (event: any, ctx: AgentContext) => {
+    const sessionKey = ctx.sessionKey ?? "unknown";
+    const messages: unknown[] = event.messages ?? [];
+    // Fresh session: 0 messages (or only system prompt).
+    // A resumed session will have prior conversation history.
+    if (messages.length <= 1) {
+      const cleared = watermarkStore.clearWithAudit(sessionKey);
+      if (cleared) {
+        const sk = shortKey(sessionKey);
+        logger.info(`[provenance:${sk}] 🔄 Watermark cleared on fresh session start (was: ${cleared.level}, reason: ${cleared.reason})`);
+        watermarkStore.flush();
+      }
+    }
+  });
 
   // --- context_assembled ---
   api.on("context_assembled", (event: any, ctx: AgentContext) => {
@@ -139,10 +221,42 @@ export function registerSecurityHooks(
 
     graph.recordContextAssembled(event.systemPrompt ?? "", event.messageCount ?? 0, initialTrust);
 
+    // FIX: Inherit taint watermark from previous turns.
+    // Tainted content (e.g. web_fetch responses) persists in the LLM context
+    // window across turn boundaries. Without this, a new turn starts with
+    // clean "owner" trust and all tools are allowed — completely bypassing
+    // the approval code system.
+    const watermark = watermarkStore.getLevel(sessionKey);
+    if (watermark) {
+      const watermarkIdx = TRUST_ORDER.indexOf(watermark.level);
+      const initialIdx = TRUST_ORDER.indexOf(initialTrust);
+      // Only apply watermark if it's stricter than the current trust
+      if (watermarkIdx > initialIdx) {
+        graph.addNode({
+          id: "inherited-taint",
+          kind: "history",
+          trust: watermark.level,
+          metadata: { reason: watermark.reason ?? "inherited taint watermark from previous turn" },
+        });
+      }
+    }
+
+    // NOTE: Content scanning for <<<EXTERNAL_UNTRUSTED_CONTENT>>> markers
+    // has been intentionally removed. The persistent watermark store is the
+    // authoritative source for taint state. Content scanning would make
+    // .reset-trust impossible since markers persist in history.
+
     const sk = shortKey(sessionKey);
+    const effectiveTaint = graph.maxTaint;
     logger.info(`[provenance:${sk}] ── Turn Start ──`);
     logger.info(`[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`);
     logger.info(`[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"})`);
+    if (watermark && watermark.level !== initialTrust) {
+      logger.info(`[provenance:${sk}]   Inherited taint watermark: ${watermark.level} (reason: ${watermark.reason})`);
+    }
+    if (effectiveTaint !== initialTrust) {
+      logger.info(`[provenance:${sk}]   Effective taint: ${effectiveTaint} (escalated from ${initialTrust})`);
+    }
     if (verbose) {
       logger.info(`[provenance:${sk}]   ctx keys: ${Object.keys(ctx).join(", ")}`);
     }
@@ -205,7 +319,10 @@ export function registerSecurityHooks(
           blockedToolsBySession.delete(sessionKey);
           // Clear any pending approvals (no longer needed)
           approvalStore.clearTurnScoped(sessionKey);
-          logger.info(`[provenance:${sk}] 🔄 Trust reset: ${previousTaint} → ${targetLevel} (owner override)`);
+          // FIX: Clear the session taint watermark — owner explicitly declares
+          // the context is trustworthy, so inherited taint should not persist
+          watermarkStore.clear(sessionKey);
+          logger.info(`[provenance:${sk}] 🔄 Trust reset: ${previousTaint} → ${targetLevel} (owner override, watermark cleared)`);
         } else {
           logger.warn(`[provenance:${sk}] ❌ Invalid trust level for .reset-trust: ${targetLevel}`);
         }
@@ -269,6 +386,8 @@ export function registerSecurityHooks(
 
       logger.warn(`[provenance:${sk}] ⚠️ SECURITY: Tools restricted due to ${graph.maxTaint} content in context.`);
       logger.warn(`[provenance:${sk}]   Restricted: ${pendingNames.join(", ")}`);
+      // Track last impacted tool for developer mode header
+      lastImpactedToolBySession.set(sessionKey, pendingNames[pendingNames.length - 1]);
       logger.warn(`[provenance:${sk}]   Approval code: ${code} (expires in ${ttl}s)`);
       logger.warn(`[provenance:${sk}]   Approve with: .approve <tool> ${code}  (or .approve all ${code})`);
     }
@@ -318,6 +437,7 @@ export function registerSecurityHooks(
         ? `\nBlocked tools: ${blockedList}\nApproval code: ${code} (expires in ${ttl}s)\nApprove:  .approve ${toolName} ${code} [minutes]${blocked.size > 1 ? `\nOther blocked tools:\n  ${perToolExamples}` : ""}\nApprove all:  .approve all ${code} [minutes]`
         : "\nA new approval code will be issued on the next turn.";
       logger.warn(`[provenance:${sk}] 🛑 BLOCKED at execution layer: ${toolName}`);
+      lastImpactedToolBySession.set(sessionKey, toolName);
       return {
         block: true,
         blockReason: `Tool '${toolName}' is blocked by security policy. Context contains tainted content.${codeStr}`,
@@ -376,12 +496,22 @@ export function registerSecurityHooks(
 
     graph.recordOutput(event.content?.length ?? 0);
 
+    // Capture taint info BEFORE sealing for developer mode header
+    const taintLevel = graph.maxTaint;
+    const currentWatermark = watermarkStore.getLevel(sessionKey);
+    const taintReason = buildTaintReason(graph, currentWatermark?.reason);
+
     // Clear turn-scoped approvals
     approvalStore.clearTurnScoped(sessionKey);
 
     // Seal the graph
     const summary = store.completeTurn(sessionKey);
     if (!summary) return;
+
+    // Persist watermark to disk if taint escalated
+    const wmReason = buildWatermarkReason(graph);
+    watermarkStore.escalate(sessionKey, summary.maxTaint, wmReason, wmReason);
+    watermarkStore.flush();
 
     const sk = shortKey(sessionKey);
 
@@ -394,6 +524,14 @@ export function registerSecurityHooks(
 
     // Clear blocked tools for this session
     blockedToolsBySession.delete(sessionKey);
+
+    // Developer mode: prepend taint header to outbound message
+    if (developerMode && event.content) {
+      const lastImpacted = lastImpactedToolBySession.get(sessionKey) ?? "none";
+      const taintEmoji = taintLevel === "system" || taintLevel === "owner" ? "🟢" : taintLevel === "local" ? "🟢" : taintLevel === "shared" ? "🟡" : "🔴";
+      const header = `${taintEmoji} [taint: ${taintLevel} | reason: ${taintReason} | last impacted: ${lastImpacted}]`;
+      return { content: header + "\n" + event.content };
+    }
   });
 
   return { store, approvalStore };
