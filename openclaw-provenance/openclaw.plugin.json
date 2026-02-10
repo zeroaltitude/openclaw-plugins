@@ -51,6 +51,14 @@
         "type": "boolean",
         "description": "When true, prepends a taint-level header to every outbound message for debugging.",
         "default": false
+      },
+      "toolOutputTaints": {
+        "type": "object",
+        "description": "Override default tool output taint levels. Key = tool name, value = trust level. Unknown tools default to 'local'.",
+        "additionalProperties": {
+          "type": "string",
+          "enum": ["system", "owner", "local", "shared", "external", "untrusted"]
+        }
       }
     }
   }

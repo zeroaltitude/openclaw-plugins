@@ -36,6 +36,7 @@ export function register(api: PluginApi) {
       approvalTtlSeconds: (cfg.approvalTtlSeconds as number) ?? undefined,
       maxIterations: (cfg.maxIterations as number) ?? undefined,
       developerMode: (cfg.developerMode as boolean) ?? undefined,
+      toolOutputTaints: (cfg.toolOutputTaints as any) ?? undefined,
       workspaceDir: (api.config as any)?.agents?.defaults?.workspace ?? (api.config as any)?.agents?.workspace ?? (api.config as any)?.workspaceDir ?? undefined,
     },
   );

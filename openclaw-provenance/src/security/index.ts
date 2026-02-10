@@ -9,7 +9,7 @@ import { ProvenanceStore, buildWatermarkReason } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
 import { WatermarkStore } from "./watermark-store.js";
 import { buildPolicyConfig, evaluateWithApprovals, type PolicyMode, type ToolOverride } from "./policy-engine.js";
-import { getToolTrust, TRUST_ORDER } from "./trust-levels.js";
+import { getToolTrust, buildToolOutputTaintMap, TRUST_ORDER } from "./trust-levels.js";
 import type { TrustLevel, TaintPolicyConfig } from "./trust-levels.js";
 import { ApprovalStore } from "./approval-store.js";
 
@@ -34,8 +34,10 @@ interface AgentContext {
 export interface SecurityPluginConfig {
   /** Per-tool overrides: { "gateway": { "local": "restrict" }, "read": { "*": "allow" } } */
   toolOverrides?: Record<string, ToolOverride>;
-  /** Override default tool trust classifications */
+  /** Override default tool output taint classifications */
   toolTrustOverrides?: Record<string, TrustLevel>;
+  /** Override default tool output taint classifications (preferred name) */
+  toolOutputTaints?: Record<string, TrustLevel>;
   /** Max completed graphs to keep in memory */
   maxCompletedGraphs?: number;
   /** Whether to log policy evaluations */
@@ -159,7 +161,9 @@ export function registerSecurityHooks(
   const store = new ProvenanceStore(config?.maxCompletedGraphs ?? 100);
   const approvalTtlMs = (config?.approvalTtlSeconds ?? 60) * 1000;
   const approvalStore = new ApprovalStore(approvalTtlMs);
-  const toolTrustOverrides = config?.toolTrustOverrides;
+  // Build the resolved tool output taint map (defaults + config overrides)
+  const toolOutputTaintOverrides = config?.toolOutputTaints ?? config?.toolTrustOverrides;
+  const resolvedToolTaints = buildToolOutputTaintMap(toolOutputTaintOverrides);
   const verbose = config?.verbose ?? false;
 
   const developerMode = config?.developerMode ?? false;
@@ -180,6 +184,9 @@ export function registerSecurityHooks(
   logger.info(`[provenance]   Taint policy: ${JSON.stringify(policyConfig.taintPolicy)}`);
   logger.info(`[provenance]   Tool overrides: ${Object.keys(policyConfig.toolOverrides).length} tools configured`);
   logger.info(`[provenance]   Max iterations: ${policyConfig.maxIterations}`);
+  if (toolOutputTaintOverrides && Object.keys(toolOutputTaintOverrides).length > 0) {
+    logger.info(`[provenance]   Tool output taint overrides: ${JSON.stringify(toolOutputTaintOverrides)}`);
+  }
   if (developerMode) {
     logger.info(`[provenance]   Developer mode: ON (taint headers will be prepended to outbound messages)`);
   }
@@ -456,12 +463,12 @@ export function registerSecurityHooks(
     const toolCalls: Array<{ name: string }> = event.toolCalls ?? [];
     
     for (const tc of toolCalls) {
-      graph.recordToolCall(tc.name, event.iteration ?? 0, llmNodeId, toolTrustOverrides);
+      graph.recordToolCall(tc.name, event.iteration ?? 0, llmNodeId, resolvedToolTaints);
     }
 
     const sk = shortKey(sessionKey);
     const toolDescriptions = toolCalls.map((tc: any) => {
-      const trust = getToolTrust(tc.name, toolTrustOverrides);
+      const trust = getToolTrust(tc.name, resolvedToolTaints);
       return `${tc.name}(${trust})`;
     });
     logger.info(`[provenance:${sk}] ── LLM Response (iteration ${event.iteration ?? 0}) ──`);

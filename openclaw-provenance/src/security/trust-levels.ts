@@ -24,41 +24,25 @@ export function minTrust(a: TrustLevel, b: TrustLevel): TrustLevel {
   return idxA >= idxB ? a : b;  // higher index = lower trust
 }
 
-/** Default trust classifications for tools */
-export const DEFAULT_TOOL_TRUST: Record<string, TrustLevel> = {
-  // Local operations
+/**
+ * Default tool output taint classifications.
+ * 
+ * Each entry maps a tool name to the trust level of its *output* —
+ * i.e., the taint that its response introduces into the context.
+ * This is independent of whether the tool is safe to *call*.
+ * 
+ * These defaults can be overridden via the `toolOutputTaints` config block.
+ * Unknown tools default to "local".
+ */
+export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
+  // ── Local operations ──────────────────────────────────────────────
   "Read": "local",
   "Edit": "local",
   "Write": "local",
   "exec": "local",
   "process": "local",
-  
-  // Web / untrusted
-  "web_fetch": "untrusted",
-  "web_search": "untrusted",
-  "browser": "untrusted",
-  
-  // Shared memory
-  "vestige_search": "shared",
-  "vestige_smart_ingest": "shared",
-  "vestige_ingest": "shared",
-  "vestige_promote": "shared",
-  "vestige_demote": "shared",
-  "memory_search": "shared",
-  "memory_get": "shared",
-  
-  // External sources
-  "message": "external",   // reads from channels contain external content
-  "gog": "external",       // email/calendar content
-  
-  // Image analysis  
-  "image": "external",     // analyzing external images
-  
-  // Actions (not content sources, but policy targets)
   "tts": "local",
   "cron": "local",
-  "gateway": "system",
-  "session_status": "system",
   "sessions_spawn": "local",
   "sessions_send": "local",
   "sessions_list": "local",
@@ -66,7 +50,33 @@ export const DEFAULT_TOOL_TRUST: Record<string, TrustLevel> = {
   "agents_list": "local",
   "nodes": "local",
   "canvas": "local",
+
+  // ── System ────────────────────────────────────────────────────────
+  "gateway": "system",
+  "session_status": "system",
+
+  // ── Shared memory ─────────────────────────────────────────────────
+  "vestige_search": "shared",
+  "vestige_smart_ingest": "shared",
+  "vestige_ingest": "shared",
+  "vestige_promote": "shared",
+  "vestige_demote": "shared",
+  "memory_search": "shared",
+  "memory_get": "shared",
+
+  // ── External sources ──────────────────────────────────────────────
+  "message": "external",     // channel messages contain external content
+  "gog": "external",         // email/calendar content
+  "image": "external",       // analyzing external images
+
+  // ── Untrusted / web ───────────────────────────────────────────────
+  "web_fetch": "untrusted",
+  "web_search": "untrusted",
+  "browser": "untrusted",
 };
+
+// Legacy alias for backward compatibility
+export const DEFAULT_TOOL_TRUST = DEFAULT_TOOL_OUTPUT_TAINTS;
 
 // --- Taint policy modes ---
 
@@ -96,8 +106,19 @@ export const DEFAULT_TAINT_POLICY: Required<TaintPolicyConfig> = {
   untrusted: "restrict",
 };
 
-/** Get trust level for a tool, defaulting to "local" for unknown tools */
-export function getToolTrust(toolName: string, overrides?: Record<string, TrustLevel>): TrustLevel {
-  if (overrides?.[toolName]) return overrides[toolName];
-  return DEFAULT_TOOL_TRUST[toolName] ?? "local";
+/**
+ * Build a resolved tool output taint map by merging defaults with config overrides.
+ * Call once at startup; pass the result to getToolTrust() for each lookup.
+ */
+export function buildToolOutputTaintMap(overrides?: Record<string, TrustLevel>): Record<string, TrustLevel> {
+  if (!overrides || Object.keys(overrides).length === 0) {
+    return { ...DEFAULT_TOOL_OUTPUT_TAINTS };
+  }
+  return { ...DEFAULT_TOOL_OUTPUT_TAINTS, ...overrides };
+}
+
+/** Get trust level for a tool's output. Uses a pre-merged map if provided, otherwise defaults. */
+export function getToolTrust(toolName: string, resolvedMap?: Record<string, TrustLevel>): TrustLevel {
+  if (resolvedMap?.[toolName]) return resolvedMap[toolName];
+  return DEFAULT_TOOL_OUTPUT_TAINTS[toolName] ?? "local";
 }
