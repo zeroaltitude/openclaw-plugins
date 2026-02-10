@@ -193,6 +193,24 @@ export function registerSecurityHooks(
   // Track the last tool that was denied or required authorization per session
   const lastImpactedToolBySession = new Map<string, string>();
 
+  // --- before_agent_start ---
+  // Clear watermarks on fresh sessions (e.g. after /new or /reset).
+  // A fresh session has no prior messages, so inherited taint is meaningless.
+  api.on("before_agent_start", (event: any, ctx: AgentContext) => {
+    const sessionKey = ctx.sessionKey ?? "unknown";
+    const messages: unknown[] = event.messages ?? [];
+    // Fresh session: 0 messages (or only system prompt).
+    // A resumed session will have prior conversation history.
+    if (messages.length <= 1) {
+      const cleared = watermarkStore.clearWithAudit(sessionKey);
+      if (cleared) {
+        const sk = shortKey(sessionKey);
+        logger.info(`[provenance:${sk}] 🔄 Watermark cleared on fresh session start (was: ${cleared.level}, reason: ${cleared.reason})`);
+        watermarkStore.flush();
+      }
+    }
+  });
+
   // --- context_assembled ---
   api.on("context_assembled", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
@@ -510,7 +528,7 @@ export function registerSecurityHooks(
     // Developer mode: prepend taint header to outbound message
     if (developerMode && event.content) {
       const lastImpacted = lastImpactedToolBySession.get(sessionKey) ?? "none";
-      const taintEmoji = taintLevel === "owner" ? "🟢" : taintLevel === "shared" ? "🟡" : "🔴";
+      const taintEmoji = taintLevel === "system" || taintLevel === "owner" ? "🟢" : taintLevel === "local" ? "🟢" : taintLevel === "shared" ? "🟡" : "🔴";
       const header = `${taintEmoji} [taint: ${taintLevel} | reason: ${taintReason} | last impacted: ${lastImpacted}]`;
       return { content: header + "\n" + event.content };
     }
