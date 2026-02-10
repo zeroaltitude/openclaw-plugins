@@ -720,3 +720,89 @@ describe("Integration: taint → policy", () => {
     expect(result.pendingConfirmations).toHaveLength(0); // no confirm, just restrict
   });
 });
+
+// ============================================================
+// ProvenanceStore — Session Taint Watermark
+// ============================================================
+
+import { ProvenanceStore } from "../provenance-graph.js";
+
+describe("ProvenanceStore session taint watermark", () => {
+  it("persists taint watermark across turns", () => {
+    const store = new ProvenanceStore();
+    const sk = "test-session";
+
+    // Turn 1: taint escalates to "external" via tool call
+    const g1 = store.startTurn(sk);
+    g1.recordContextAssembled("prompt", 1, "owner");
+    g1.addNode({ id: "tool-1", kind: "tool_call", trust: "external", tool: "web_fetch" });
+    store.completeTurn(sk);
+
+    // Watermark should be "external"
+    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+
+    // Turn 2: starts fresh, but watermark is available
+    const g2 = store.startTurn(sk);
+    g2.recordContextAssembled("prompt", 2, "owner");
+    // Without inheriting watermark, graph trust would be "owner"
+    expect(g2.maxTaint).toBe("owner");
+
+    // After inheriting watermark (as the hook handler would do):
+    const watermark = store.getSessionTaintWatermark(sk);
+    expect(watermark).toBe("external");
+  });
+
+  it("watermark tracks worst taint across multiple turns", () => {
+    const store = new ProvenanceStore();
+    const sk = "test-session";
+
+    // Turn 1: shared taint
+    const g1 = store.startTurn(sk);
+    g1.recordContextAssembled("prompt", 1, "shared");
+    store.completeTurn(sk);
+    expect(store.getSessionTaintWatermark(sk)).toBe("shared");
+
+    // Turn 2: external taint (worse)
+    const g2 = store.startTurn(sk);
+    g2.recordContextAssembled("prompt", 1, "owner");
+    g2.addNode({ id: "tool-1", kind: "tool_call", trust: "external", tool: "web_fetch" });
+    store.completeTurn(sk);
+    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+
+    // Turn 3: owner only — watermark stays at "external"
+    const g3 = store.startTurn(sk);
+    g3.recordContextAssembled("prompt", 1, "owner");
+    store.completeTurn(sk);
+    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+  });
+
+  it("clearSessionTaintWatermark resets the watermark", () => {
+    const store = new ProvenanceStore();
+    const sk = "test-session";
+
+    const g1 = store.startTurn(sk);
+    g1.recordContextAssembled("prompt", 1);
+    g1.addNode({ id: "tool-1", kind: "tool_call", trust: "external", tool: "web_fetch" });
+    store.completeTurn(sk);
+    expect(store.getSessionTaintWatermark(sk)).toBe("external");
+
+    store.clearSessionTaintWatermark(sk);
+    expect(store.getSessionTaintWatermark(sk)).toBeUndefined();
+  });
+
+  it("independent sessions have independent watermarks", () => {
+    const store = new ProvenanceStore();
+
+    const g1 = store.startTurn("session-a");
+    g1.recordContextAssembled("prompt", 1);
+    g1.addNode({ id: "tool-1", kind: "tool_call", trust: "external", tool: "web_fetch" });
+    store.completeTurn("session-a");
+
+    const g2 = store.startTurn("session-b");
+    g2.recordContextAssembled("prompt", 1, "owner");
+    store.completeTurn("session-b");
+
+    expect(store.getSessionTaintWatermark("session-a")).toBe("external");
+    expect(store.getSessionTaintWatermark("session-b")).toBe("owner");
+  });
+});

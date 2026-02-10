@@ -253,6 +253,16 @@ export class ProvenanceStore {
   private completedGraphs: TurnProvenanceGraph[] = [];
   private maxCompletedGraphs: number;
 
+  /**
+   * Session-level taint watermark — tracks the worst taint level seen
+   * across all turns in a session. This prevents taint amnesia when
+   * tainted content (e.g. web_fetch responses) persists in the LLM
+   * context window across turn boundaries.
+   * 
+   * Cleared explicitly by .reset-trust or when the session ends.
+   */
+  private sessionTaintWatermark: Map<string, TrustLevel> = new Map();
+
   constructor(maxCompletedGraphs = 100) {
     this.maxCompletedGraphs = maxCompletedGraphs;
   }
@@ -263,7 +273,7 @@ export class ProvenanceStore {
     const existing = this.activeGraphs.get(sessionKey);
     if (existing && !existing.sealed) {
       existing.seal();
-      this.archiveGraph(existing);
+      this.archiveGraph(existing, sessionKey);
     }
     const graph = new TurnProvenanceGraph(sessionKey);
     this.activeGraphs.set(sessionKey, graph);
@@ -281,8 +291,18 @@ export class ProvenanceStore {
     if (!graph) return undefined;
     const summary = graph.seal();
     this.activeGraphs.delete(sessionKey);
-    this.archiveGraph(graph);
+    this.archiveGraph(graph, sessionKey);
     return summary;
+  }
+
+  /** Get the session taint watermark (worst taint across all turns) */
+  getSessionTaintWatermark(sessionKey: string): TrustLevel | undefined {
+    return this.sessionTaintWatermark.get(sessionKey);
+  }
+
+  /** Clear the session taint watermark (used by .reset-trust) */
+  clearSessionTaintWatermark(sessionKey: string): void {
+    this.sessionTaintWatermark.delete(sessionKey);
   }
 
   /** Get recent completed graphs */
@@ -290,10 +310,18 @@ export class ProvenanceStore {
     return this.completedGraphs.slice(-(limit ?? this.maxCompletedGraphs));
   }
 
-  private archiveGraph(graph: TurnProvenanceGraph): void {
+  private archiveGraph(graph: TurnProvenanceGraph, sessionKey: string): void {
     this.completedGraphs.push(graph);
     if (this.completedGraphs.length > this.maxCompletedGraphs) {
       this.completedGraphs.shift();
+    }
+    // Update session taint watermark with this turn's max taint
+    const turnTaint = graph.maxTaint;
+    const existing = this.sessionTaintWatermark.get(sessionKey);
+    if (existing) {
+      this.sessionTaintWatermark.set(sessionKey, minTrust(existing, turnTaint));
+    } else {
+      this.sessionTaintWatermark.set(sessionKey, turnTaint);
     }
   }
 }
