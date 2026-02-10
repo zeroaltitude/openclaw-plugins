@@ -369,6 +369,7 @@ Example interaction:
 
 <img width="814" height="798" alt="image" src="https://github.com/user-attachments/assets/dacd2bc1-48a5-4d1a-9986-86351e6069ed" />
 
+<img width="1046" height="469" alt="Screenshot 2026-02-10 at 15 06 44" src="https://github.com/user-attachments/assets/ca6fbb4b-8203-44c7-af86-d85ace42c183" />
 
 ### Why Codes?
 
