@@ -67,7 +67,8 @@ class MCPClient:
         resp = await self._send(
             "initialize",
             {
-                "protocolVersion": "2024-11-05",
+                # Must match vestige-mcp's MCP_VERSION in protocol/types.rs
+                "protocolVersion": "2025-03-26",
                 "capabilities": {},
                 "clientInfo": {"name": "openclaw-vestige-bridge", "version": "0.2.0"},
             },
