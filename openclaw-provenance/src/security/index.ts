@@ -183,6 +183,9 @@ export function registerSecurityHooks(
   // Track currently blocked tools per session for execution-layer enforcement
   const blockedToolsBySession = new Map<string, Set<string>>();
 
+  // Track the last tool that was denied or required authorization per session
+  const lastImpactedToolBySession = new Map<string, string>();
+
   // --- context_assembled ---
   api.on("context_assembled", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
@@ -381,6 +384,8 @@ export function registerSecurityHooks(
 
       logger.warn(`[provenance:${sk}] ⚠️ SECURITY: Tools restricted due to ${graph.maxTaint} content in context.`);
       logger.warn(`[provenance:${sk}]   Restricted: ${pendingNames.join(", ")}`);
+      // Track last impacted tool for developer mode header
+      lastImpactedToolBySession.set(sessionKey, pendingNames[pendingNames.length - 1]);
       logger.warn(`[provenance:${sk}]   Approval code: ${code} (expires in ${ttl}s)`);
       logger.warn(`[provenance:${sk}]   Approve with: .approve <tool> ${code}  (or .approve all ${code})`);
     }
@@ -430,6 +435,7 @@ export function registerSecurityHooks(
         ? `\nBlocked tools: ${blockedList}\nApproval code: ${code} (expires in ${ttl}s)\nApprove:  .approve ${toolName} ${code} [minutes]${blocked.size > 1 ? `\nOther blocked tools:\n  ${perToolExamples}` : ""}\nApprove all:  .approve all ${code} [minutes]`
         : "\nA new approval code will be issued on the next turn.";
       logger.warn(`[provenance:${sk}] 🛑 BLOCKED at execution layer: ${toolName}`);
+      lastImpactedToolBySession.set(sessionKey, toolName);
       return {
         block: true,
         blockReason: `Tool '${toolName}' is blocked by security policy. Context contains tainted content.${codeStr}`,
@@ -513,7 +519,8 @@ export function registerSecurityHooks(
 
     // Developer mode: prepend taint header to outbound message
     if (developerMode && event.content) {
-      const header = `[taint: ${taintLevel} | ${taintReason}]`;
+      const lastImpacted = lastImpactedToolBySession.get(sessionKey) ?? "none";
+      const header = `[current context taint: ${taintLevel} | reason: ${taintReason} | last impacted command: ${lastImpacted}]`;
       return { content: `${header}\n${event.content}` };
     }
   });
