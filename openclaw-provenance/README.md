@@ -49,14 +49,14 @@ The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37
 
 The plugin tracks two completely independent properties for each tool:
 
-1. **Response trust** (`DEFAULT_TOOL_TRUST` in `trust-levels.ts`): What taint level does this tool's **response** introduce into the context? This is a property of the data the tool returns — not whether the tool is safe to invoke.
+1. **Response trust** (`DEFAULT_TOOL_OUTPUT_TAINTS` in `trust-levels.ts`, configurable via `toolOutputTaints`): What taint level does this tool's **response** introduce into the context? This is a property of the data the tool returns — not whether the tool is safe to invoke.
 
 2. **Call permission** (`DEFAULT_SAFE_TOOLS` / `toolOverrides` in `policy-engine.ts`): Is this tool **allowed to be called** at the current taint level? This is a property of what the tool can *do* — its side effects.
 
 These are orthogonal:
 
-| Tool | Response trust | Call permission (default) | Rationale |
-|------|---------------|--------------------------|-----------|
+| Tool | Response trust (default) | Call permission (default) | Rationale |
+|------|--------------------------|--------------------------|-----------|
 | `web_fetch` | `untrusted` | always allowed | Read-only HTTP GET. No side effects. But the response is untrusted web content. |
 | `web_search` | `untrusted` | always allowed | Read-only search API. No side effects. Response is untrusted. |
 | `read` | `local` | always allowed | Read-only file access. Response is local content. |
@@ -67,6 +67,57 @@ These are orthogonal:
 | `gateway` | `system` | always requires approval | Can disable security plugins. Response is system-level config. |
 
 A tool's response trust determines **how it taints the context for future iterations**. A tool's call permission determines **whether it can be invoked in the current iteration**.
+
+### Tool Output Taint Defaults and Configuration
+
+When a tool returns a response, the plugin looks up the tool's **output taint** — the trust level assigned to the data it produced. This taint propagates into the provenance graph via the high-water mark, potentially restricting tools in subsequent iterations.
+
+#### Default Output Taints
+
+Every tool has a built-in default output taint. Unknown tools default to `local`.
+
+| Trust Level | Tools |
+|-------------|-------|
+| **system** | `gateway`, `session_status` |
+| **local** | `Read`, `Edit`, `Write`, `exec`, `process`, `tts`, `cron`, `sessions_spawn`, `sessions_send`, `sessions_list`, `sessions_history`, `agents_list`, `nodes`, `canvas` |
+| **shared** | `vestige_search`, `vestige_smart_ingest`, `vestige_ingest`, `vestige_promote`, `vestige_demote`, `memory_search`, `memory_get` |
+| **external** | `message`, `gog`, `image` |
+| **untrusted** | `web_fetch`, `web_search`, `browser` |
+
+#### Overriding Output Taints via Config
+
+The `toolOutputTaints` config block lets you override any tool's output taint without modifying code. Overrides are merged with the defaults at plugin startup — specified tools get the override, everything else keeps its default.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "provenance": {
+        "config": {
+          "toolOutputTaints": {
+            "web_fetch": "external",
+            "web_search": "external"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+This example reclassifies `web_fetch` and `web_search` output from `untrusted` to `external`. The practical effect: after a `web_fetch`, the session taint escalates to `external` instead of `untrusted`. If your `taintPolicy` treats `external` differently from `untrusted` (e.g., `confirm` vs `restrict`), this changes which tools are blocked and how.
+
+**Use cases:**
+
+- **Internal APIs**: If `web_fetch` is used primarily against trusted internal endpoints, override to `local` or `shared`
+- **Curated search**: If `web_search` results are filtered through a trusted proxy, override to `external`
+- **Custom tools**: Any tool added by skills or plugins can be classified — if not listed in defaults, it gets `local`; override to set the appropriate level
+- **Stricter classification**: Override a tool *up* in taint (e.g., `exec` → `shared`) if its output comes from multi-tenant infrastructure
+
+The resolved taint map is logged at startup when overrides are present:
+```
+[provenance] Tool output taint overrides: {"web_fetch":"external","web_search":"external"}
+```
 
 ### Trust Levels
 
@@ -554,6 +605,7 @@ Add to your `openclaw.json`:
 | `maxIterations` | number | `10` | Max agent loop iterations |
 | `developerMode` | boolean | `false` | Prepend taint header to outbound messages (debugging) |
 | `workspaceDir` | string | `process.cwd()` | Directory for persistent state (`.provenance/watermarks.json`) |
+| `toolOutputTaints` | object | `{}` | Per-tool output taint overrides. Key = tool name, value = trust level. Merged with built-in defaults. |
 
 ### Example Configurations
 
