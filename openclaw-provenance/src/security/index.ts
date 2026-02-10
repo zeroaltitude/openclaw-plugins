@@ -5,8 +5,9 @@
  * per-turn provenance graphs and enforce declarative security policies.
  */
 
-import { ProvenanceStore } from "./provenance-graph.js";
+import { ProvenanceStore, buildWatermarkReason } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
+import { WatermarkStore } from "./watermark-store.js";
 import { buildPolicyConfig, evaluateWithApprovals, type PolicyMode, type ToolOverride } from "./policy-engine.js";
 import { getToolTrust, TRUST_ORDER } from "./trust-levels.js";
 import type { TrustLevel, TaintPolicyConfig } from "./trust-levels.js";
@@ -47,6 +48,8 @@ export interface SecurityPluginConfig {
   maxIterations?: number;
   /** When true, prepend taint-level header to every outbound message */
   developerMode?: boolean;
+  /** Workspace directory for persistent state (watermarks, etc.) */
+  workspaceDir?: string;
 }
 
 /** Get a short session key for log prefixes */
@@ -161,6 +164,10 @@ export function registerSecurityHooks(
 
   const developerMode = config?.developerMode ?? false;
 
+  const workspaceDir = config?.workspaceDir ?? process.cwd();
+  const watermarkStore = new WatermarkStore(workspaceDir);
+  logger.info(`[provenance] Watermark store: ${workspaceDir}/.provenance/watermarks.json`);
+
   // Build the unified policy config
   const policyConfig = buildPolicyConfig(
     config?.taintPolicy as any,
@@ -201,7 +208,7 @@ export function registerSecurityHooks(
     // window across turn boundaries. Without this, a new turn starts with
     // clean "owner" trust and all tools are allowed — completely bypassing
     // the approval code system.
-    const watermark = store.getSessionTaintWatermark(sessionKey);
+    const watermark = watermarkStore.getLevel(sessionKey);
     if (watermark) {
       const watermarkIdx = TRUST_ORDER.indexOf(watermark.level);
       const initialIdx = TRUST_ORDER.indexOf(initialTrust);
@@ -216,30 +223,10 @@ export function registerSecurityHooks(
       }
     }
 
-    // FIX: Scan message history for external content markers.
-    // Defense in depth — even if the watermark is somehow cleared,
-    // detect tainted content that's still in the context window.
-    const messages: any[] = event.messages ?? [];
-    let foundExternalMarker = false;
-    for (const msg of messages) {
-      const content = typeof msg.content === "string"
-        ? msg.content
-        : Array.isArray(msg.content)
-          ? msg.content.filter((c: any) => c?.type === "text").map((c: any) => c.text).join("")
-          : "";
-      if (content.includes("<<<EXTERNAL_UNTRUSTED_CONTENT>>>") || content.includes("<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>")) {
-        foundExternalMarker = true;
-        break;
-      }
-    }
-    if (foundExternalMarker) {
-      graph.addNode({
-        id: "content-scan-taint",
-        kind: "history",
-        trust: "external",
-        metadata: { reason: "external content marker detected in message history" },
-      });
-    }
+    // NOTE: Content scanning for <<<EXTERNAL_UNTRUSTED_CONTENT>>> markers
+    // has been intentionally removed. The persistent watermark store is the
+    // authoritative source for taint state. Content scanning would make
+    // .reset-trust impossible since markers persist in history.
 
     const sk = shortKey(sessionKey);
     const effectiveTaint = graph.maxTaint;
@@ -248,9 +235,6 @@ export function registerSecurityHooks(
     logger.info(`[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"})`);
     if (watermark && watermark.level !== initialTrust) {
       logger.info(`[provenance:${sk}]   Inherited taint watermark: ${watermark.level} (reason: ${watermark.reason})`);
-    }
-    if (foundExternalMarker) {
-      logger.info(`[provenance:${sk}]   Content scan: external content markers found in history`);
     }
     if (effectiveTaint !== initialTrust) {
       logger.info(`[provenance:${sk}]   Effective taint: ${effectiveTaint} (escalated from ${initialTrust})`);
@@ -319,7 +303,7 @@ export function registerSecurityHooks(
           approvalStore.clearTurnScoped(sessionKey);
           // FIX: Clear the session taint watermark — owner explicitly declares
           // the context is trustworthy, so inherited taint should not persist
-          store.clearSessionTaintWatermark(sessionKey);
+          watermarkStore.clear(sessionKey);
           logger.info(`[provenance:${sk}] 🔄 Trust reset: ${previousTaint} → ${targetLevel} (owner override, watermark cleared)`);
         } else {
           logger.warn(`[provenance:${sk}] ❌ Invalid trust level for .reset-trust: ${targetLevel}`);
@@ -496,7 +480,7 @@ export function registerSecurityHooks(
 
     // Capture taint info BEFORE sealing for developer mode header
     const taintLevel = graph.maxTaint;
-    const currentWatermark = store.getSessionTaintWatermark(sessionKey);
+    const currentWatermark = watermarkStore.getLevel(sessionKey);
     const taintReason = buildTaintReason(graph, currentWatermark?.reason);
 
     // Clear turn-scoped approvals
@@ -505,6 +489,11 @@ export function registerSecurityHooks(
     // Seal the graph
     const summary = store.completeTurn(sessionKey);
     if (!summary) return;
+
+    // Persist watermark to disk if taint escalated
+    const wmReason = buildWatermarkReason(graph);
+    watermarkStore.escalate(sessionKey, summary.maxTaint, wmReason, wmReason);
+    watermarkStore.flush();
 
     const sk = shortKey(sessionKey);
 

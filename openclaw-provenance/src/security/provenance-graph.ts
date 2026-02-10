@@ -249,7 +249,7 @@ export class TurnProvenanceGraph {
  * Plugin-scoped (closure over module state).
  */
 /** Extract the root cause reason from a turn's provenance graph for watermark storage */
-function buildWatermarkReason(graph: TurnProvenanceGraph): string {
+export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
   const nodes = graph.getAllNodes();
   const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
 
@@ -286,8 +286,6 @@ export class ProvenanceStore {
    * 
    * Cleared explicitly by .reset-trust or when the session ends.
    */
-  private sessionTaintWatermark: Map<string, TrustLevel> = new Map();
-  private sessionTaintWatermarkReason: Map<string, string> = new Map();
 
   constructor(maxCompletedGraphs = 100) {
     this.maxCompletedGraphs = maxCompletedGraphs;
@@ -321,42 +319,15 @@ export class ProvenanceStore {
     return summary;
   }
 
-  /** Get the session taint watermark (worst taint across all turns) */
-  getSessionTaintWatermark(sessionKey: string): { level: TrustLevel; reason: string } | undefined {
-    const level = this.sessionTaintWatermark.get(sessionKey);
-    if (!level) return undefined;
-    return { level, reason: this.sessionTaintWatermarkReason.get(sessionKey) ?? "unknown" };
-  }
-
-  /** Clear the session taint watermark (used by .reset-trust) */
-  clearSessionTaintWatermark(sessionKey: string): void {
-    this.sessionTaintWatermark.delete(sessionKey);
-    this.sessionTaintWatermarkReason.delete(sessionKey);
-  }
-
   /** Get recent completed graphs */
   getCompleted(limit?: number): TurnProvenanceGraph[] {
     return this.completedGraphs.slice(-(limit ?? this.maxCompletedGraphs));
   }
 
-  private archiveGraph(graph: TurnProvenanceGraph, sessionKey: string): void {
+  private archiveGraph(graph: TurnProvenanceGraph, _sessionKey: string): void {
     this.completedGraphs.push(graph);
     if (this.completedGraphs.length > this.maxCompletedGraphs) {
       this.completedGraphs.shift();
-    }
-    // Update session taint watermark with this turn's max taint
-    const turnTaint = graph.maxTaint;
-    const existing = this.sessionTaintWatermark.get(sessionKey);
-    if (existing) {
-      const merged = minTrust(existing, turnTaint);
-      this.sessionTaintWatermark.set(sessionKey, merged);
-      // Update reason if taint escalated (got worse)
-      if (merged !== existing) {
-        this.sessionTaintWatermarkReason.set(sessionKey, buildWatermarkReason(graph));
-      }
-    } else {
-      this.sessionTaintWatermark.set(sessionKey, turnTaint);
-      this.sessionTaintWatermarkReason.set(sessionKey, buildWatermarkReason(graph));
     }
   }
 }
