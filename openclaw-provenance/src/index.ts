@@ -34,6 +34,7 @@ export function register(api: PluginApi) {
       toolOverrides: (cfg.toolOverrides as any) ?? undefined,
       approvalTtlSeconds: (cfg.approvalTtlSeconds as number) ?? undefined,
       maxIterations: (cfg.maxIterations as number) ?? undefined,
+      developerMode: (cfg.developerMode as boolean) ?? undefined,
     },
   );
 }
