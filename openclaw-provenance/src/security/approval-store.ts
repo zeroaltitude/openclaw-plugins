@@ -11,8 +11,14 @@
 
 import { randomBytes } from "crypto";
 
-/** Default approval code TTL (ms) */
-const DEFAULT_APPROVAL_TTL_MS = 60_000; // 60 seconds
+/** Default approval code TTL (ms).
+ * 5 minutes gives the user enough time to read the approval prompt,
+ * understand which tools are blocked, and respond — even if interleaved
+ * turns (e.g. compaction memory flushes) occur between the prompt and
+ * the approval message. The previous 60s TTL caused codes to expire
+ * before the user could respond in normal conversational flow.
+ */
+const DEFAULT_APPROVAL_TTL_MS = 300_000; // 5 minutes
 
 /** Length of the hex approval code */
 const CODE_LENGTH = 4; // 4 bytes = 8 hex chars
@@ -173,8 +179,24 @@ export class ApprovalStore {
   addPendingBatch(items: Omit<PendingApproval, "code" | "expiresAt">[]): string {
     if (items.length === 0) return "";
     
-    const code = this.generateCode();
     const now = Date.now();
+
+    // Check if any existing pending codes for these tools are still valid.
+    // If so, reuse the existing code to prevent interleaved turns (e.g.
+    // compaction memory flushes) from invalidating codes the user is
+    // actively trying to approve.
+    let reuseCode: string | undefined;
+    for (const item of items) {
+      const list = this.pending.get(item.sessionKey);
+      if (!list) continue;
+      const existing = list.find(p => p.toolName === item.toolName && p.expiresAt > now);
+      if (existing) {
+        reuseCode = existing.code;
+        break;
+      }
+    }
+
+    const code = reuseCode ?? this.generateCode();
     const expiresAt = now + this.ttlMs;
 
     for (const item of items) {
@@ -183,8 +205,12 @@ export class ApprovalStore {
         list = [];
         this.pending.set(item.sessionKey, list);
       }
-      // Replace existing pending for same tool (refresh code)
       const idx = list.findIndex(p => p.toolName === item.toolName);
+      if (idx >= 0 && list[idx].expiresAt > now) {
+        // Existing code is still valid — extend its TTL but keep the code
+        list[idx].expiresAt = Math.max(list[idx].expiresAt, expiresAt);
+        continue;
+      }
       const entry: PendingApproval = { ...item, code, expiresAt };
       if (idx >= 0) {
         list[idx] = entry;

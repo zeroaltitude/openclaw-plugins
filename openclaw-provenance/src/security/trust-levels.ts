@@ -123,6 +123,23 @@ export function buildToolOutputTaintMap(overrides?: Record<string, TrustLevel>):
  * tool rename attacks where a dangerous tool is re-registered under an unlisted name.
  */
 export function getToolTrust(toolName: string, resolvedMap?: Record<string, TrustLevel>): TrustLevel {
+  // Exact match first (fast path)
   if (resolvedMap?.[toolName]) return resolvedMap[toolName];
-  return DEFAULT_TOOL_OUTPUT_TAINTS[toolName] ?? "untrusted";
+  if (DEFAULT_TOOL_OUTPUT_TAINTS[toolName]) return DEFAULT_TOOL_OUTPUT_TAINTS[toolName];
+
+  // Case-insensitive fallback: tool names from LLM responses may differ in
+  // casing from the trust map (e.g. "edit" vs "Edit", "read" vs "Read").
+  // Without this, unknown casing falls through to "untrusted", causing
+  // spurious taint escalation and approval code prompts.
+  const lower = toolName.toLowerCase();
+  if (resolvedMap) {
+    for (const [key, value] of Object.entries(resolvedMap)) {
+      if (key.toLowerCase() === lower) return value;
+    }
+  }
+  for (const [key, value] of Object.entries(DEFAULT_TOOL_OUTPUT_TAINTS)) {
+    if (key.toLowerCase() === lower) return value;
+  }
+
+  return "untrusted";
 }
