@@ -266,9 +266,12 @@ export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
     return toolNames.join(", ") || "tool call";
   }
 
-  // History contamination
-  const historyNode = nodes.find(n => n.id === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
-  if (historyNode) return "history contamination";
+  // History contamination (including inherited-taint nodes which have kind: "history")
+  const historyNode = nodes.find(n => n.kind === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  if (historyNode) {
+    const reason = (historyNode.metadata?.reason as string);
+    return reason ?? "history contamination";
+  }
 
   return "unknown";
 }

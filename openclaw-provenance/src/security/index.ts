@@ -74,8 +74,10 @@ function shortKey(sessionKey: string): string {
  * 6. Unknown sender → untrusted
  */
 function classifyInitialTrust(ctx: AgentContext): TrustLevel {
-  // System events: no message provider, or internal providers (heartbeat, cron)
-  if (!ctx.messageProvider || ctx.messageProvider === "heartbeat" || ctx.messageProvider === "cron") {
+  // System events: no message provider, or internal providers (heartbeat, cron, webchat)
+  // "webchat" is the INTERNAL_MESSAGE_CHANNEL used by callGateway("agent") for
+  // announce/followup flows (cron delivery, sub-agent announcements, etc.)
+  if (!ctx.messageProvider || ctx.messageProvider === "heartbeat" || ctx.messageProvider === "cron" || ctx.messageProvider === "webchat") {
     return "system";
   }
 
