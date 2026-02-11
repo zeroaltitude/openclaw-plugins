@@ -259,15 +259,25 @@ export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
     return "external markers in history";
   }
 
-  // Tool calls that escalated taint
+  // FIX: Check inherited taint watermark BEFORE tool calls.
+  // The watermark carries the original root cause (e.g. "web_fetch").
+  // Without this priority, tool calls in the current turn (e.g. "message")
+  // would overwrite the reason even though they didn't cause the taint.
+  const inherited = nodes.find(n => n.id === "inherited-taint");
+  if (inherited && TRUST_ORDER.indexOf(inherited.trust) >= taintIdx) {
+    const reason = (inherited.metadata?.reason as string);
+    return reason ?? "inherited from prev turn";
+  }
+
+  // Tool calls that escalated taint (only matters for NEW taint sources)
   const toolNodes = nodes.filter(n => n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
   if (toolNodes.length > 0) {
     const toolNames = toolNodes.map(n => n.tool).filter(Boolean);
     return toolNames.join(", ") || "tool call";
   }
 
-  // History contamination (including inherited-taint nodes which have kind: "history")
-  const historyNode = nodes.find(n => n.kind === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  // History contamination (non-inherited history nodes)
+  const historyNode = nodes.find(n => n.kind === "history" && n.id !== "inherited-taint" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
   if (historyNode) {
     const reason = (historyNode.metadata?.reason as string);
     return reason ?? "history contamination";
