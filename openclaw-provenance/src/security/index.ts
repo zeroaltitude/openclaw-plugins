@@ -67,9 +67,7 @@ function shortKey(sessionKey: string): string {
  * Priority:
  * 1. No messageProvider (cron, heartbeat, system event) → system
  * 2. Sub-agent session (spawnedBy set) → local (inherits parent's permissions)
- * 3. Owner in DM (senderIsOwner=true, no groupId) → owner
- * 4. Owner in group (senderIsOwner=true, groupId set) → shared
- *    (group context may contain messages from non-owners)
+ * 3. Owner (senderIsOwner=true) → owner (regardless of venue)
  * 5. Known sender, not owner → external
  * 6. Unknown sender → untrusted
  */
@@ -86,13 +84,8 @@ function classifyInitialTrust(ctx: AgentContext): TrustLevel {
     return "local";
   }
 
-  // Owner detection
+  // Owner detection — trust is based on WHO produced the message, not WHERE
   if (ctx.senderIsOwner) {
-    // Owner in a group chat: other participants' messages are in context
-    if (ctx.groupId) {
-      return "shared";
-    }
-    // Owner in DM: highest user trust
     return "owner";
   }
 
