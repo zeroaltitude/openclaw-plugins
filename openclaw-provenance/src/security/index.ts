@@ -331,11 +331,6 @@ export function registerSecurityHooks(
           // FIX: Clear the session taint watermark — owner explicitly declares
           // the context is trustworthy, so inherited taint should not persist
           watermarkStore.clear(sessionKey);
-          // Also clear parent session watermark — thread inherits from channel
-          const parentKey = sessionKey.replace(/:thread:[^:]+$/, '');
-          if (parentKey !== sessionKey) {
-            watermarkStore.clear(parentKey);
-          }
           watermarkStore.flush();  // Persist immediately
           logger.info(`[provenance:${sk}] 🔄 Trust reset: ${previousTaint} → ${targetLevel} (owner override, watermark cleared)`);
         } else {
