@@ -55,14 +55,14 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "gateway": "system",
   "session_status": "system",
 
-  // ── Shared memory ─────────────────────────────────────────────────
-  "vestige_search": "shared",
-  "vestige_smart_ingest": "shared",
-  "vestige_ingest": "shared",
-  "vestige_promote": "shared",
-  "vestige_demote": "shared",
-  "memory_search": "shared",
-  "memory_get": "shared",
+  // ── Memory (local — our own cognitive memory on localhost) ────────
+  "vestige_search": "local",
+  "vestige_smart_ingest": "local",
+  "vestige_ingest": "local",
+  "vestige_promote": "local",
+  "vestige_demote": "local",
+  "memory_search": "local",
+  "memory_get": "local",
 
   // ── External sources ──────────────────────────────────────────────
   "message": "external",     // channel messages contain external content
