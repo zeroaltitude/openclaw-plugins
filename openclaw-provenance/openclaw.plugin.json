@@ -1,7 +1,7 @@
 {
   "id": "provenance",
   "name": "Content Provenance & Security",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Content provenance taint tracking with per-turn DAGs and declarative security policy enforcement for OpenClaw agents.",
   "author": "BigHat Biosciences",
   "main": "dist/index.js",
@@ -11,11 +11,9 @@
     "properties": {
       "taintPolicy": {
         "type": "object",
-        "description": "Default policy mode per taint level. Modes: allow, confirm, restrict. Must be monotonically non-decreasing in strictness.",
+        "description": "Default policy mode per taint level. Modes: allow, confirm, restrict. Must be monotonically non-decreasing in strictness. Old 6-level configs (system/owner/local/shared/external/untrusted) are accepted and mapped automatically with a deprecation warning.",
         "properties": {
-          "system": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
-          "owner": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
-          "local": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
+          "trusted": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
           "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" },
           "external": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" },
           "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" }
@@ -23,13 +21,11 @@
       },
       "toolOverrides": {
         "type": "object",
-        "description": "Per-tool policy overrides. Key = tool name (lowercase). Value = object mapping taint levels (or '*') to modes.",
+        "description": "Per-tool policy overrides. Key = tool name (lowercase). Value = object mapping taint levels (or '*') to modes. Old 6-level keys (system/owner/local) are mapped to 'trusted' automatically.",
         "additionalProperties": {
           "type": "object",
           "properties": {
-            "system": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
-            "owner": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
-            "local": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "trusted": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
             "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
             "external": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
             "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
@@ -37,10 +33,11 @@
           }
         }
       },
-      "approvalTtlSeconds": {
-        "type": "number",
-        "description": "How long an approval code is valid (default: 60)",
-        "default": 60
+      "trustedSenderIds": {
+        "type": "array",
+        "description": "Additional sender IDs (platform-specific) classified as trusted. Messages from these senders are treated as fully trusted, equivalent to owner messages.",
+        "items": { "type": "string" },
+        "default": []
       },
       "maxIterations": {
         "type": "number",
@@ -49,51 +46,15 @@
       },
       "developerMode": {
         "type": "boolean",
-        "description": "When true, prepends a taint-level header to every outbound message for debugging.",
+        "description": "When true, prepends a taint-level header to every outbound message for debugging. Emoji: 🟢 trusted, 🟡 shared, 🟠 external, 🔴 untrusted.",
         "default": false
       },
       "toolOutputTaints": {
         "type": "object",
-        "description": "Override default tool output taint levels. Key = tool name, value = trust level. Unknown tools default to 'local'.",
+        "description": "Override default tool output taint levels. Key = tool name, value = trust level. Merged with built-in defaults. Unknown tools default to 'untrusted'.",
         "additionalProperties": {
           "type": "string",
-          "enum": ["system", "owner", "local", "shared", "external", "untrusted"]
-        }
-      },
-      "memoryFileWritePolicy": {
-        "type": "object",
-        "description": "Policy for Write/Edit operations targeting memory or bootstrap files (SOUL.md, MEMORY.md, memory/*.md)",
-        "properties": {
-          "taintThreshold": {
-            "type": "string",
-            "enum": ["system", "owner", "local", "shared", "external", "untrusted"],
-            "default": "shared",
-            "description": "Minimum taint level that triggers policy enforcement"
-          },
-          "mode": {
-            "type": "string",
-            "enum": ["allow", "confirm", "restrict"],
-            "default": "confirm",
-            "description": "Policy mode: allow (no checks), confirm (require approval), restrict (block)"
-          }
-        }
-      },
-      "sessionSavePolicy": {
-        "type": "object",
-        "description": "Policy for saving tainted sessions to memory on /new command",
-        "properties": {
-          "taintThreshold": {
-            "type": "string",
-            "enum": ["system", "owner", "local", "shared", "external", "untrusted"],
-            "default": "shared",
-            "description": "Minimum taint level that triggers policy enforcement"
-          },
-          "mode": {
-            "type": "string",
-            "enum": ["allow", "confirm", "restrict"],
-            "default": "confirm",
-            "description": "Policy mode: allow (always save), confirm (require approval), restrict (never save)"
-          }
+          "enum": ["trusted", "shared", "external", "untrusted"]
         }
       }
     }

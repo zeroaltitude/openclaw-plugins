@@ -2,7 +2,7 @@
 
 **Content provenance taint tracking and security policy enforcement for OpenClaw agents.**
 
-An OpenClaw plugin that builds per-turn provenance DAGs, tracks trust-level propagation through the agent loop, and enforces declarative security policies with code-based approval — providing defense-in-depth against prompt injection escalation.
+An OpenClaw plugin that builds per-turn provenance DAGs, tracks trust-level propagation through the agent loop, and enforces declarative security policies with owner-verified approval — providing defense-in-depth against prompt injection escalation.
 
 ## The Problem
 
@@ -39,9 +39,9 @@ The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37
 | ATLAS Technique | Threat | Partial Mitigation | Gap |
 |----------------|--------|-------------------|-----|
 | AML.T0051.001 | Indirect prompt injection (T-EXEC-002) | Taint tracking restricts tool escalation after injection | Cannot detect or prevent the injection itself — only limits its blast radius |
-| AML.T0043 | Approval prompt manipulation (T-EVADE-003) | Unpredictable 8-char hex codes prevent automated approval bypass | Owner can still be socially engineered into approving a malicious tool call |
+| AML.T0043 | Approval prompt manipulation (T-EVADE-003) | `.approve` and `.reset-trust` gated by verified owner identity (`senderIsOwner`); prompt injection cannot forge owner credentials | Owner can still be socially engineered into approving a malicious tool call |
 | AML.T0009 | Data theft via `web_fetch` (T-EXFIL-001) | `web_fetch` taints context, restricting subsequent dangerous tools | `web_fetch` itself is always allowed (read-only) — data can be exfiltrated via URL parameters in the request |
-| AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | Session save approval + memory file write detection prevent tainted content from persisting to memory. User must approve or reset-trust to save tainted sessions. | Vestige memory tool output trust is user-configurable. Users who trust their memory should configure vestige tools as "local" or "owner" trust. |
+| AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | Memory file write blocking prevents tainted content from persisting to MEMORY.md, SOUL.md, etc. Blocked writes are persisted to `.provenance/blocked-writes/` for review — content is never lost. Owner must `.reset-trust` to commit or review manually. | Vestige memory tool output trust is user-configurable. Users who trust their memory infrastructure should configure vestige tools as "trusted" output taint. |
 
 ## Architecture
 
@@ -59,12 +59,12 @@ These are orthogonal:
 |------|--------------------------|--------------------------|-----------|
 | `web_fetch` | `untrusted` | always allowed | Read-only HTTP GET. No side effects. But the response is untrusted web content. |
 | `web_search` | `untrusted` | always allowed | Read-only search API. No side effects. Response is untrusted. |
-| `read` | `local` | always allowed | Read-only file access. Response is local content. |
+| `read` | `trusted` | always allowed | Read-only file access. Response is local content. |
 | `browser` | `untrusted` | blocked when tainted | Can click, submit forms, execute JS on authenticated pages. Response is untrusted. |
-| `exec` | `local` | blocked when tainted | Arbitrary command execution. Response is local but the *action* is dangerous. |
-| `message` | `external` | blocked when tainted | Sends messages as the owner. Response is external content (channel messages). |
+| `exec` | `trusted` | blocked when tainted | Arbitrary command execution. Response is trusted but the *action* is dangerous. |
+| `message` | `external` | blocked when tainted (except owner DMs) | Sends messages as the owner. Response is external content. Owner DMs always allowed. |
 | `vestige_search` | `shared` | always allowed | Read-only memory search. Response is shared cross-agent data. |
-| `gateway` | `system` | always requires approval | Can disable security plugins. Response is system-level config. |
+| `gateway` | `trusted` | always requires approval | Can disable security plugins. Response is system-level config. |
 
 A tool's response trust determines **how it taints the context for future iterations**. A tool's call permission determines **whether it can be invoked in the current iteration**.
 
@@ -78,8 +78,7 @@ Every tool has a built-in default output taint. Unknown tools default to `untrus
 
 | Trust Level | Tools |
 |-------------|-------|
-| **system** | `gateway`, `session_status` |
-| **local** | `Read`, `Edit`, `Write`, `exec`, `process`, `tts`, `cron`, `sessions_spawn`, `sessions_send`, `sessions_list`, `sessions_history`, `agents_list`, `nodes`, `canvas` |
+| **trusted** | `Read`, `Edit`, `Write`, `exec`, `process`, `tts`, `cron`, `sessions_spawn`, `sessions_send`, `sessions_list`, `sessions_history`, `agents_list`, `nodes`, `canvas`, `gateway`, `session_status` |
 | **shared** | `vestige_search`, `vestige_smart_ingest`, `vestige_ingest`, `vestige_promote`, `vestige_demote`, `memory_search`, `memory_get` |
 | **external** | `message`, `gog`, `image` |
 | **untrusted** | `web_fetch`, `web_search`, `browser` |
@@ -109,10 +108,11 @@ This example reclassifies `web_fetch` and `web_search` output from `untrusted` t
 
 **Use cases:**
 
-- **Internal APIs**: If `web_fetch` is used primarily against trusted internal endpoints, override to `local` or `shared`
+- **Internal APIs**: If `web_fetch` is used primarily against trusted internal endpoints, override to `trusted`
 - **Curated search**: If `web_search` results are filtered through a trusted proxy, override to `external`
-- **Custom tools**: Any tool added by skills or plugins can be classified — if not listed in defaults, it gets `local`; override to set the appropriate level
+- **Custom tools**: Any tool added by skills or plugins can be classified — unknown tools default to `untrusted`; override to set the appropriate level
 - **Stricter classification**: Override a tool *up* in taint (e.g., `exec` → `shared`) if its output comes from multi-tenant infrastructure
+- **Vestige as trusted**: If you control your own Vestige instance, override vestige tools to `trusted`
 
 The resolved taint map is logged at startup when overrides are present:
 ```
@@ -121,23 +121,23 @@ The resolved taint map is logged at startup when overrides are present:
 
 ### Trust Levels
 
-Content is classified into six trust levels, ordered from most to least trusted:
+Content is classified into four trust levels, ordered from most to least trusted:
 
 | Level | Description | Examples |
 |-------|-------------|----------|
-| `system` | Core agent configuration | System prompt, SOUL.md, AGENTS.md |
-| `owner` | Direct messages from verified owner | Discord DMs from owner ID |
-| `local` | Local tool results | File reads, `exec` output, `git status` |
-| `shared` | Shared/cross-agent data | Vestige memories, sub-agent results |
-| `external` | Known external sources | Email (Gmail), Slack messages, calendar |
-| `untrusted` | Unknown/adversarial sources | Web pages (`web_fetch`), `browser` content |
+| `trusted` | Content from us — system, owner, local tools | System prompt, SOUL.md, owner DMs, file reads, exec output, sub-agents, cron |
+| `shared` | Shared/cross-agent data | Vestige memories, sub-agent results from shared memory |
+| `external` | Known external sources | Email (Gmail), Slack messages, calendar events, channel messages from non-owners |
+| `untrusted` | Unknown/adversarial sources | Web pages (`web_fetch`), `browser` content, unknown webhooks |
+
+The previous six-level model (system → owner → local → shared → external → untrusted) collapsed the top three levels into `trusted` because they all behaved identically — policy was "allow" for all three. The shared/external/untrusted distinction remains meaningful and configurable.
 
 ### Three Sources of Taint
 
 A turn's taint level can be escalated by three distinct mechanisms:
 
 1. **Initial trust classification** — determined at turn start from sender/channel metadata
-2. **Tool response trust** — determined when a tool returns results (from `DEFAULT_TOOL_TRUST`)
+2. **Tool response trust** — determined when a tool returns results (from `DEFAULT_TOOL_OUTPUT_TAINTS`)
 3. **History content** — the conversation history node inherits the initial trust classification
 
 Each of these adds nodes to the provenance graph, and each node's trust level feeds into the high-water mark. The rest of this section explains each mechanism in detail.
@@ -149,13 +149,15 @@ When a turn begins, the plugin classifies the **initial trust level** from the m
 The classification logic (`classifyInitialTrust()` in `security/index.ts`):
 
 ```
-1. No messageProvider (cron, heartbeat, system event)     → system
-2. Sub-agent session (spawnedBy is set)                   → local
-3. Owner in DM (senderIsOwner=true, no groupId)           → owner
-4. Owner in group chat (senderIsOwner=true, groupId set)  → shared
+1. No messageProvider (cron, heartbeat, system event)     → trusted
+2. Sub-agent session (spawnedBy is set)                   → trusted
+3. Owner (senderIsOwner=true)                             → trusted
+4. Trusted sender (senderId in trustedSenderIds config)   → trusted
 5. Known non-owner sender (senderId present)              → external
 6. Unknown sender (no metadata)                           → untrusted
 ```
+
+Step 4 allows configuring additional trusted users beyond the owner — teammates, family members, or other agents whose messages should be treated as fully trusted. See [Trusted Sender IDs](#trusted-sender-ids).
 
 This classification sets the trust on the `history` node in the provenance graph. Since the history node is added before any tools run, it establishes the **floor** for the turn's taint — subsequent tool calls can only escalate it further, never reduce it.
 
@@ -165,27 +167,28 @@ OpenClaw supports many communication channels. Here's how each maps to the class
 
 | Channel | Scenario | Initial Trust | Rationale |
 |---------|----------|---------------|-----------|
-| Discord DM | Owner sends a message | `owner` | `senderIsOwner=true` |
+| Discord DM | Owner sends a message | `trusted` | `senderIsOwner=true` |
+| Discord DM | Trusted sender (in `trustedSenderIds`) | `trusted` | `senderId` matches config |
 | Discord DM | Non-owner sends a DM | `external` | `senderIsOwner=false`, `senderId` present |
-| Discord server channel | Owner sends in #general | `owner` | `senderIsOwner=true` (producer is trusted) |
+| Discord server channel | Owner sends in #general | `trusted` | `senderIsOwner=true` |
 | Discord server channel | Non-owner sends in #general | `external` | Known sender, not the owner |
-| Slack DM | Owner sends a message | `owner` | `senderIsOwner=true` |
-| Slack channel | Owner sends in #eng-general | `owner` | `senderIsOwner=true` (producer is trusted) |
+| Slack DM | Owner sends a message | `trusted` | `senderIsOwner=true` |
+| Slack channel | Owner sends in #eng-general | `trusted` | `senderIsOwner=true` |
 | Slack channel | Non-owner sends | `external` | Known sender, not the owner |
-| Telegram DM | Owner sends | `owner` | `senderIsOwner=true` |
-| Telegram group | Owner sends | `owner` | `senderIsOwner=true` (producer is trusted) |
+| Telegram DM | Owner sends | `trusted` | `senderIsOwner=true` |
+| Telegram group | Owner sends | `trusted` | `senderIsOwner=true` |
 | Telegram group | Non-owner sends | `external` | Known sender, not the owner |
-| Signal DM | Owner sends | `owner` | `senderIsOwner=true` |
-| Cron job | Scheduled task fires | `system` | No `messageProvider` — this is an internal system event |
-| Heartbeat | Periodic check | `system` | No `messageProvider` |
-| Sub-agent | `sessions_spawn` task | `local` | `spawnedBy` is set — parent session authorized this work |
+| Signal DM | Owner sends | `trusted` | `senderIsOwner=true` |
+| Cron job | Scheduled task fires | `trusted` | No `messageProvider` — internal system event |
+| Heartbeat | Periodic check | `trusted` | No `messageProvider` |
+| Sub-agent | `sessions_spawn` task | `trusted` | `spawnedBy` is set — parent session authorized this work |
 | Webhook | External webhook trigger | `untrusted` | No sender metadata available |
 
-#### How OpenClaw channels map to trust levels
+#### Trust classification is producer-based
 
 Trust classification is based on **message producer identity**, not venue. The `groupId` field is irrelevant to taint classification.
 
-**Why owner messages in group chats are "owner" trust:**
+**Why owner messages in group chats are "trusted":**
 
 Trust is about WHO produced the message, not WHERE it was sent. If the owner sends a message in a group chat, that triggering message is trusted. If non-owner messages exist in the conversation history, those would have been classified as "external" or "untrusted" in their respective turns, and the session watermark would persist that taint across subsequent turns.
 
@@ -201,6 +204,33 @@ When non-owner users send messages in group chats:
 
 This architecture provides defense-in-depth: producer-based classification for the current turn, plus watermark persistence to track historical taint.
 
+#### Trusted Sender IDs
+
+By default, only the owner (`senderIsOwner=true`) and system events are classified as `trusted`. The `trustedSenderIds` config option extends this to additional users:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "provenance": {
+        "config": {
+          "trustedSenderIds": ["U010622FNQP", "159471966640799744"]
+        }
+      }
+    }
+  }
+}
+```
+
+Any message from a sender whose platform ID matches an entry in `trustedSenderIds` is classified as `trusted`, regardless of the channel or platform. IDs are platform-specific (Discord user IDs, Slack user IDs, etc.) and don't collide across platforms.
+
+**Use cases:**
+- **Teammates** who should have full agent capability when interacting in shared channels
+- **Family members** whose messages in group chats should not trigger restrictions
+- **Service accounts** that send trusted automated messages
+
+**Security note:** Adding a sender to `trustedSenderIds` means their messages will never trigger taint restrictions — the agent will execute any tool they request. Only add IDs you trust as much as the owner.
+
 #### Metadata availability
 
 The classification depends on fields exposed by OpenClaw's `PluginHookAgentContext`:
@@ -213,7 +243,7 @@ The classification depends on fields exposed by OpenClaw's `PluginHookAgentConte
 | `groupId` | Channel plugin — channel/group ID | `feature/extended-security-hooks` branch |
 | `spawnedBy` | Agent runner — parent session key | `feature/extended-security-hooks` branch |
 
-Without these fields (e.g., on older OpenClaw versions), the classification falls through to the default: `owner`. This maintains backward compatibility but provides no sender-based trust differentiation.
+Without these fields (e.g., on older OpenClaw versions), the classification falls through to the default: `trusted`. This maintains backward compatibility but provides no sender-based trust differentiation.
 
 ### Taint Propagation (High-Water Mark)
 
@@ -225,20 +255,20 @@ updateTaint(trust: TrustLevel): void {
 }
 ```
 
-When a tool is called, `recordToolCall()` looks up the tool's **response trust** from `DEFAULT_TOOL_TRUST` and adds a node with that trust level. This may escalate the turn's `maxTaint`:
+When a tool is called, `recordToolCall()` looks up the tool's **response trust** from `DEFAULT_TOOL_OUTPUT_TAINTS` and adds a node with that trust level. This may escalate the turn's `maxTaint`:
 
 ```
 Turn starts:
-  context_assembled → node(trust: system)
-  history → node(trust: owner)              maxTaint = owner
+  context_assembled → node(trust: trusted)
+  history → node(trust: trusted)            maxTaint = trusted
 
 Iteration 1:
-  LLM call → node(trust: owner)            maxTaint = owner (inherits current maxTaint)
-  Tool: read("file.txt") → node(trust: local)    maxTaint = local  ← escalated by read's response trust
+  LLM call → node(trust: trusted)          maxTaint = trusted
+  Tool: read("file.txt") → node(trust: trusted)  maxTaint = trusted
   [LLM sees file contents in next call]
 
 Iteration 2:
-  LLM call → node(trust: local)            maxTaint = local
+  LLM call → node(trust: trusted)          maxTaint = trusted
   Tool: web_fetch(url) → node(trust: untrusted)  maxTaint = untrusted  ← escalated by web_fetch's response trust
   [LLM sees web content in next call]
 
@@ -255,7 +285,7 @@ Iteration 3:
 
 **Consequence:** If `web_fetch` is called in iteration 1 and returns untrusted content, `exec` is blocked starting in iteration 2. The LLM cannot call both `web_fetch` and `exec` in the same iteration and have `exec` be blocked — the blocking happens one iteration later. This is currently acceptable because the LLM processes tool results sequentially (not in parallel branches).
 
-**Taint never decreases within a turn.** `minTrust()` is a one-way ratchet. If one tool returns untrusted content, the entire remainder of the turn is tainted, even if subsequent tools return local content.
+**Taint never decreases within a turn.** `minTrust()` is a one-way ratchet. If one tool returns untrusted content, the entire remainder of the turn is tainted, even if subsequent tools return trusted content.
 
 The high-water mark is correct for current LLM architectures because the context window is a shared memory space. Once untrusted content enters the context, every subsequent LLM call has access to it — there's no isolation between "the part that read the email" and "the part that runs exec."
 
@@ -267,10 +297,10 @@ The plugin builds a directed acyclic graph for each turn:
 
 ```
 context_assembled
-  ├── node: system_prompt (trust: system)
-  └── node: history (trust: owner)
-                                            maxTaint: owner
-llm_call_1 (trust: owner)
+  ├── node: system_prompt (trust: trusted)
+  └── node: history (trust: trusted)
+                                            maxTaint: trusted
+llm_call_1 (trust: trusted)
   └── tool: web_fetch (trust: untrusted)  ← response trust escalates maxTaint
                                             maxTaint: untrusted
 llm_call_2 (trust: untrusted)            ← inherits maxTaint
@@ -289,9 +319,20 @@ Before each LLM call, the plugin evaluates the current taint level against the p
 
 **Layer 2: `before_tool_call` — Execution Blocking**
 
-If the LLM somehow names a restricted tool (e.g., from memory of a previous turn), the execution layer blocks the call and returns an error with an approval code. This catches any bypass of Layer 1.
+If the LLM somehow names a restricted tool (e.g., from memory of a previous turn), the execution layer blocks the call and returns an error. This catches any bypass of Layer 1.
 
 Why both layers? Layer 1 is the primary defense (the LLM can't call what it can't see). Layer 2 is the safety net (defense in depth). In testing, we found cases where the LLM would name tools from prior context even after they were removed from the current tool list.
+
+### Fail-Open Design
+
+All hook handlers are wrapped in try/catch. On error:
+- `logger.error(...)` with full stack trace
+- Return `undefined` (no modification to the agent's behavior)
+- The agent continues operating without taint tracking rather than becoming unresponsive
+
+This is an explicit design choice. An unresponsive agent is worse than an agent operating without taint tracking — if something goes catastrophically wrong and credentials leak, the owner sees it in logs and can rotate. A fail-closed agent can't even report that something is wrong.
+
+Watermark store errors are best-effort. Provenance graph errors are best-effort. The agent always keeps running.
 
 ## Policy Model
 
@@ -300,8 +341,8 @@ Why both layers? Layer 1 is the primary defense (the LLM can't call what it can'
 | Mode | Behavior |
 |------|----------|
 | `allow` | No restrictions. Tools available normally. |
-| `confirm` | Tools blocked with approval code. Owner can approve per-tool or all. |
-| `restrict` | Tools silently removed from tool list. No approval possible. |
+| `confirm` | Tools blocked until owner approves (`.approve <tool>` or `.approve all`). |
+| `restrict` | Tools silently removed from tool list. No approval possible — use `.reset-trust`. |
 
 ### Taint Policy
 
@@ -310,9 +351,7 @@ Maps each trust level to a default mode. Must be **monotonically non-decreasing 
 ```json
 {
   "taintPolicy": {
-    "system": "allow",
-    "owner": "allow",
-    "local": "allow",
+    "trusted": "allow",
     "shared": "confirm",
     "external": "confirm",
     "untrusted": "confirm"
@@ -348,13 +387,22 @@ A tool is "safe to call" when it has **no dangerous side effects** — it cannot
 
 | Safe tool | Response trust | Why safe to call | Why response is less trusted |
 |-----------|---------------|------------------|------------------------------|
-| `read` | `local` | Read-only file access | File could contain anything |
+| `read` | `trusted` | Read-only file access | File could contain anything |
 | `web_fetch` | `untrusted` | HTTP GET, no side effects | Web pages are adversarial |
 | `web_search` | `untrusted` | Search API query | Results are adversarial |
 | `vestige_search` | `shared` | Read-only memory query | Cross-agent data, not verified |
 | `image` | `external` | Analyze an image | External image content |
 
 The safe tool's response still taints the context via `recordToolCall()`. After a `web_fetch` completes, the turn's `maxTaint` escalates to `untrusted`, and subsequent iterations will restrict dangerous tools. The safe tool itself is never blocked — only tools called *after* its tainted response enters the context.
+
+### The `message` Tool: Owner DM Exception
+
+The `message` tool has a split personality:
+
+- **Sending to the owner in a 1:1 DM** (senderIsOwner=true, no groupId, or target is the owner): **Always allowed**, regardless of taint level. This is equivalent to the agent's normal response — just talking to its owner.
+- **Sending to a group channel or another user**: **Follows taint-level default** (confirm/restrict when tainted).
+
+The threat model for `message` is the agent being tricked into sending content *to other people* or *into public channels*. Talking to the owner in their own DM is not a risk — and if `message` gets restricted in a DM, the agent can't even report that something is wrong. That's a fail-closed trap.
 
 ### Browser: A Special Case
 
@@ -366,8 +414,7 @@ The owner can override this for direct use via `toolOverrides`:
 {
   "toolOverrides": {
     "browser": {
-      "owner": "allow",
-      "local": "allow",
+      "trusted": "allow",
       "shared": "confirm",
       "external": "confirm",
       "untrusted": "confirm"
@@ -379,11 +426,11 @@ The owner can override this for direct use via `toolOverrides`:
 This gives a precise behavior:
 
 ```
-Iteration 1: maxTaint=owner
-  → browser call permission: allowed (owner override)
+Iteration 1: maxTaint=trusted
+  → browser call permission: allowed (trusted override)
   → browser called, returns page content
   → recordToolCall("browser") adds node with trust=untrusted
-  → maxTaint escalates: owner → untrusted
+  → maxTaint escalates: trusted → untrusted
 
 Iteration 2: maxTaint=untrusted
   → browser call permission: confirm (untrusted override)
@@ -391,11 +438,11 @@ Iteration 2: maxTaint=untrusted
   → exec, message, etc. also blocked
 ```
 
-The first browser call succeeds because it was evaluated against the pre-escalation taint (`owner`). The second browser call is blocked because the first call's response tainted the context to `untrusted`. An injection in the first page cannot direct a second browser action without owner approval.
+The first browser call succeeds because it was evaluated against the pre-escalation taint (`trusted`). The second browser call is blocked because the first call's response tainted the context to `untrusted`. An injection in the first page cannot direct a second browser action without owner approval.
 
 ### Default Dangerous Tools
 
-`gateway` defaults to `{ local: "confirm", shared: "confirm", external: "confirm", untrusted: "confirm" }` — requiring approval even at local trust level, because config changes can disable the security plugin itself.
+`gateway` defaults to `{ trusted: "confirm", shared: "confirm", external: "confirm", untrusted: "confirm" }` — requiring approval even at trusted level, because config changes can disable the security plugin itself.
 
 ### Unknown Tools (Secure by Default)
 
@@ -411,79 +458,91 @@ To make an unknown tool usable, add it to either:
 - `toolOverrides` in plugin config (to set its call permission per taint level)
 - Or both, depending on your needs
 
-## Code-Based Approval
+### Memory File Write Protection
 
-When a tool is blocked in `confirm` mode, the plugin generates an 8-character hex approval code:
+When taint is shared, external, or untrusted, `Write` and `Edit` operations targeting memory files (MEMORY.md, AGENTS.md, SOUL.md, HEARTBEAT.md, memory/*.md) are **blocked**. The content is **never lost**:
+
+1. Blocked writes are saved to `.provenance/blocked-writes/` with:
+   - Original target path
+   - Full content that would have been written
+   - Taint level and reason
+   - Timestamp
+2. The agent tells the user: "I saved this to staging — use `.reset-trust` to commit, or review manually at `.provenance/blocked-writes/`"
+3. Blocked writes persist across sessions until explicitly approved or cleaned up
+
+This is the critical persistence defense — preventing tainted content from poisoning future sessions via memory files while never losing the user's work. The `BlockedWriteStore` manages these staged writes on disk.
+
+## Owner-Verified Approval
+
+When a tool is blocked in `confirm` mode, the agent tells the user which tools are restricted and how to approve them:
 
 ```
-Tool 'exec' is blocked by security policy. Context contains tainted content.
-Blocked tools: exec
-Approval code: bf619df9 (expires in 120s)
-Approve:  .approve exec bf619df9 [minutes]
-Approve all:  .approve all bf619df9 [minutes]
+⚠️ exec is blocked (untrusted content in context).
+Blocked tools: exec, message
+Approve:  .approve exec
+Approve all:  .approve all
 ```
 
 ### Approval Format
 
 ```
-.approve <tool|all> <8-char-hex-code> [duration-minutes]
+.approve <tool|all> [duration-minutes]
 ```
 
-- **Per-tool**: `.approve exec bf619df9` — approves only `exec`
-- **All tools**: `.approve all bf619df9` — approves everything blocked
-- **Duration**: `.approve exec bf619df9 30` — approval lasts 30 minutes
-- **Turn-scoped** (default): `.approve exec bf619df9` — approval expires when the turn ends
+- **Per-tool**: `.approve exec` — approves only `exec`
+- **All tools**: `.approve all` — approves everything blocked
+- **Duration**: `.approve exec 30` — approval lasts 30 minutes
+- **Turn-scoped** (default): `.approve exec` — approval expires when the turn ends
 
-Example interaction:
+### Security Model
 
-<img width="814" height="798" alt="image" src="https://github.com/user-attachments/assets/dacd2bc1-48a5-4d1a-9986-86351e6069ed" />
+Approval commands are gated by **verified owner identity** (`senderIsOwner=true`), not by codes. This is the same security model as `.reset-trust` — and for the same reason.
 
-<img width="1046" height="469" alt="Screenshot 2026-02-10 at 15 06 44" src="https://github.com/user-attachments/assets/ca6fbb4b-8203-44c7-af86-d85ace42c183" />
+The previous version used 8-character hex approval codes to prevent prompt injection from approving its own tools. But the security analysis that justified removing codes from `.reset-trust` applies equally to `.approve`:
 
-### Why Codes?
+1. **Owner identity is the real gate.** Both `.approve` and `.reset-trust` are only processed when `senderIsOwner=true`. A prompt injection in web content or email cannot set this flag — it's determined by OpenClaw's channel layer from verified platform credentials.
+2. **Codes were redundant.** If we trust `senderIsOwner` to gate `.reset-trust` (which is *more* powerful — it clears all restrictions), then gating `.approve` on the same mechanism is equally secure.
+3. **Codes added friction without adding security.** The owner had to copy-paste a hex code every time they wanted to unblock a tool. This slowed down normal workflows without meaningfully improving security posture.
+4. **Codes were defense-in-depth for missing metadata.** The original design assumed `senderIsOwner` might not be available (older OpenClaw versions). With the extended security hooks now standard, owner verification is reliable.
 
-A simple `!approve exec` command could be injected by prompt injection in the very content that triggered the restriction. The 8-character hex code is:
+**The threat model is unchanged:** a prompt injection cannot trigger `.approve` because it cannot produce a message with `senderIsOwner=true`. The verification happens in the channel layer (Discord, Slack, etc.), outside the LLM's control.
 
-1. **Unpredictable** — generated randomly, not derivable from context
-2. **Time-limited** — expires after configurable TTL (default: 120s)
-3. **Session-scoped** — codes are tied to a specific session
-4. **Owner-only** — only messages from the verified owner are processed
-
-An attacker would need to guess an 8-character hex code within the TTL window — 4 billion possibilities in 120 seconds.
+**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw without extended hook context), `.approve` falls back to allowing the command from any sender. In this degraded mode, the owner should rely on `.reset-trust` for explicit trust management.
 
 ## Trust Reset
 
 Sometimes the owner has reviewed tainted content and is satisfied it's safe — they shouldn't need to approve every tool individually for the rest of the turn. The `.reset-trust` command resets the turn's taint level:
 
 ```
-.reset-trust           # Reset to system (full trust, all tools available)
-.reset-trust owner     # Reset to owner level
-.reset-trust local     # Reset to local level
+.reset-trust           # Reset to trusted (full trust, all tools available)
+.reset-trust shared    # Reset to shared level
 ```
 
 When `.reset-trust` is processed:
 1. The provenance graph's `maxTaint` is set to the specified level
-2. The blocked tools set is cleared
-3. Any pending approval codes are cleared
-4. All tools become immediately available (subject to normal policy at the new taint level)
+2. The session watermark is cleared
+3. The blocked tools set is cleared
+4. Any pending approval codes are cleared
+5. All tools become immediately available (subject to normal policy at the new taint level)
 
 ### Security
 
 **Owner-only:** `.reset-trust` is only processed when `senderIsOwner=true` in the hook context. Non-owner messages containing `.reset-trust` are ignored and logged as a warning.
 
-**No code required:** Unlike `.approve`, `.reset-trust` does not require an approval code. The rationale: `.approve` uses codes to prevent injection attacks from approving their own tools. `.reset-trust` is a broader statement ("I trust everything in this context now") that only the owner can make. Since it requires verified owner identity rather than a guessable code, it's actually a stronger authentication mechanism.
+**No code required:** Like `.approve`, `.reset-trust` is gated by verified owner identity (`senderIsOwner=true`), not by codes. Both commands use the same security model — the channel layer verifies who sent the message, and the plugin trusts that verification.
 
-**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw versions without extended hook context), `.reset-trust` falls back to allowing the command. In this degraded mode, the approval code on `.approve` provides the security guarantee instead.
+**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw versions without extended hook context), `.reset-trust` falls back to allowing the command from any sender.
 
 ### When to use `.reset-trust` vs `.approve`
 
 | Scenario | Use |
 |----------|-----|
-| One specific tool needs unblocking | `.approve exec <code>` |
+| One specific tool needs unblocking | `.approve exec` |
 | You've reviewed the content and trust it all | `.reset-trust` |
-| You want time-limited access to a tool | `.approve exec <code> 30` |
-| You want to restore full trust for the rest of the turn | `.reset-trust` |
-| Content is from a known-safe source that happens to be classified as untrusted | `.reset-trust owner` |
+| You want time-limited access to a tool | `.approve exec 30` |
+| Multiple tools need unblocking at once | `.approve all` |
+| You want to restore full trust for the rest of the session | `.reset-trust` |
+| Content is from a known-safe source that happens to be classified as untrusted | `.reset-trust shared` |
 
 ## Session Taint Watermark (Cross-Turn Persistence)
 
@@ -504,7 +563,7 @@ The watermark is cleared in two scenarios:
 
 **`.reset-trust`** — When the owner issues a `.reset-trust` command, it clears both the in-memory taint and the persistent watermark. The reset is recorded in the watermark's `resetHistory` array for audit purposes.
 
-**`/new` or `/reset`** — When a fresh session starts (detected by `before_agent_start` seeing ≤1 messages), the watermark is automatically cleared. A fresh session is a fresh trust boundary — there's no conversation history to inherit taint from.
+**`/new` or `/reset`** — When a fresh session starts (detected by `before_agent_start` seeing ≤1 messages), the watermark is automatically cleared and the session is saved normally. A fresh session is a fresh trust boundary — there's no conversation history to inherit taint from.
 
 ### Watermark File Format
 
@@ -531,7 +590,7 @@ The file is stored at `<workspaceDir>/.provenance/watermarks.json` and is create
 When `developerMode` is enabled in the plugin config, the plugin prepends a taint header to every outbound message. This makes the current taint state visible in the conversation for debugging and development:
 
 ```
-🟢 [taint: owner | reason: owner DM | last impacted: none]
+🟢 [taint: trusted | reason: owner DM | last impacted: none]
 Here's what I found...
 ```
 
@@ -541,9 +600,10 @@ I can see the page content, but exec is currently blocked.
 ```
 
 The taint emoji indicates severity:
-- 🟢 `system`, `owner`, `local` — no restrictions
-- 🟡 `shared` — mild restrictions (depends on policy)
-- 🔴 `external`, `untrusted` — significant restrictions active
+- 🟢 `trusted` — no restrictions
+- 🟡 `shared` — mild restrictions
+- 🟠 `external` — moderate restrictions
+- 🔴 `untrusted` — significant restrictions
 
 ### Enabling Developer Mode
 
@@ -582,14 +642,11 @@ Add to your `openclaw.json`:
         "enabled": true,
         "config": {
           "taintPolicy": {
-            "system": "allow",
-            "owner": "allow",
-            "local": "allow",
+            "trusted": "allow",
             "shared": "confirm",
             "external": "confirm",
             "untrusted": "confirm"
           },
-          "approvalTtlSeconds": 120,
           "toolOverrides": {
             "gateway": { "*": "confirm" }
           }
@@ -607,27 +664,34 @@ Add to your `openclaw.json`:
 
 **Important:** `hooks.internal.enabled: true` is required. Without it, the plugin's hooks are never called.
 
+### Backward Compatibility
+
+Old 6-level `taintPolicy` configs (with `system`, `owner`, `local` keys) are accepted and automatically mapped to the 4-level model:
+
+- `system`, `owner`, `local` keys → mapped to `trusted` (using the most permissive of the three)
+- `shared`, `external`, `untrusted` keys → pass through unchanged
+
+A deprecation warning is logged when old-format configs are detected. Old `toolOverrides` with 6-level keys are similarly mapped.
+
 ### Configuration Reference
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `taintPolicy` | object | see below | Mode per trust level |
-| `taintPolicy.system` | string | `"allow"` | Policy for system-level content |
-| `taintPolicy.owner` | string | `"allow"` | Policy for owner messages |
-| `taintPolicy.local` | string | `"allow"` | Policy for local tool results |
+| `taintPolicy.trusted` | string | `"allow"` | Policy for trusted content (system, owner, local) |
 | `taintPolicy.shared` | string | `"confirm"` | Policy for shared/cross-agent data |
 | `taintPolicy.external` | string | `"confirm"` | Policy for external sources |
 | `taintPolicy.untrusted` | string | `"confirm"` | Policy for untrusted/web content |
+| `trustedSenderIds` | string[] | `[]` | Additional sender IDs (any platform) classified as trusted |
 | `toolOverrides` | object | `{}` | Per-tool mode overrides |
-| `approvalTtlSeconds` | number | `60` | Approval code expiry |
 | `maxIterations` | number | `10` | Max agent loop iterations |
 | `developerMode` | boolean | `false` | Prepend taint header to outbound messages (debugging) |
-| `workspaceDir` | string | `process.cwd()` | Directory for persistent state (`.provenance/watermarks.json`) |
+| `workspaceDir` | string | `process.cwd()` | Directory for persistent state (`.provenance/`) |
 | `toolOutputTaints` | object | `{}` | Per-tool output taint overrides. Key = tool name, value = trust level. Merged with built-in defaults. |
 
 ### Example Configurations
 
-**Paranoid** — restrict everything below local:
+**Paranoid** — restrict everything below trusted:
 ```json
 {
   "taintPolicy": {
@@ -665,7 +729,7 @@ Add to your `openclaw.json`:
 cd openclaw-provenance
 npm install
 npm run build    # TypeScript → dist/
-npm test         # 58 tests via vitest
+npm test         # vitest
 ```
 
 ### Deploy
@@ -685,12 +749,14 @@ The plugin registers handlers on OpenClaw's internal agent loop hooks:
 | Hook | Purpose |
 |------|---------|
 | `context_assembled` | Start provenance graph, record initial context |
-| `before_llm_call` | Evaluate policy, filter tool list, process `.approve` commands |
+| `before_llm_call` | Evaluate policy, filter tool list, process `.approve` / `.reset-trust` commands |
 | `after_llm_call` | Record tool calls, update taint level |
-| `before_tool_call` | Execution-layer enforcement (defense in depth) |
+| `before_tool_call` | Execution-layer enforcement (defense in depth), memory file write blocking |
 | `loop_iteration_start` | Logging |
 | `loop_iteration_end` | Record iteration metadata |
 | `before_response_emit` | Seal graph, clear turn-scoped approvals, log summary |
+
+All hook handlers are wrapped in fail-open try/catch — errors are logged but never block the agent.
 
 These hooks require the `feature/extended-security-hooks` branch of OpenClaw (or equivalent core support for internal agent loop hooks).
 
@@ -707,8 +773,8 @@ The key insight is that prompt injection is a **structural problem**, not a dete
 This is a form of **mandatory access control** applied to LLM agent systems. The trust levels form a lattice, and the taint propagation rule (high-water mark) ensures that information can only flow "downward" — from trusted to less-trusted contexts, never the reverse.
 
 In classic information flow control terms:
-- **No read up**: An agent at trust level `local` cannot read `system`-level secrets (enforced by OpenClaw's existing access control)
-- **No write down**: Content tainted by `untrusted` sources cannot trigger `owner`-level actions (enforced by this plugin)
+- **No read up**: An agent at trust level `shared` cannot read `trusted`-level secrets (enforced by OpenClaw's existing access control)
+- **No write down**: Content tainted by `untrusted` sources cannot trigger `trusted`-level actions (enforced by this plugin)
 
 The "no write down" property is the novel contribution. Without it, an untrusted web page can trigger the agent to send messages, run commands, or modify configuration — effectively writing to the owner's authority level.
 
@@ -733,15 +799,16 @@ openclaw-provenance/
 └── src/
     ├── index.ts             # Plugin entry point (register function)
     └── security/
-        ├── index.ts         # Hook registration and enforcement logic
+        ├── index.ts         # Hook registration, enforcement logic, fail-open wrappers
         ├── policy-engine.ts # Policy evaluation, approval integration
-        ├── approval-store.ts # Code-based approval state management
+        ├── approval-store.ts # Owner-verified approval state management
         ├── provenance-graph.ts # Per-turn DAG construction
-        ├── trust-levels.ts  # Trust level definitions and tool classification
+        ├── trust-levels.ts  # 4-level trust definitions and tool classification
         ├── watermark-store.ts # Persistent session taint watermarks (disk-backed)
+        ├── blocked-write-store.ts # Persists blocked memory file writes to disk
         ├── SECURITY.md      # Internal security documentation
         └── __tests__/
-            └── policy-engine.test.ts  # 58 tests covering all components
+            └── policy-engine.test.ts  # Tests covering all components
 ```
 
 ## License

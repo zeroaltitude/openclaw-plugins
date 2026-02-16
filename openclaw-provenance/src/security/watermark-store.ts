@@ -1,25 +1,30 @@
 /**
  * Persistent taint watermark store.
- * 
+ *
  * Stores session-level taint watermarks to disk so they survive
  * gateway restarts. Each session's watermark tracks the worst taint
  * level seen and the root cause reason.
- * 
+ *
  * File location: <workspaceDir>/.provenance/watermarks.json
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { type TrustLevel, TRUST_ORDER, minTrust } from "./trust-levels.js";
 
 export interface WatermarkEntry {
   level: TrustLevel;
   reason: string;
-  escalatedAt: string;        // ISO-8601 timestamp
-  escalatedBy: string;        // what caused the escalation (tool name, content scan, etc.)
-  lastImpactedTool?: string;  // last tool that was denied/required authorization
+  escalatedAt: string; // ISO-8601 timestamp
+  escalatedBy: string; // what caused the escalation
+  lastImpactedTool?: string;
   resetHistory: Array<{
-    resetAt: string;          // ISO-8601 timestamp
+    resetAt: string;
     previousLevel: TrustLevel;
     previousReason: string;
   }>;
@@ -40,12 +45,10 @@ export class WatermarkStore {
     const dir = join(workspaceDir, ".provenance");
     this.filePath = join(dir, "watermarks.json");
 
-    // Ensure directory exists
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
 
-    // Load existing data or initialize
     this.data = this.load();
   }
 
@@ -66,7 +69,6 @@ export class WatermarkStore {
 
   private scheduleSave(): void {
     this.dirty = true;
-    // Debounce writes — save at most once per second
     if (!this.writeTimer) {
       this.writeTimer = setTimeout(() => {
         this.flush();
@@ -83,7 +85,11 @@ export class WatermarkStore {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf-8");
+      writeFileSync(
+        this.filePath,
+        JSON.stringify(this.data, null, 2),
+        "utf-8",
+      );
       this.dirty = false;
     } catch {
       // Best-effort — don't crash the plugin on write failure
@@ -95,8 +101,10 @@ export class WatermarkStore {
     return this.data.watermarks[sessionKey];
   }
 
-  /** Get watermark in the format expected by the rest of the plugin */
-  getLevel(sessionKey: string): { level: TrustLevel; reason: string } | undefined {
+  /** Get watermark level and reason */
+  getLevel(
+    sessionKey: string,
+  ): { level: TrustLevel; reason: string } | undefined {
     const entry = this.data.watermarks[sessionKey];
     if (!entry) return undefined;
     return { level: entry.level, reason: entry.reason };
@@ -114,23 +122,22 @@ export class WatermarkStore {
     escalatedBy: string,
   ): boolean {
     const existing = this.data.watermarks[sessionKey];
-    
+
     if (existing) {
       const merged = minTrust(existing.level, level);
       const existingIdx = TRUST_ORDER.indexOf(existing.level);
       const mergedIdx = TRUST_ORDER.indexOf(merged);
-      
-      // Only update if taint got worse
+
       if (mergedIdx <= existingIdx) return false;
-      
+
       existing.level = merged;
       existing.reason = reason;
       existing.escalatedAt = new Date().toISOString();
       existing.escalatedBy = escalatedBy;
     } else {
-      // Only create watermark if taint is worse than owner
-      if (level === "owner" || level === "system") return false;
-      
+      // Only create watermark if taint is worse than trusted
+      if (level === "trusted") return false;
+
       this.data.watermarks[sessionKey] = {
         level,
         reason,
@@ -139,7 +146,7 @@ export class WatermarkStore {
         resetHistory: [],
       };
     }
-    
+
     this.scheduleSave();
     return true;
   }
@@ -153,27 +160,25 @@ export class WatermarkStore {
     }
   }
 
-  /** Clear the watermark for a session (used by .reset-trust) */
+  /** Clear the watermark for a session */
   clear(sessionKey: string): void {
     const entry = this.data.watermarks[sessionKey];
     if (entry) {
-      // Record reset in history before clearing
       entry.resetHistory.push({
         resetAt: new Date().toISOString(),
         previousLevel: entry.level,
         previousReason: entry.reason,
       });
-      // Remove the watermark
       delete this.data.watermarks[sessionKey];
       this.scheduleSave();
     }
   }
 
-  /** Clear the watermark and keep audit trail (returns the cleared entry for logging) */
+  /** Clear the watermark and return the cleared entry for logging */
   clearWithAudit(sessionKey: string): WatermarkEntry | undefined {
     const entry = this.data.watermarks[sessionKey];
     if (!entry) return undefined;
-    
+
     const snapshot = { ...entry, resetHistory: [...entry.resetHistory] };
     this.clear(sessionKey);
     return snapshot;
@@ -184,7 +189,7 @@ export class WatermarkStore {
     return { ...this.data.watermarks };
   }
 
-  /** Clean up stale sessions (call periodically) */
+  /** Clean up stale sessions */
   cleanup(activeSessions: Set<string>): number {
     let removed = 0;
     for (const key of Object.keys(this.data.watermarks)) {
