@@ -16,7 +16,7 @@ interface PluginApi {
     parameters: any;
     execute: (id: string, params: any) => Promise<{ content: Array<{ type: string; text: string }> }>;
   }): void;
-  on(hookName: string, handler: (...args: any[]) => any, opts?: { priority?: number }): void;
+  on(hookName: string, handler: (...args: any[]) => any, opts?: Record<string, unknown>): void;
   pluginConfig: Record<string, unknown> | undefined;
   config: Record<string, unknown>;
   logger: { info(...args: any[]): void; warn(...args: any[]): void; error(...args: any[]): void };
@@ -27,7 +27,7 @@ export function register(api: PluginApi) {
   const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
 
   // Warn if internal hooks are not enabled — session save and memory file
-  // write policies depend on command:new priority ordering with the
+  // write policies depend on command:new registration ordering with the
   // session-memory hook, which only works when internal hooks are active.
   const hooksInternalEnabled = (api.config as any)?.hooks?.internal?.enabled === true;
   if (!hooksInternalEnabled) {

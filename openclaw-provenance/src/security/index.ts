@@ -18,8 +18,8 @@ import { basename, join } from "node:path";
 
 // Types matching OpenClaw's hook system (from src/plugins/types.ts)
 interface HookApi {
-  registerHook?(events: string | string[], handler: (...args: any[]) => any, opts?: { priority?: number; name?: string; description?: string }): void;
-  on(hookName: string, handler: (...args: any[]) => any, opts?: { priority?: number }): void;
+  registerHook?(events: string | string[], handler: (...args: any[]) => any, opts?: { name?: string; description?: string }): void;
+  on(hookName: string, handler: (...args: any[]) => any, opts?: Record<string, unknown>): void;
 }
 
 interface AgentContext {
@@ -249,7 +249,8 @@ export function registerSecurityHooks(
   });
 
   // --- command:new --- (Session save policy enforcement)
-  // This hook runs BEFORE OpenClaw's session-memory hook (priority 200 > default 0)
+  // This hook runs BEFORE OpenClaw's session-memory hook (plugins register
+  // before bundled hooks in the gateway startup sequence — see server.impl.ts)
   // and can block or redirect session saves by setting event.context fields.
   api.on("command:new", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
@@ -330,7 +331,7 @@ export function registerSecurityHooks(
       logger.info(`[provenance:${sk}] ✅ Session save allowed (taint: ${oldSessionTaint})`);
     }
     return undefined;
-  }, { priority: 200 });
+  });
 
   // --- context_assembled ---
   api.on("context_assembled", (event: any, ctx: AgentContext) => {
@@ -557,7 +558,7 @@ export function registerSecurityHooks(
     }
 
     return undefined;
-  }, { priority: 100 });
+  });
 
   // --- before_tool_call --- (EXECUTION-LAYER ENFORCEMENT)
   api.on("before_tool_call", (event: any, ctx: AgentContext) => {
@@ -656,7 +657,7 @@ export function registerSecurityHooks(
       };
     }
     return undefined;
-  }, { priority: 100 });
+  });
 
   // --- after_llm_call ---
   api.on("after_llm_call", (event: any, ctx: AgentContext) => {
