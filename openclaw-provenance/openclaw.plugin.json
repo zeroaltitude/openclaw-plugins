@@ -59,6 +59,42 @@
           "type": "string",
           "enum": ["system", "owner", "local", "shared", "external", "untrusted"]
         }
+      },
+      "memoryFileWritePolicy": {
+        "type": "object",
+        "description": "Policy for Write/Edit operations targeting memory or bootstrap files (SOUL.md, MEMORY.md, memory/*.md)",
+        "properties": {
+          "taintThreshold": {
+            "type": "string",
+            "enum": ["system", "owner", "local", "shared", "external", "untrusted"],
+            "default": "shared",
+            "description": "Minimum taint level that triggers policy enforcement"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["allow", "confirm", "restrict"],
+            "default": "confirm",
+            "description": "Policy mode: allow (no checks), confirm (require approval), restrict (block)"
+          }
+        }
+      },
+      "sessionSavePolicy": {
+        "type": "object",
+        "description": "Policy for saving tainted sessions to memory on /new command",
+        "properties": {
+          "taintThreshold": {
+            "type": "string",
+            "enum": ["system", "owner", "local", "shared", "external", "untrusted"],
+            "default": "shared",
+            "description": "Minimum taint level that triggers policy enforcement"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["allow", "confirm", "restrict"],
+            "default": "confirm",
+            "description": "Policy mode: allow (always save), confirm (require approval), restrict (never save)"
+          }
+        }
       }
     }
   }

@@ -40,14 +40,19 @@ function graphWithTaint(taint: TrustLevel): TurnProvenanceGraph {
   const trustToTool: Record<string, string> = {
     system: "session_status",
     owner: "__skip__",
-    local: "exec",
-    shared: "vestige_search",
+    local: "vestige_search",  // vestige tools are "local" by default
+    shared: "__shared_tool__", // Use custom tool with override
     external: "message",
     untrusted: "web_fetch",
   };
   const tool = trustToTool[taint];
   if (tool && tool !== "__skip__") {
-    g.recordToolCall(tool, 1);
+    // For shared level, use tool trust override
+    if (taint === "shared") {
+      g.recordToolCall(tool, 1, undefined, { "__shared_tool__": "shared" });
+    } else {
+      g.recordToolCall(tool, 1);
+    }
   }
   return g;
 }
@@ -236,7 +241,7 @@ describe("buildPolicyConfig()", () => {
     expect(config.taintPolicy.shared).toBe("confirm");
     expect(config.taintPolicy.external).toBe("confirm");
     expect(config.taintPolicy.untrusted).toBe("confirm");
-    expect(config.maxIterations).toBe(10);
+    expect(config.maxIterations).toBe(30);
   });
 
   it("merges user taint policy with defaults", () => {
@@ -308,16 +313,17 @@ describe("evaluatePolicy()", () => {
     expect(result.confirm.map(c => c.tool)).toContain("gateway");
   });
 
-  it("blocks turn when max iterations exceeded", () => {
+  it("sets warning flag when max iterations exceeded (soft warning, no block)", () => {
+    const config10 = buildPolicyConfig(undefined, undefined, 10);
     const graph = makeGraph();
-    // Simulate many iterations
+    // Simulate many iterations (11 > maxIterations 10)
     for (let i = 0; i < 11; i++) {
       graph.recordLlmCall(i, 28);
       graph.recordIterationEnd(i, 1, true);
     }
-    const result = evaluatePolicy(graph, ALL_TOOLS, config);
-    expect(result.blockTurn).toBe(true);
-    expect(result.maxIterationsExceeded).toBe(true);
+    const result = evaluatePolicy(graph, ALL_TOOLS, config10);
+    expect(result.blockTurn).toBe(false);  // Soft warning - does not block
+    expect(result.maxIterationsExceeded).toBe(true);  // But flag is set
   });
 
   it("does not block at exactly maxIterations - 1", () => {
@@ -686,13 +692,14 @@ describe("Integration: taint → policy", () => {
     expect(result.toolRemovals.size).toBe(0);
   });
 
-  it("owner → vestige_search (shared) → non-safe tools need confirm", () => {
+  it("owner → vestige_search (local) → all tools remain available", () => {
     const graph = makeGraph();
     graph.recordLlmCall(1, 28);
-    graph.recordToolCall("vestige_search", 1); // escalates to shared
+    graph.recordToolCall("vestige_search", 1); // vestige tools are "local" trust (user-configurable)
     const result = evaluateWithApprovals(graph, ["exec", "message", "read"], config, approvalStore, "s1");
-    // shared default is "confirm"
-    expect(result.toolRemovals.has("exec")).toBe(true);
+    // local default is "allow" - no tools removed
+    expect(result.toolRemovals.has("exec")).toBe(false);
+    expect(result.toolRemovals.has("message")).toBe(false);
     expect(result.toolRemovals.has("read")).toBe(false);
   });
 

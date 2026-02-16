@@ -41,7 +41,7 @@ The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37
 | AML.T0051.001 | Indirect prompt injection (T-EXEC-002) | Taint tracking restricts tool escalation after injection | Cannot detect or prevent the injection itself — only limits its blast radius |
 | AML.T0043 | Approval prompt manipulation (T-EVADE-003) | Unpredictable 8-char hex codes prevent automated approval bypass | Owner can still be socially engineered into approving a malicious tool call |
 | AML.T0009 | Data theft via `web_fetch` (T-EXFIL-001) | `web_fetch` taints context, restricting subsequent dangerous tools | `web_fetch` itself is always allowed (read-only) — data can be exfiltrated via URL parameters in the request |
-| AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | `shared` trust level restricts actions after reading poisoned memories | Cannot prevent the poisoning itself — malicious content written to shared memory persists across sessions |
+| AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | Session save approval + memory file write detection prevent tainted content from persisting to memory. User must approve or reset-trust to save tainted sessions. | Vestige memory tool output trust is user-configurable. Users who trust their memory should configure vestige tools as "local" or "owner" trust. |
 
 ## Architecture
 
@@ -165,33 +165,41 @@ OpenClaw supports many communication channels. Here's how each maps to the class
 
 | Channel | Scenario | Initial Trust | Rationale |
 |---------|----------|---------------|-----------|
-| Discord DM | Owner sends a message | `owner` | `senderIsOwner=true`, no `groupId` |
+| Discord DM | Owner sends a message | `owner` | `senderIsOwner=true` |
 | Discord DM | Non-owner sends a DM | `external` | `senderIsOwner=false`, `senderId` present |
-| Discord server channel | Owner sends in #general | `shared` | `senderIsOwner=true`, but `groupId` is set — other users' messages are in the conversation history |
+| Discord server channel | Owner sends in #general | `owner` | `senderIsOwner=true` (producer is trusted) |
 | Discord server channel | Non-owner sends in #general | `external` | Known sender, not the owner |
-| Slack DM | Owner sends a message | `owner` | Same as Discord DM |
-| Slack channel | Owner sends in #eng-general | `shared` | Group context contains messages from other users |
+| Slack DM | Owner sends a message | `owner` | `senderIsOwner=true` |
+| Slack channel | Owner sends in #eng-general | `owner` | `senderIsOwner=true` (producer is trusted) |
 | Slack channel | Non-owner sends | `external` | Known sender, not the owner |
-| Telegram DM | Owner sends | `owner` | `senderIsOwner=true`, no group |
-| Telegram group | Anyone sends | `shared` or `external` | Depends on whether sender is owner |
+| Telegram DM | Owner sends | `owner` | `senderIsOwner=true` |
+| Telegram group | Owner sends | `owner` | `senderIsOwner=true` (producer is trusted) |
+| Telegram group | Non-owner sends | `external` | Known sender, not the owner |
 | Signal DM | Owner sends | `owner` | `senderIsOwner=true` |
 | Cron job | Scheduled task fires | `system` | No `messageProvider` — this is an internal system event |
 | Heartbeat | Periodic check | `system` | No `messageProvider` |
 | Sub-agent | `sessions_spawn` task | `local` | `spawnedBy` is set — parent session authorized this work |
 | Webhook | External webhook trigger | `untrusted` | No sender metadata available |
 
-#### Why "owner in group" is `shared`, not `owner`
+#### How OpenClaw channels map to trust levels
 
-When the owner sends a message in a group chat (Discord server, Slack channel, Telegram group), the initial trust is `shared` rather than `owner`. This is because the **conversation history** in a group chat contains messages from all participants — not just the owner. The LLM will see those messages in its context window.
+Trust classification is based on **message producer identity**, not venue. The `groupId` field is irrelevant to taint classification.
 
-Even though the *triggering* message is from the owner, the context also contains:
-- Messages from other group members (potentially untrusted)
-- Bot messages
-- Webhook-delivered content
+**Why owner messages in group chats are "owner" trust:**
 
-If we classified this as `owner`, the turn would start with full trust, and a prompt injection embedded in another user's earlier message (already in history) would have unrestricted tool access. By classifying as `shared`, we ensure that group-context turns start with appropriate restrictions.
+Trust is about WHO produced the message, not WHERE it was sent. If the owner sends a message in a group chat, that triggering message is trusted. If non-owner messages exist in the conversation history, those would have been classified as "external" or "untrusted" in their respective turns, and the session watermark would persist that taint across subsequent turns.
 
-**Note:** This is conservative. If the owner is in a private channel with only trusted colleagues, `shared` may over-restrict. The owner can adjust this via `taintPolicy.shared` — setting it to `allow` if they trust all participants in their configured channels.
+The `.reset-trust` command allows the owner to explicitly trust the entire context after reviewing it.
+
+**How multi-participant conversations are handled:**
+
+When non-owner users send messages in group chats:
+1. Those turns are classified as "external" (or "untrusted" for unknown senders)
+2. The session watermark is escalated to that taint level
+3. The watermark persists across turns, even when the owner sends the next message
+4. This prevents prompt injections in earlier messages from gaining elevated privileges
+
+This architecture provides defense-in-depth: producer-based classification for the current turn, plus watermark persistence to track historical taint.
 
 #### Metadata availability
 

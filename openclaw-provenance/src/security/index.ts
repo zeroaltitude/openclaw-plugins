@@ -12,6 +12,9 @@ import { buildPolicyConfig, evaluateWithApprovals, type PolicyMode, type ToolOve
 import { getToolTrust, buildToolOutputTaintMap, TRUST_ORDER } from "./trust-levels.js";
 import type { TrustLevel, TaintPolicyConfig } from "./trust-levels.js";
 import { ApprovalStore } from "./approval-store.js";
+import { isMemoryFile } from "./memory-file-detector.js";
+import { PendingSessionStore } from "./pending-session-store.js";
+import { basename, join } from "node:path";
 
 // Types matching OpenClaw's hook system (from src/plugins/types.ts)
 interface HookApi {
@@ -52,6 +55,20 @@ export interface SecurityPluginConfig {
   developerMode?: boolean;
   /** Workspace directory for persistent state (watermarks, etc.) */
   workspaceDir?: string;
+  /** Policy for Write/Edit operations targeting memory or bootstrap files */
+  memoryFileWritePolicy?: {
+    /** Minimum taint level that triggers policy enforcement (default: "shared") */
+    taintThreshold?: TrustLevel;
+    /** Policy mode: "allow" (no checks), "confirm" (require approval), "restrict" (block) */
+    mode?: "allow" | "confirm" | "restrict";
+  };
+  /** Policy for saving tainted sessions to memory on /new command */
+  sessionSavePolicy?: {
+    /** Minimum taint level that triggers policy enforcement (default: "shared") */
+    taintThreshold?: TrustLevel;
+    /** Policy mode: "allow" (always save), "confirm" (require approval), "restrict" (never save) */
+    mode?: "allow" | "confirm" | "restrict";
+  };
 }
 
 /** Get a short session key for log prefixes */
@@ -174,11 +191,29 @@ export function registerSecurityHooks(
     config?.maxIterations,
   );
 
+  // Memory file write policy
+  const memoryFileWritePolicy = {
+    taintThreshold: (config?.memoryFileWritePolicy?.taintThreshold ?? "shared") as TrustLevel,
+    mode: config?.memoryFileWritePolicy?.mode ?? "confirm",
+  };
+
+  // Session save policy
+  const sessionSavePolicy = {
+    taintThreshold: (config?.sessionSavePolicy?.taintThreshold ?? "shared") as TrustLevel,
+    mode: config?.sessionSavePolicy?.mode ?? "confirm",
+  };
+
+  // Initialize pending session store
+  const pendingSessionStore = new PendingSessionStore(workspaceDir);
+  logger.info(`[provenance] Pending session saves: ${workspaceDir}/.provenance/pending-saves/`);
+
   // Log policy config at startup
   logger.info(`[provenance] Policy config loaded:`);
   logger.info(`[provenance]   Taint policy: ${JSON.stringify(policyConfig.taintPolicy)}`);
   logger.info(`[provenance]   Tool overrides: ${Object.keys(policyConfig.toolOverrides).length} tools configured`);
   logger.info(`[provenance]   Max iterations: ${policyConfig.maxIterations}`);
+  logger.info(`[provenance]   Memory file write policy: threshold=${memoryFileWritePolicy.taintThreshold}, mode=${memoryFileWritePolicy.mode}`);
+  logger.info(`[provenance]   Session save policy: threshold=${sessionSavePolicy.taintThreshold}, mode=${sessionSavePolicy.mode}`);
   if (toolOutputTaintOverrides && Object.keys(toolOutputTaintOverrides).length > 0) {
     logger.info(`[provenance]   Tool output taint overrides: ${JSON.stringify(toolOutputTaintOverrides)}`);
   }
@@ -212,6 +247,90 @@ export function registerSecurityHooks(
       }
     }
   });
+
+  // --- command:new --- (Session save policy enforcement)
+  // This hook runs BEFORE OpenClaw's session-memory hook (priority 200 > default 0)
+  // and can block or redirect session saves by setting event.context fields.
+  api.on("command:new", (event: any, ctx: AgentContext) => {
+    const sessionKey = ctx.sessionKey ?? "unknown";
+    const sk = shortKey(sessionKey);
+    const graph = store.getActive(sessionKey);
+
+    if (!graph) {
+      // No active graph means no session to check
+      return undefined;
+    }
+
+    const oldSessionTaint = graph.maxTaint;
+    const threshold = sessionSavePolicy.taintThreshold;
+    const mode = sessionSavePolicy.mode;
+
+    const currentIdx = TRUST_ORDER.indexOf(oldSessionTaint);
+    const thresholdIdx = TRUST_ORDER.indexOf(threshold);
+
+    if (currentIdx >= thresholdIdx) {
+      if (mode === "restrict") {
+        logger.warn(`[provenance:${sk}] 🛑 SESSION SAVE BLOCKED (policy: restrict)`);
+        logger.warn(`[provenance:${sk}]   Session taint: ${oldSessionTaint} | Threshold: ${threshold}`);
+        logger.warn(`[provenance:${sk}]   Session will NOT be saved to memory`);
+        logger.warn(`[provenance:${sk}]   Use .reset-trust before /new if you trust this session`);
+
+        // Block the session-memory hook from saving
+        event.context.blockSessionSave = true;
+        return undefined;
+      }
+
+      if (mode === "confirm") {
+        logger.warn(`[provenance:${sk}] ⚠️  SESSION REQUIRES APPROVAL TO SAVE`);
+        logger.warn(`[provenance:${sk}]   Session taint: ${oldSessionTaint} | Threshold: ${threshold}`);
+
+        // Generate approval code and redirect save to pending directory
+        const code = approvalStore.addPendingBatch([{
+          sessionKey,
+          toolName: "session-save",
+          taintLevel: oldSessionTaint,
+          reason: `Session contains ${oldSessionTaint} content`,
+          requestedAt: Date.now(),
+        }]);
+
+        // Create pending save path
+        const now = new Date(event.timestamp);
+        const dateStr = now.toISOString().split("T")[0]; // YYYY-MM-DD
+        const timeSlug = now.toISOString().split("T")[1].split(".")[0].replace(/:/g, "").slice(0, 4);
+        const filename = `${dateStr}-${timeSlug}-${code}.md`;
+        const pendingPath = join(workspaceDir, ".provenance", "pending-saves", filename);
+        const finalPath = join(workspaceDir, "memory", `${dateStr}-session.md`);
+
+        // Register pending save (file will be written by session-memory hook)
+        pendingSessionStore.registerPending(
+          code,
+          sessionKey,
+          oldSessionTaint,
+          `Session contains ${oldSessionTaint} content`,
+          pendingPath,
+          finalPath,
+          approvalTtlMs
+        );
+
+        // Redirect session-memory hook to save to pending location
+        event.context.sessionSaveRedirectPath = pendingPath;
+
+        const ttl = approvalStore.getCodeTtlSeconds(sessionKey);
+        logger.warn(`[provenance:${sk}]   Session saved to pending (requires approval)`);
+        logger.warn(`[provenance:${sk}]   Approval code: ${code} (expires in ${ttl}s)`);
+        logger.warn(`[provenance:${sk}]   Approve: .approve session-save ${code}`);
+        logger.warn(`[provenance:${sk}]   Or use .reset-trust-pending to discard`);
+
+        return undefined;
+      }
+    }
+
+    // Taint is acceptable or mode is "allow", let session save proceed normally
+    if (mode !== "allow") {
+      logger.info(`[provenance:${sk}] ✅ Session save allowed (taint: ${oldSessionTaint})`);
+    }
+    return undefined;
+  }, { priority: 200 });
 
   // --- context_assembled ---
   api.on("context_assembled", (event: any, ctx: AgentContext) => {
@@ -330,6 +449,25 @@ export function registerSecurityHooks(
           logger.warn(`[provenance:${sk}] ❌ Invalid trust level for .reset-trust: ${targetLevel}`);
         }
       }
+
+      // Process .approve session-save {code} — approve a pending session save
+      const sessionSaveMatch = trimmed.match(/\.approve\s+session-save\s+([0-9a-f]{8})/i);
+      if (sessionSaveMatch) {
+        const code = sessionSaveMatch[1].toLowerCase();
+        const result = pendingSessionStore.approve(code);
+        if (result.ok) {
+          logger.info(`[provenance:${sk}] ✅ Session save approved: ${result.finalPath}`);
+        } else {
+          logger.warn(`[provenance:${sk}] ❌ Session save approval failed: ${result.reason}`);
+        }
+      }
+
+      // Process .reset-trust-pending — clear all pending session saves
+      const resetPendingMatch = trimmed.match(/\.reset-trust-pending/i);
+      if (resetPendingMatch) {
+        const count = pendingSessionStore.clearAll();
+        logger.info(`[provenance:${sk}] 🔄 Cleared ${count} pending session save(s)`);
+      }
     } else if (lastUserMsg && !isOwner) {
       // Log if a non-owner tried to use a command
       const content = typeof lastUserMsg.content === "string" ? lastUserMsg.content : "";
@@ -424,14 +562,85 @@ export function registerSecurityHooks(
   // --- before_tool_call --- (EXECUTION-LAYER ENFORCEMENT)
   api.on("before_tool_call", (event: any, ctx: AgentContext) => {
     const sessionKey = ctx.sessionKey ?? "unknown";
+    const sk = shortKey(sessionKey);
+    const graph = store.getActive(sessionKey);
+    const toolName = event.toolName;
+    const toolNameLower = toolName.toLowerCase();
+
+    // Check for memory file writes (Write/Edit to memory or bootstrap files)
+    if (graph && (toolNameLower === "write" || toolNameLower === "edit")) {
+      const filePath = event.params?.file_path;
+
+      if (filePath && isMemoryFile(filePath, workspaceDir)) {
+        const currentTaint = graph.maxTaint;
+        const threshold = memoryFileWritePolicy.taintThreshold;
+        const mode = memoryFileWritePolicy.mode;
+
+        const currentIdx = TRUST_ORDER.indexOf(currentTaint);
+        const thresholdIdx = TRUST_ORDER.indexOf(threshold);
+
+        if (currentIdx >= thresholdIdx) {
+          const fileName = basename(filePath);
+
+          if (mode === "restrict") {
+            logger.warn(`[provenance:${sk}] 🛑 MEMORY FILE WRITE BLOCKED`);
+            logger.warn(`[provenance:${sk}]   File: ${fileName}`);
+            logger.warn(`[provenance:${sk}]   Context taint: ${currentTaint} | Threshold: ${threshold}`);
+            return {
+              block: true,
+              blockReason:
+                `Cannot write to memory file '${fileName}' with ${currentTaint} content.\n` +
+                `Memory files persist across turns and could poison future context.\n` +
+                `Use .reset-trust after reviewing context if you want to proceed.`
+            };
+          }
+
+          if (mode === "confirm") {
+            logger.warn(`[provenance:${sk}] ⚠️  MEMORY FILE WRITE REQUIRES APPROVAL`);
+            logger.warn(`[provenance:${sk}]   File: ${fileName}`);
+            logger.warn(`[provenance:${sk}]   Context taint: ${currentTaint}`);
+
+            // Check if already approved
+            if (!approvalStore.isApproved(sessionKey, toolName)) {
+              // Add to blocked tools so execution layer catches it
+              const currentBlocked = blockedToolsBySession.get(sessionKey) ?? new Set();
+              currentBlocked.add(toolName);
+              blockedToolsBySession.set(sessionKey, currentBlocked);
+
+              // Generate approval code
+              const code = approvalStore.addPendingBatch([{
+                sessionKey,
+                toolName,
+                taintLevel: currentTaint,
+                reason: `Writing to memory file ${fileName} in ${currentTaint} context`,
+                requestedAt: Date.now(),
+              }]);
+
+              const ttl = approvalStore.getCodeTtlSeconds(sessionKey);
+              logger.warn(`[provenance:${sk}]   Approval code: ${code} (expires in ${ttl}s)`);
+              logger.warn(`[provenance:${sk}]   Approve: .approve ${toolName} ${code}`);
+
+              return {
+                block: true,
+                blockReason:
+                  `Writing to memory file '${fileName}' requires approval.\n` +
+                  `Context taint: ${currentTaint}\n` +
+                  `Approval code: ${code} (expires in ${ttl}s)\n` +
+                  `Approve: .approve ${toolName} ${code}\n` +
+                  `Or use .reset-trust if you trust this context.`
+              };
+            }
+          }
+        }
+      }
+    }
+
+    // Existing blocked tool check
     const blocked = blockedToolsBySession.get(sessionKey);
     if (!blocked || blocked.size === 0) return undefined;
 
-    const toolName = event.toolName;
-    const toolNameLower = toolName.toLowerCase();
     const isBlocked = Array.from(blocked).some(b => b.toLowerCase() === toolNameLower);
     if (isBlocked) {
-      const sk = shortKey(sessionKey);
       const code = approvalStore.getCurrentCode(sessionKey);
       const ttl = approvalStore.getCodeTtlSeconds(sessionKey);
       const blockedList = Array.from(blocked).join(", ");

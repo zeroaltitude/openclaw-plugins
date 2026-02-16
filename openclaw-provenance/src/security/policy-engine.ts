@@ -146,12 +146,10 @@ export function evaluatePolicy(
     maxIterationsExceeded: false,
   };
 
-  // Check max iterations
+  // Check max iterations (soft warning - does not block turn)
   if (graph.iterationCount >= config.maxIterations) {
-    result.blockTurn = true;
-    result.blockReason = `Max iterations exceeded (${config.maxIterations})`;
     result.maxIterationsExceeded = true;
-    return result;
+    // Note: blockTurn remains false - this is just a warning flag
   }
 
   // Evaluate each tool — even in "allow" mode, tool overrides may be stricter
