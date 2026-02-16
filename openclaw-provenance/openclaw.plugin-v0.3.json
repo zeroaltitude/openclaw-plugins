@@ -1,0 +1,61 @@
+{
+  "id": "provenance",
+  "name": "Content Provenance & Security",
+  "version": "0.3.0",
+  "description": "Content provenance taint tracking with per-turn DAGs and declarative security policy enforcement for OpenClaw agents.",
+  "author": "BigHat Biosciences",
+  "main": "dist/index.js",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "taintPolicy": {
+        "type": "object",
+        "description": "Default policy mode per taint level. Modes: allow, confirm, restrict. Must be monotonically non-decreasing in strictness. Old 6-level configs (system/owner/local/shared/external/untrusted) are accepted and mapped automatically with a deprecation warning.",
+        "properties": {
+          "trusted": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "allow" },
+          "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" },
+          "external": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" },
+          "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict"], "default": "confirm" }
+        }
+      },
+      "toolOverrides": {
+        "type": "object",
+        "description": "Per-tool policy overrides. Key = tool name (lowercase). Value = object mapping taint levels (or '*') to modes. Old 6-level keys (system/owner/local) are mapped to 'trusted' automatically.",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "trusted": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "shared": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "external": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "untrusted": { "type": "string", "enum": ["allow", "confirm", "restrict"] },
+            "*": { "type": "string", "enum": ["allow", "confirm", "restrict"] }
+          }
+        }
+      },
+      "approvalTtlSeconds": {
+        "type": "number",
+        "description": "How long an approval code is valid (default: 60)",
+        "default": 60
+      },
+      "maxIterations": {
+        "type": "number",
+        "description": "Max agent loop iterations before blocking the turn (default: 10)",
+        "default": 10
+      },
+      "developerMode": {
+        "type": "boolean",
+        "description": "When true, prepends a taint-level header to every outbound message for debugging. Emoji: 🟢 trusted, 🟡 shared, 🟠 external, 🔴 untrusted.",
+        "default": false
+      },
+      "toolOutputTaints": {
+        "type": "object",
+        "description": "Override default tool output taint levels. Key = tool name, value = trust level. Merged with built-in defaults. Unknown tools default to 'untrusted'.",
+        "additionalProperties": {
+          "type": "string",
+          "enum": ["trusted", "shared", "external", "untrusted"]
+        }
+      }
+    }
+  }
+}
