@@ -26,6 +26,18 @@ interface PluginApi {
 export function register(api: PluginApi) {
   const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
 
+  // Warn if internal hooks are not enabled — session save and memory file
+  // write policies depend on command:new priority ordering with the
+  // session-memory hook, which only works when internal hooks are active.
+  const hooksInternalEnabled = (api.config as any)?.hooks?.internal?.enabled === true;
+  if (!hooksInternalEnabled) {
+    api.logger.warn(
+      "[provenance] ⚠️  hooks.internal.enabled is not true in config — " +
+      "sessionSavePolicy and memoryFileWritePolicy for command:new events " +
+      "will NOT be enforced. Enable internal hooks for full protection."
+    );
+  }
+
   registerSecurityHooks(
     api,
     api.logger,
@@ -37,6 +49,8 @@ export function register(api: PluginApi) {
       maxIterations: (cfg.maxIterations as number) ?? undefined,
       developerMode: (cfg.developerMode as boolean) ?? undefined,
       toolOutputTaints: (cfg.toolOutputTaints as any) ?? undefined,
+      memoryFileWritePolicy: (cfg.memoryFileWritePolicy as any) ?? undefined,
+      sessionSavePolicy: (cfg.sessionSavePolicy as any) ?? undefined,
       workspaceDir: (api.config as any)?.agents?.defaults?.workspace ?? (api.config as any)?.agents?.workspace ?? (api.config as any)?.workspaceDir ?? undefined,
     },
   );
