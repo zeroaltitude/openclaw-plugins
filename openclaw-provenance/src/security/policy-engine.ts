@@ -89,12 +89,13 @@ export function getToolMode(
 
   if (!override) {
     // Unknown tool (not in DEFAULT_SAFE_TOOLS, DEFAULT_DANGEROUS_TOOLS, or user overrides).
-    // At high-trust levels (system/owner), the owner is in direct control —
-    // unknown tools should follow the taint policy, not be penalized.
-    // At lower trust levels, default to the *untrusted* policy mode to prevent
-    // tool rename attacks where a dangerous tool is re-registered under an
-    // unlisted name to bypass restrictions.
-    if (taintLevel === "system" || taintLevel === "owner") {
+    // When the taint policy already allows tools at this level, trust
+    // the policy — unknown tools aren't dangerous in a trusted context.
+    // The untrusted fallback only applies when the taint level is already
+    // restrictive (shared/external/untrusted), preventing tool rename
+    // attacks where a dangerous tool is re-registered under an unlisted
+    // name to bypass restrictions.
+    if (defaultMode === "allow") {
       return defaultMode;
     }
     const untrustedMode = config.taintPolicy["untrusted"] ?? "restrict";
