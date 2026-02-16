@@ -1,16 +1,29 @@
 /**
  * Per-turn provenance graph.
- * 
+ *
  * Built iteratively as hooks fire during an agent turn.
  * Tracks data flow, trust levels, and actions to enable
  * taint-based security policies.
  */
 
-import { type TrustLevel, TRUST_ORDER, minTrust, getToolTrust } from "./trust-levels.js";
+import {
+  type TrustLevel,
+  TRUST_ORDER,
+  minTrust,
+  getToolTrust,
+} from "./trust-levels.js";
 
 export interface GraphNode {
   id: string;
-  kind: "input" | "system_prompt" | "history" | "llm_call" | "tool_call" | "tool_result" | "output" | "policy_decision";
+  kind:
+    | "input"
+    | "system_prompt"
+    | "history"
+    | "llm_call"
+    | "tool_call"
+    | "tool_result"
+    | "output"
+    | "policy_decision";
   trust: TrustLevel;
   tool?: string;
   iteration?: number;
@@ -23,7 +36,12 @@ export interface GraphNode {
 export interface GraphEdge {
   from: string;
   to: string;
-  relation: "triggers" | "produces" | "consumes" | "derives_from" | "blocked_by";
+  relation:
+    | "triggers"
+    | "produces"
+    | "consumes"
+    | "derives_from"
+    | "blocked_by";
 }
 
 export interface TurnGraphSummary {
@@ -40,10 +58,10 @@ export class TurnProvenanceGraph {
   readonly turnId: string;
   readonly sessionKey: string;
   readonly startedAt: number;
-  
+
   private nodes: Map<string, GraphNode> = new Map();
   private edges: GraphEdge[] = [];
-  private _maxTaint: TrustLevel = "system";
+  private _maxTaint: TrustLevel = "trusted";
   private _iterationCount = 0;
   private _sealed = false;
   private _nodeCounter = 0;
@@ -53,25 +71,31 @@ export class TurnProvenanceGraph {
 
   constructor(sessionKey: string, turnId?: string) {
     this.sessionKey = sessionKey;
-    this.turnId = turnId ?? `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.turnId =
+      turnId ??
+      `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this.startedAt = Date.now();
   }
 
   /** Current accumulated taint level (lowest trust seen) */
-  get maxTaint(): TrustLevel { return this._maxTaint; }
-  
+  get maxTaint(): TrustLevel {
+    return this._maxTaint;
+  }
+
   /** Number of loop iterations so far */
-  get iterationCount(): number { return this._iterationCount; }
+  get iterationCount(): number {
+    return this._iterationCount;
+  }
 
   /** Whether the graph has been sealed (turn complete) */
-  get sealed(): boolean { return this._sealed; }
+  get sealed(): boolean {
+    return this._sealed;
+  }
 
-  /** Generate a unique node ID */
   private nextNodeId(prefix: string): string {
     return `${prefix}-${++this._nodeCounter}`;
   }
 
-  /** Update the accumulated taint level */
   private updateTaint(trust: TrustLevel): void {
     this._maxTaint = minTrust(this._maxTaint, trust);
   }
@@ -83,9 +107,14 @@ export class TurnProvenanceGraph {
   }
 
   /** Add a node to the graph */
-  addNode(node: Omit<GraphNode, "timestamp"> & { timestamp?: number }): GraphNode {
+  addNode(
+    node: Omit<GraphNode, "timestamp"> & { timestamp?: number },
+  ): GraphNode {
     if (this._sealed) throw new Error("Cannot modify sealed graph");
-    const full: GraphNode = { ...node, timestamp: node.timestamp ?? Date.now() };
+    const full: GraphNode = {
+      ...node,
+      timestamp: node.timestamp ?? Date.now(),
+    };
     this.nodes.set(full.id, full);
     this.updateTaint(full.trust);
     return full;
@@ -116,45 +145,51 @@ export class TurnProvenanceGraph {
   // High-level operations called by hook handlers
   // =========================================================================
 
-  /** Record the initial context assembly (called from context_assembled hook) */
-  recordContextAssembled(systemPrompt: string, messageCount: number, initialTrust?: TrustLevel): string {
+  /** Record the initial context assembly */
+  recordContextAssembled(
+    systemPrompt: string,
+    messageCount: number,
+    initialTrust?: TrustLevel,
+  ): string {
     const nodeId = this.nextNodeId("ctx");
     this.addNode({
       id: nodeId,
       kind: "system_prompt",
-      trust: "system",
+      trust: "trusted",
     });
-    // Add a history node representing all prior messages.
-    // Trust is classified from sender/channel metadata when available,
-    // falling back to "owner" for backward compatibility.
     if (messageCount > 0) {
       const histId = this.nextNodeId("hist");
       this.addNode({
         id: histId,
         kind: "history",
-        trust: initialTrust ?? "owner",
+        trust: initialTrust ?? "trusted",
         metadata: { messageCount },
       });
     }
     return nodeId;
   }
 
-  /** Record an LLM call (called from before_llm_call hook) */
+  /** Record an LLM call */
   recordLlmCall(iteration: number, toolCount: number): string {
     this._iterationCount = Math.max(this._iterationCount, iteration);
     const nodeId = this.nextNodeId("llm");
     this.addNode({
       id: nodeId,
       kind: "llm_call",
-      trust: this._maxTaint, // LLM call inherits accumulated taint
+      trust: this._maxTaint,
       iteration,
       metadata: { toolCount },
     });
     return nodeId;
   }
 
-  /** Record a tool call from after_llm_call (called from after_llm_call hook) */
-  recordToolCall(toolName: string, iteration: number, llmNodeId?: string, toolTrustOverrides?: Record<string, TrustLevel>): string {
+  /** Record a tool call from after_llm_call */
+  recordToolCall(
+    toolName: string,
+    iteration: number,
+    llmNodeId?: string,
+    toolTrustOverrides?: Record<string, TrustLevel>,
+  ): string {
     const trust = getToolTrust(toolName, toolTrustOverrides);
     const nodeId = this.nextNodeId("tool");
     this.addNode({
@@ -165,7 +200,7 @@ export class TurnProvenanceGraph {
       iteration,
     });
     this._toolsUsed.push(toolName);
-    
+
     // Track external sources
     const idx = TRUST_ORDER.indexOf(trust);
     if (idx >= TRUST_ORDER.indexOf("external")) {
@@ -179,12 +214,16 @@ export class TurnProvenanceGraph {
   }
 
   /** Record a blocked tool call */
-  recordBlockedTool(toolName: string, reason: string, iteration: number): string {
+  recordBlockedTool(
+    toolName: string,
+    reason: string,
+    iteration: number,
+  ): string {
     const nodeId = this.nextNodeId("blocked");
     this.addNode({
       id: nodeId,
       kind: "policy_decision",
-      trust: "system",
+      trust: "trusted",
       tool: toolName,
       iteration,
       blocked: true,
@@ -194,20 +233,24 @@ export class TurnProvenanceGraph {
     return nodeId;
   }
 
-  /** Record the final output (called from before_response_emit hook) */
+  /** Record the final output */
   recordOutput(contentLength: number): string {
     const nodeId = this.nextNodeId("out");
     this.addNode({
       id: nodeId,
       kind: "output",
-      trust: this._maxTaint, // output inherits accumulated taint
+      trust: this._maxTaint,
       metadata: { contentLength },
     });
     return nodeId;
   }
 
   /** Record a loop iteration boundary */
-  recordIterationEnd(iteration: number, toolCallsMade: number, willContinue: boolean): void {
+  recordIterationEnd(
+    iteration: number,
+    _toolCallsMade: number,
+    _willContinue: boolean,
+  ): void {
     this._iterationCount = Math.max(this._iterationCount, iteration);
   }
 
@@ -244,69 +287,57 @@ export class TurnProvenanceGraph {
   }
 }
 
-/**
- * Global graph store — maintains per-session active graphs.
- * Plugin-scoped (closure over module state).
- */
 /** Extract the root cause reason from a turn's provenance graph for watermark storage */
 export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
   const nodes = graph.getAllNodes();
   const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
 
-  // Content scan detection (external markers in history)
-  const contentScan = nodes.find(n => n.id === "content-scan-taint");
-  if (contentScan && TRUST_ORDER.indexOf(contentScan.trust) >= taintIdx) {
-    return "external markers in history";
-  }
-
-  // FIX: Check inherited taint watermark BEFORE tool calls.
-  // The watermark carries the original root cause (e.g. "web_fetch").
-  // Without this priority, tool calls in the current turn (e.g. "message")
-  // would overwrite the reason even though they didn't cause the taint.
-  const inherited = nodes.find(n => n.id === "inherited-taint");
+  // Inherited taint watermark — carry the original root cause
+  const inherited = nodes.find((n) => n.id === "inherited-taint");
   if (inherited && TRUST_ORDER.indexOf(inherited.trust) >= taintIdx) {
-    const reason = (inherited.metadata?.reason as string);
+    const reason = inherited.metadata?.reason as string;
     return reason ?? "inherited from prev turn";
   }
 
-  // Tool calls that escalated taint (only matters for NEW taint sources)
-  const toolNodes = nodes.filter(n => n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  // Tool calls that escalated taint
+  const toolNodes = nodes.filter(
+    (n) =>
+      n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx,
+  );
   if (toolNodes.length > 0) {
-    const toolNames = toolNodes.map(n => n.tool).filter(Boolean);
+    const toolNames = toolNodes.map((n) => n.tool).filter(Boolean);
     return toolNames.join(", ") || "tool call";
   }
 
-  // History contamination (non-inherited history nodes)
-  const historyNode = nodes.find(n => n.kind === "history" && n.id !== "inherited-taint" && TRUST_ORDER.indexOf(n.trust) >= taintIdx);
+  // History contamination
+  const historyNode = nodes.find(
+    (n) =>
+      n.kind === "history" &&
+      n.id !== "inherited-taint" &&
+      TRUST_ORDER.indexOf(n.trust) >= taintIdx,
+  );
   if (historyNode) {
-    const reason = (historyNode.metadata?.reason as string);
+    const reason = historyNode.metadata?.reason as string;
     return reason ?? "history contamination";
   }
 
   return "unknown";
 }
 
+/**
+ * Global graph store — maintains per-session active graphs.
+ */
 export class ProvenanceStore {
   private activeGraphs: Map<string, TurnProvenanceGraph> = new Map();
   private completedGraphs: TurnProvenanceGraph[] = [];
   private maxCompletedGraphs: number;
 
-  /**
-   * Session-level taint watermark — tracks the worst taint level seen
-   * across all turns in a session. This prevents taint amnesia when
-   * tainted content (e.g. web_fetch responses) persists in the LLM
-   * context window across turn boundaries.
-   * 
-   * Cleared explicitly by .reset-trust or when the session ends.
-   */
-
   constructor(maxCompletedGraphs = 100) {
     this.maxCompletedGraphs = maxCompletedGraphs;
   }
 
-  /** Start a new turn graph for a session (replaces any existing active graph) */
+  /** Start a new turn graph for a session */
   startTurn(sessionKey: string): TurnProvenanceGraph {
-    // Seal and archive any existing graph
     const existing = this.activeGraphs.get(sessionKey);
     if (existing && !existing.sealed) {
       existing.seal();
@@ -337,7 +368,10 @@ export class ProvenanceStore {
     return this.completedGraphs.slice(-(limit ?? this.maxCompletedGraphs));
   }
 
-  private archiveGraph(graph: TurnProvenanceGraph, _sessionKey: string): void {
+  private archiveGraph(
+    graph: TurnProvenanceGraph,
+    _sessionKey: string,
+  ): void {
     this.completedGraphs.push(graph);
     if (this.completedGraphs.length > this.maxCompletedGraphs) {
       this.completedGraphs.shift();

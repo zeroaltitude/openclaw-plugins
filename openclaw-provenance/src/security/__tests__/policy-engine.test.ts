@@ -1,9 +1,10 @@
 /**
- * Security Policy Engine — Test Suite
+ * Security Policy Engine — Test Suite (4-Level Trust Model)
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WatermarkStore } from "../watermark-store.js";
+import { BlockedWriteStore } from "../blocked-write-store.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,23 +37,15 @@ function makeGraph(sessionKey = "test"): TurnProvenanceGraph {
 function graphWithTaint(taint: TrustLevel): TurnProvenanceGraph {
   const g = makeGraph();
   g.recordLlmCall(1, 28);
-  // Add a node with the desired trust to set taint
   const trustToTool: Record<string, string> = {
-    system: "session_status",
-    owner: "__skip__",
-    local: "vestige_search",  // vestige tools are "local" by default
-    shared: "__shared_tool__", // Use custom tool with override
+    trusted: "__skip__",
+    shared: "vestige_search",
     external: "message",
     untrusted: "web_fetch",
   };
   const tool = trustToTool[taint];
   if (tool && tool !== "__skip__") {
-    // For shared level, use tool trust override
-    if (taint === "shared") {
-      g.recordToolCall(tool, 1, undefined, { "__shared_tool__": "shared" });
-    } else {
-      g.recordToolCall(tool, 1);
-    }
+    g.recordToolCall(tool, 1);
   }
   return g;
 }
@@ -97,9 +90,7 @@ describe("strictest()", () => {
 describe("validateMonotonicity()", () => {
   it("accepts a valid monotonic config", () => {
     const { corrected, warnings } = validateMonotonicity({
-      system: "allow",
-      owner: "allow",
-      local: "allow",
+      trusted: "allow",
       shared: "confirm",
       external: "confirm",
       untrusted: "restrict",
@@ -110,22 +101,18 @@ describe("validateMonotonicity()", () => {
 
   it("corrects non-monotonic config", () => {
     const { corrected, warnings } = validateMonotonicity({
-      system: "allow",
-      owner: "allow",
-      local: "confirm",
-      shared: "allow", // less strict than local — should be corrected
+      trusted: "confirm",
+      shared: "allow", // less strict than trusted — should be corrected
       external: "confirm",
       untrusted: "confirm",
     });
     expect(warnings.length).toBeGreaterThan(0);
-    expect(corrected.shared).toBe("confirm"); // corrected to match local
+    expect(corrected.shared).toBe("confirm"); // corrected to match trusted
   });
 
   it("corrects untrusted being less strict than external", () => {
     const { corrected, warnings } = validateMonotonicity({
-      system: "allow",
-      owner: "allow",
-      local: "allow",
+      trusted: "allow",
       shared: "allow",
       external: "restrict",
       untrusted: "allow", // less strict than external!
@@ -136,9 +123,7 @@ describe("validateMonotonicity()", () => {
 
   it("accepts all-allow", () => {
     const { corrected, warnings } = validateMonotonicity({
-      system: "allow",
-      owner: "allow",
-      local: "allow",
+      trusted: "allow",
       shared: "allow",
       external: "allow",
       untrusted: "allow",
@@ -148,9 +133,7 @@ describe("validateMonotonicity()", () => {
 
   it("accepts all-restrict", () => {
     const { corrected, warnings } = validateMonotonicity({
-      system: "restrict",
-      owner: "restrict",
-      local: "restrict",
+      trusted: "restrict",
       shared: "restrict",
       external: "restrict",
       untrusted: "restrict",
@@ -166,10 +149,11 @@ describe("validateMonotonicity()", () => {
 describe("getToolMode()", () => {
   const config = buildPolicyConfig();
 
-  it("returns default mode for unoverridden tools", () => {
-    // exec at owner level: taintPolicy.owner = "allow", no override → allow
-    expect(getToolMode("exec", "owner", config)).toBe("allow");
-    // exec at external level: taintPolicy.external = "confirm", no override → confirm
+  it("returns default mode for unoverridden tools at trusted level", () => {
+    expect(getToolMode("exec", "trusted", config)).toBe("allow");
+  });
+
+  it("returns confirm for non-safe tools at external level", () => {
     expect(getToolMode("exec", "external", config)).toBe("confirm");
   });
 
@@ -183,10 +167,7 @@ describe("getToolMode()", () => {
   });
 
   it("returns 'allow' for gateway at all levels (safe tool)", () => {
-    // Gateway is a system tool, always safe to call
-    expect(getToolMode("gateway", "system", config)).toBe("allow");
-    expect(getToolMode("gateway", "owner", config)).toBe("allow");
-    expect(getToolMode("gateway", "local", config)).toBe("allow");
+    expect(getToolMode("gateway", "trusted", config)).toBe("allow");
     expect(getToolMode("gateway", "shared", config)).toBe("allow");
     expect(getToolMode("gateway", "external", config)).toBe("allow");
     expect(getToolMode("gateway", "untrusted", config)).toBe("allow");
@@ -194,12 +175,11 @@ describe("getToolMode()", () => {
 
   it("user can override gateway to require confirm", () => {
     const configWithOverride = buildPolicyConfig(undefined, { "gateway": { "*": "confirm" } });
-    expect(getToolMode("gateway", "owner", configWithOverride)).toBe("confirm");
-    expect(getToolMode("gateway", "local", configWithOverride)).toBe("confirm");
+    expect(getToolMode("gateway", "trusted", configWithOverride)).toBe("confirm");
+    expect(getToolMode("gateway", "shared", configWithOverride)).toBe("confirm");
   });
 
   it("override can make things more permissive (safe tools)", () => {
-    // If default is "confirm" and override says "allow", the override wins
     const customConfig = buildPolicyConfig(
       { external: "confirm" },
       { "exec": { "external": "allow" } },
@@ -220,12 +200,12 @@ describe("getToolMode()", () => {
       undefined,
       { "some_tool": { "*": "restrict" } },
     );
-    expect(getToolMode("some_tool", "owner", customConfig)).toBe("restrict");
+    expect(getToolMode("some_tool", "trusted", customConfig)).toBe("restrict");
     expect(getToolMode("some_tool", "untrusted", customConfig)).toBe("restrict");
   });
 
   it("is case-insensitive on tool name", () => {
-    expect(getToolMode("Gateway", "local", config)).toBe("allow");  // Gateway is a safe tool
+    expect(getToolMode("Gateway", "shared", config)).toBe("allow");
     expect(getToolMode("GATEWAY", "untrusted", config)).toBe("allow");
     expect(getToolMode("Read", "untrusted", config)).toBe("allow");
     expect(getToolMode("READ", "untrusted", config)).toBe("allow");
@@ -239,7 +219,7 @@ describe("getToolMode()", () => {
 describe("buildPolicyConfig()", () => {
   it("uses defaults when no args provided", () => {
     const config = buildPolicyConfig();
-    expect(config.taintPolicy.owner).toBe("allow");
+    expect(config.taintPolicy.trusted).toBe("allow");
     expect(config.taintPolicy.shared).toBe("confirm");
     expect(config.taintPolicy.external).toBe("confirm");
     expect(config.taintPolicy.untrusted).toBe("confirm");
@@ -248,7 +228,7 @@ describe("buildPolicyConfig()", () => {
 
   it("merges user taint policy with defaults", () => {
     const config = buildPolicyConfig({ untrusted: "restrict" });
-    expect(config.taintPolicy.owner).toBe("allow");
+    expect(config.taintPolicy.trusted).toBe("allow");
     expect(config.taintPolicy.untrusted).toBe("restrict");
   });
 
@@ -260,26 +240,41 @@ describe("buildPolicyConfig()", () => {
     }
   });
 
-  it("includes dangerous tool overrides", () => {
-    const config = buildPolicyConfig();
-    expect(config.toolOverrides["gateway"]).toBeDefined();
-  });
-
   it("user overrides merge per-tool", () => {
     const config = buildPolicyConfig(undefined, {
-      "gateway": { "owner": "restrict" },
+      "gateway": { "trusted": "restrict" },
     });
-    // Should have both the default and user override
-    expect(config.toolOverrides["gateway"]["*"]).toBe("allow");      // from default (safe tool)
-    expect(config.toolOverrides["gateway"]["owner"]).toBe("restrict"); // from user
+    expect(config.toolOverrides["gateway"]["*"]).toBe("allow");       // from default (safe tool)
+    expect(config.toolOverrides["gateway"]["trusted"]).toBe("restrict"); // from user
   });
 
   it("corrects non-monotonic taint policy", () => {
     const config = buildPolicyConfig({
-      local: "confirm",
-      shared: "allow", // invalid: less strict than local
+      trusted: "confirm",
+      shared: "allow", // invalid: less strict than trusted
     });
     expect(config.taintPolicy.shared).toBe("confirm"); // auto-corrected
+  });
+
+  it("maps legacy 6-level keys to 4-level", () => {
+    const config = buildPolicyConfig({
+      system: "allow",
+      owner: "allow",
+      local: "allow",
+      shared: "confirm",
+      external: "confirm",
+      untrusted: "restrict",
+    } as any);
+    expect(config.taintPolicy.trusted).toBe("allow");
+    expect(config.taintPolicy.shared).toBe("confirm");
+    expect(config.taintPolicy.untrusted).toBe("restrict");
+  });
+
+  it("has no .owner, .system, or .local keys in taintPolicy", () => {
+    const config = buildPolicyConfig();
+    expect("owner" in config.taintPolicy).toBe(false);
+    expect("system" in config.taintPolicy).toBe(false);
+    expect("local" in config.taintPolicy).toBe(false);
   });
 });
 
@@ -290,13 +285,13 @@ describe("buildPolicyConfig()", () => {
 describe("evaluatePolicy()", () => {
   const config = buildPolicyConfig();
 
-  it("allows all tools at owner taint (gateway has no owner override)", () => {
-    const graph = graphWithTaint("owner");
+  it("allows all tools at trusted taint", () => {
+    const graph = graphWithTaint("trusted");
     const result = evaluatePolicy(graph, ALL_TOOLS, config);
     expect(result.defaultMode).toBe("allow");
     expect(result.allowed).toContain("exec");
     expect(result.allowed).toContain("message");
-    expect(result.allowed).toContain("gateway"); // no override at owner level
+    expect(result.allowed).toContain("gateway");
     expect(result.restricted).toHaveLength(0);
   });
 
@@ -304,27 +299,24 @@ describe("evaluatePolicy()", () => {
     const graph = graphWithTaint("untrusted");
     const result = evaluatePolicy(graph, ALL_TOOLS, config);
     expect(result.defaultMode).toBe("confirm");
-    // Tools with no override get the default "confirm"
     expect(result.confirm.map(c => c.tool)).toContain("exec");
     expect(result.confirm.map(c => c.tool)).toContain("write");
-    // Safe tools (override: "allow") should be allowed
     expect(result.allowed).toContain("read");
     expect(result.allowed).toContain("web_fetch");
     expect(result.allowed).toContain("memory_search");
-    expect(result.allowed).toContain("gateway");  // Gateway is a safe tool
+    expect(result.allowed).toContain("gateway");
   });
 
   it("sets warning flag when max iterations exceeded (soft warning, no block)", () => {
     const config10 = buildPolicyConfig(undefined, undefined, 10);
     const graph = makeGraph();
-    // Simulate many iterations (11 > maxIterations 10)
     for (let i = 0; i < 11; i++) {
       graph.recordLlmCall(i, 28);
       graph.recordIterationEnd(i, 1, true);
     }
     const result = evaluatePolicy(graph, ALL_TOOLS, config10);
-    expect(result.blockTurn).toBe(false);  // Soft warning - does not block
-    expect(result.maxIterationsExceeded).toBe(true);  // But flag is set
+    expect(result.blockTurn).toBe(false);
+    expect(result.maxIterationsExceeded).toBe(true);
   });
 
   it("does not block at exactly maxIterations - 1", () => {
@@ -340,34 +332,25 @@ describe("evaluatePolicy()", () => {
 
   it("all-restrict mode removes non-safe tools, safe tool overrides still win", () => {
     const restrictConfig = buildPolicyConfig({
-      system: "restrict",
-      owner: "restrict",
-      local: "restrict",
+      trusted: "restrict",
       shared: "restrict",
       external: "restrict",
       untrusted: "restrict",
     });
-    const graph = graphWithTaint("owner");
+    const graph = graphWithTaint("trusted");
     const result = evaluatePolicy(graph, ALL_TOOLS, restrictConfig);
-    
-    // Safe tools have override "*": "allow" — override wins
+
     expect(result.allowed).toContain("read");
     expect(result.allowed).toContain("web_fetch");
     expect(result.allowed).toContain("memory_search");
-    
-    // Non-safe, non-overridden tools get "restrict"
     expect(result.restricted).toContain("exec");
     expect(result.restricted).toContain("write");
-
-    // Gateway is a safe tool, allowed even in restrict mode
     expect(result.allowed).toContain("gateway");
   });
 
   it("all-allow mode allows everything including safe tools", () => {
     const allowConfig = buildPolicyConfig({
-      system: "allow",
-      owner: "allow",
-      local: "allow",
+      trusted: "allow",
       shared: "allow",
       external: "allow",
       untrusted: "allow",
@@ -376,7 +359,7 @@ describe("evaluatePolicy()", () => {
     const result = evaluatePolicy(graph, ALL_TOOLS, allowConfig);
     expect(result.allowed).toContain("exec");
     expect(result.allowed).toContain("message");
-    expect(result.allowed).toContain("gateway");  // Gateway is a safe tool
+    expect(result.allowed).toContain("gateway");
   });
 });
 
@@ -389,7 +372,7 @@ describe("evaluateWithApprovals()", () => {
   const config = buildPolicyConfig();
 
   beforeEach(() => {
-    approvalStore = new ApprovalStore(60_000);
+    approvalStore = new ApprovalStore();
   });
 
   it("blocks tools at untrusted taint without approval", () => {
@@ -402,21 +385,14 @@ describe("evaluateWithApprovals()", () => {
 
   it("allows approved tools through", () => {
     const graph = graphWithTaint("untrusted");
-    
-    // First call to get the pending confirmations
+
+    // First call to see it's blocked
     const result1 = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
     expect(result1.toolRemovals.has("exec")).toBe(true);
-    
-    // Simulate approval
-    const code = approvalStore.addPendingBatch([{
-      sessionKey: "session-1",
-      toolName: "exec",
-      taintLevel: "untrusted",
-      reason: "test",
-      requestedAt: Date.now(),
-    }]);
-    approvalStore.approveWithCode("session-1", "exec", code, null);
-    
+
+    // Approve exec
+    approvalStore.approve("session-1", "exec", null);
+
     // Second call should allow exec through
     const result2 = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
     expect(result2.toolRemovals.has("exec")).toBe(false);
@@ -424,17 +400,14 @@ describe("evaluateWithApprovals()", () => {
 
   it("does not allow approval to bypass restrict mode", () => {
     const restrictConfig = buildPolicyConfig({
-      system: "restrict",
-      owner: "restrict",
-      local: "restrict",
+      trusted: "restrict",
       shared: "restrict",
       external: "restrict",
       untrusted: "restrict",
     });
-    const graph = graphWithTaint("owner");
+    const graph = graphWithTaint("trusted");
     const result = evaluateWithApprovals(graph, ALL_TOOLS, restrictConfig, approvalStore, "session-1");
-    
-    // exec should be restricted (not confirmable)
+
     expect(result.toolRemovals.has("exec")).toBe(true);
     expect(result.pendingConfirmations.map(p => p.toolName)).not.toContain("exec");
   });
@@ -448,9 +421,9 @@ describe("evaluateWithApprovals()", () => {
   });
 
   it("gateway always allowed (safe system tool)", () => {
-    const graphLocal = graphWithTaint("local");
-    const resultLocal = evaluateWithApprovals(graphLocal, ALL_TOOLS, config, approvalStore, "session-1");
-    expect(resultLocal.toolRemovals.has("gateway")).toBe(false);
+    const graphShared = graphWithTaint("shared");
+    const resultShared = evaluateWithApprovals(graphShared, ALL_TOOLS, config, approvalStore, "session-1");
+    expect(resultShared.toolRemovals.has("gateway")).toBe(false);
 
     const graphUntrusted = graphWithTaint("untrusted");
     const resultUntrusted = evaluateWithApprovals(graphUntrusted, ALL_TOOLS, config, approvalStore, "session-2");
@@ -458,10 +431,8 @@ describe("evaluateWithApprovals()", () => {
   });
 
   it("reports effective mode based on most restrictive non-safe tool", () => {
-    const graph = graphWithTaint("local");
+    const graph = graphWithTaint("trusted");
     const result = evaluateWithApprovals(graph, ["gateway", "read", "exec"], config, approvalStore, "session-1");
-    // Gateway and read are safe (allow), but exec at local defaults to allow too
-    // All tools are allowed at local, so mode is "allow"
     expect(result.mode).toBe("allow");
   });
 });
@@ -474,95 +445,70 @@ describe("ApprovalStore", () => {
   let store: ApprovalStore;
 
   beforeEach(() => {
-    store = new ApprovalStore(60_000);
+    store = new ApprovalStore();
   });
 
-  it("generates 8-char hex codes", () => {
-    const code = store.addPendingBatch([{
-      sessionKey: "s1",
-      toolName: "exec",
-      taintLevel: "untrusted",
-      reason: "test",
-      requestedAt: Date.now(),
-    }]);
-    expect(code).toMatch(/^[0-9a-f]{8}$/);
-  });
-
-  it("approves with valid code", () => {
-    const code = store.addPendingBatch([{
-      sessionKey: "s1",
-      toolName: "exec",
-      taintLevel: "untrusted",
-      reason: "test",
-      requestedAt: Date.now(),
-    }]);
-    const result = store.approveWithCode("s1", "exec", code, null);
-    expect(result.ok).toBe(true);
+  it("approves a tool for a session", () => {
+    store.approve("s1", "exec");
     expect(store.isApproved("s1", "exec")).toBe(true);
   });
 
-  it("rejects invalid code", () => {
-    store.addPendingBatch([{
-      sessionKey: "s1",
-      toolName: "exec",
-      taintLevel: "untrusted",
-      reason: "test",
-      requestedAt: Date.now(),
-    }]);
-    const result = store.approveWithCode("s1", "exec", "00000000", null);
-    expect(result.ok).toBe(false);
+  it("is not approved before calling approve()", () => {
     expect(store.isApproved("s1", "exec")).toBe(false);
   });
 
   it("approves all tools with 'all' target", () => {
-    const code = store.addPendingBatch([
-      { sessionKey: "s1", toolName: "exec", taintLevel: "untrusted", reason: "test", requestedAt: Date.now() },
-      { sessionKey: "s1", toolName: "message", taintLevel: "untrusted", reason: "test", requestedAt: Date.now() },
-    ]);
-    const result = store.approveWithCode("s1", "all", code, null);
-    expect(result.ok).toBe(true);
+    store.approve("s1", "all");
     expect(store.isApproved("s1", "exec")).toBe(true);
     expect(store.isApproved("s1", "message")).toBe(true);
   });
 
+  it("approveMultiple approves several tools at once", () => {
+    store.approveMultiple("s1", ["exec", "message"]);
+    expect(store.isApproved("s1", "exec")).toBe(true);
+    expect(store.isApproved("s1", "message")).toBe(true);
+    expect(store.isApproved("s1", "write")).toBe(false);
+  });
+
   it("clears turn-scoped approvals", () => {
-    const code = store.addPendingBatch([{
-      sessionKey: "s1",
-      toolName: "exec",
-      taintLevel: "untrusted",
-      reason: "test",
-      requestedAt: Date.now(),
-    }]);
-    store.approveWithCode("s1", "exec", code, null); // null = turn-scoped
+    store.approve("s1", "exec"); // null = turn-scoped
     expect(store.isApproved("s1", "exec")).toBe(true);
     store.clearTurnScoped("s1");
     expect(store.isApproved("s1", "exec")).toBe(false);
   });
 
   it("time-limited approvals survive turn clear", () => {
-    const code = store.addPendingBatch([{
-      sessionKey: "s1",
-      toolName: "exec",
-      taintLevel: "untrusted",
-      reason: "test",
-      requestedAt: Date.now(),
-    }]);
-    store.approveWithCode("s1", "exec", code, 30); // 30 minutes
+    store.approve("s1", "exec", 30); // 30 minutes
     expect(store.isApproved("s1", "exec")).toBe(true);
     store.clearTurnScoped("s1");
     expect(store.isApproved("s1", "exec")).toBe(true); // still approved
   });
 
-  it("reuses existing valid code", () => {
-    const code1 = store.addPendingBatch([{
-      sessionKey: "s1",
-      toolName: "exec",
-      taintLevel: "untrusted",
-      reason: "test",
-      requestedAt: Date.now(),
-    }]);
-    const code2 = store.getCurrentCode("s1");
-    expect(code2).toBe(code1);
+  it("clearAll removes everything for a session", () => {
+    store.approve("s1", "exec", 30);
+    store.approve("s1", "write");
+    store.clearAll("s1");
+    expect(store.isApproved("s1", "exec")).toBe(false);
+    expect(store.isApproved("s1", "write")).toBe(false);
+  });
+
+  it("listApprovals returns active entries", () => {
+    store.approve("s1", "exec");
+    store.approve("s1", "write", 30);
+    const list = store.listApprovals("s1");
+    expect(list).toHaveLength(2);
+    expect(list.map(e => e.toolName)).toContain("exec");
+    expect(list.map(e => e.toolName)).toContain("write");
+  });
+
+  it("listApprovals returns empty for unknown session", () => {
+    expect(store.listApprovals("unknown")).toHaveLength(0);
+  });
+
+  it("independent sessions are isolated", () => {
+    store.approve("s1", "exec");
+    expect(store.isApproved("s1", "exec")).toBe(true);
+    expect(store.isApproved("s2", "exec")).toBe(false);
   });
 });
 
@@ -571,16 +517,16 @@ describe("ApprovalStore", () => {
 // ============================================================
 
 describe("TurnProvenanceGraph", () => {
-  it("starts at system taint", () => {
+  it("starts at trusted taint", () => {
     const g = makeGraph();
-    expect(g.maxTaint).toBe("owner"); // owner because history node is owner
+    expect(g.maxTaint).toBe("trusted");
   });
 
   it("escalates taint on tool calls", () => {
     const g = makeGraph();
     g.recordLlmCall(1, 28);
     g.recordToolCall("exec", 1);
-    expect(g.maxTaint).toBe("local");
+    expect(g.maxTaint).toBe("trusted"); // exec output is "trusted"
     g.recordToolCall("web_fetch", 1);
     expect(g.maxTaint).toBe("untrusted");
   });
@@ -589,8 +535,22 @@ describe("TurnProvenanceGraph", () => {
     const g = makeGraph();
     g.recordLlmCall(1, 28);
     g.recordToolCall("web_fetch", 1); // untrusted
-    g.recordToolCall("exec", 1);       // local — should not decrease taint
+    g.recordToolCall("exec", 1);       // trusted — should not decrease taint
     expect(g.maxTaint).toBe("untrusted");
+  });
+
+  it("vestige tools escalate to shared", () => {
+    const g = makeGraph();
+    g.recordLlmCall(1, 28);
+    g.recordToolCall("vestige_search", 1);
+    expect(g.maxTaint).toBe("shared");
+  });
+
+  it("message escalates to external", () => {
+    const g = makeGraph();
+    g.recordLlmCall(1, 28);
+    g.recordToolCall("message", 1);
+    expect(g.maxTaint).toBe("external");
   });
 
   it("tracks tools used", () => {
@@ -664,16 +624,16 @@ describe("Integration: taint → policy", () => {
   let approvalStore: ApprovalStore;
 
   beforeEach(() => {
-    approvalStore = new ApprovalStore(60_000);
+    approvalStore = new ApprovalStore();
   });
 
-  it("owner message → exec allowed, no restrictions", () => {
-    const graph = graphWithTaint("owner");
+  it("trusted message → exec allowed, no restrictions", () => {
+    const graph = graphWithTaint("trusted");
     const result = evaluateWithApprovals(graph, ["exec", "read"], config, approvalStore, "s1");
     expect(result.toolRemovals.has("exec")).toBe(false);
   });
 
-  it("owner → web_fetch → exec blocked (untrusted taint)", () => {
+  it("trusted → web_fetch → exec blocked (untrusted taint)", () => {
     const graph = makeGraph();
     graph.recordLlmCall(1, 28);
     graph.recordToolCall("web_fetch", 1); // escalates to untrusted
@@ -682,48 +642,44 @@ describe("Integration: taint → policy", () => {
     expect(result.toolRemovals.has("read")).toBe(false); // safe tool
   });
 
-  it("owner → exec (local) → everything still allowed", () => {
+  it("trusted → exec (trusted) → everything still allowed", () => {
     const graph = makeGraph();
     graph.recordLlmCall(1, 28);
-    graph.recordToolCall("exec", 1); // escalates to local
+    graph.recordToolCall("exec", 1); // exec output is trusted
     const result = evaluateWithApprovals(graph, ["exec", "message", "read"], config, approvalStore, "s1");
     expect(result.toolRemovals.size).toBe(0);
   });
 
-  it("owner → vestige_search (local) → all tools remain available", () => {
+  it("trusted → vestige_search (shared) → confirm mode for dangerous tools", () => {
     const graph = makeGraph();
     graph.recordLlmCall(1, 28);
-    graph.recordToolCall("vestige_search", 1); // vestige tools are "local" trust (user-configurable)
+    graph.recordToolCall("vestige_search", 1); // vestige output is "shared"
     const result = evaluateWithApprovals(graph, ["exec", "message", "read"], config, approvalStore, "s1");
-    // local default is "allow" - no tools removed
-    expect(result.toolRemovals.has("exec")).toBe(false);
-    expect(result.toolRemovals.has("message")).toBe(false);
+    // shared default is "confirm" — exec and message need approval
+    expect(result.toolRemovals.has("exec")).toBe(true);
+    expect(result.toolRemovals.has("message")).toBe(true);
     expect(result.toolRemovals.has("read")).toBe(false);
   });
 
   it("approval flow: block → approve → allow", () => {
     const graph = graphWithTaint("untrusted");
-    
+
     // Step 1: blocked
     const r1 = evaluateWithApprovals(graph, ["exec"], config, approvalStore, "s1");
     expect(r1.toolRemovals.has("exec")).toBe(true);
-    
-    // Step 2: get code and approve
-    const code = approvalStore.addPendingBatch([{
-      sessionKey: "s1", toolName: "exec", taintLevel: "untrusted", reason: "test", requestedAt: Date.now(),
-    }]);
-    approvalStore.approveWithCode("s1", "all", code, null);
-    
+
+    // Step 2: approve
+    approvalStore.approve("s1", "all", null);
+
     // Step 3: allowed
     const r2 = evaluateWithApprovals(graph, ["exec"], config, approvalStore, "s1");
     expect(r2.toolRemovals.has("exec")).toBe(false);
   });
 
   it("restrict mode cannot be bypassed by approval", () => {
-    const restrictConfig = buildPolicyConfig({ owner: "restrict" });
-    const graph = graphWithTaint("owner");
-    
-    // Even with a hypothetical approval, restrict tools stay blocked
+    const restrictConfig = buildPolicyConfig({ trusted: "restrict" });
+    const graph = graphWithTaint("trusted");
+
     const result = evaluateWithApprovals(graph, ["exec"], restrictConfig, approvalStore, "s1");
     expect(result.toolRemovals.has("exec")).toBe(true);
     expect(result.pendingConfirmations).toHaveLength(0); // no confirm, just restrict
@@ -761,16 +717,13 @@ describe("WatermarkStore", () => {
     ws.escalate("session-a", "external", "web_fetch", "web_fetch");
     expect(ws.getLevel("session-a")?.level).toBe("external");
 
-    // Owner should not downgrade
-    ws.escalate("session-a", "owner", "owner msg", "owner msg");
+    // trusted should not downgrade
+    ws.escalate("session-a", "trusted", "trusted msg", "trusted msg");
     expect(ws.getLevel("session-a")?.level).toBe("external");
   });
 
-  it("does not create watermark for owner/system taint", () => {
-    ws.escalate("session-a", "owner", "owner", "owner");
-    expect(ws.getLevel("session-a")).toBeUndefined();
-
-    ws.escalate("session-a", "system", "system", "system");
+  it("does not create watermark for trusted taint", () => {
+    ws.escalate("session-a", "trusted", "trusted", "trusted");
     expect(ws.getLevel("session-a")).toBeUndefined();
   });
 
@@ -800,7 +753,6 @@ describe("WatermarkStore", () => {
     ws.escalate("session-a", "external", "web_fetch", "web_fetch");
     ws.flush();
 
-    // Create a new store pointing at same dir
     const ws2 = new WatermarkStore(tmpDir);
     expect(ws2.getLevel("session-a")?.level).toBe("external");
     expect(ws2.getLevel("session-a")?.reason).toBe("web_fetch");
@@ -813,5 +765,101 @@ describe("WatermarkStore", () => {
 
     const ws2 = new WatermarkStore(tmpDir);
     expect(ws2.getLevel("session-a")).toBeUndefined();
+  });
+});
+
+// ============================================================
+// BlockedWriteStore
+// ============================================================
+
+describe("BlockedWriteStore", () => {
+  let tmpDir: string;
+  let bws: BlockedWriteStore;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "blocked-write-test-"));
+    bws = new BlockedWriteStore(tmpDir);
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("saves and retrieves a blocked write", () => {
+    const { id } = bws.save({
+      targetPath: "MEMORY.md",
+      content: "injected content",
+      operation: "write",
+      taintLevel: "untrusted",
+      reason: "tainted context",
+      blockedAt: new Date().toISOString(),
+      sessionKey: "s1",
+    });
+    const entry = bws.get(id);
+    expect(entry).toBeDefined();
+    expect(entry!.targetPath).toBe("MEMORY.md");
+    expect(entry!.content).toBe("injected content");
+    expect(entry!.taintLevel).toBe("untrusted");
+  });
+
+  it("lists all blocked writes", () => {
+    bws.save({
+      targetPath: "MEMORY.md",
+      content: "a",
+      operation: "write",
+      taintLevel: "untrusted",
+      reason: "test",
+      blockedAt: new Date().toISOString(),
+      sessionKey: "s1",
+    });
+    bws.save({
+      targetPath: "SOUL.md",
+      content: "b",
+      operation: "edit",
+      oldText: "old",
+      taintLevel: "external",
+      reason: "test",
+      blockedAt: new Date().toISOString(),
+      sessionKey: "s1",
+    });
+    const list = bws.list();
+    expect(list).toHaveLength(2);
+  });
+
+  it("removes a blocked write", () => {
+    const { id } = bws.save({
+      targetPath: "MEMORY.md",
+      content: "x",
+      operation: "write",
+      taintLevel: "untrusted",
+      reason: "test",
+      blockedAt: new Date().toISOString(),
+      sessionKey: "s1",
+    });
+    expect(bws.remove(id)).toBe(true);
+    expect(bws.get(id)).toBeUndefined();
+    expect(bws.remove(id)).toBe(false); // already removed
+  });
+
+  it("clearAll removes everything", () => {
+    for (let i = 0; i < 3; i++) {
+      bws.save({
+        targetPath: `file-${i}.md`,
+        content: `content-${i}`,
+        operation: "write",
+        taintLevel: "untrusted",
+        reason: "test",
+        blockedAt: new Date().toISOString(),
+        sessionKey: "s1",
+      });
+    }
+    expect(bws.list()).toHaveLength(3);
+    const cleared = bws.clearAll();
+    expect(cleared).toBe(3);
+    expect(bws.list()).toHaveLength(0);
+  });
+
+  it("returns undefined for unknown ID", () => {
+    expect(bws.get("nonexistent")).toBeUndefined();
   });
 });

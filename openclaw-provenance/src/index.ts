@@ -3,55 +3,59 @@
  *
  * Content provenance taint tracking and security policy enforcement.
  * Builds per-turn DAGs, tracks trust levels, and enforces declarative
- * security policies with code-based approval.
+ * security policies with owner-verified approval.
  */
 
 import { registerSecurityHooks } from "./security/index.js";
 
-// The OpenClaw plugin API type (provided at runtime)
 interface PluginApi {
   registerTool(def: {
     name: string;
     description: string;
     parameters: any;
-    execute: (id: string, params: any) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    execute: (
+      id: string,
+      params: any,
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
   }): void;
-  on(hookName: string, handler: (...args: any[]) => any, opts?: Record<string, unknown>): void;
+  on(
+    hookName: string,
+    handler: (...args: any[]) => any,
+    opts?: Record<string, unknown>,
+  ): void;
   pluginConfig: Record<string, unknown> | undefined;
   config: Record<string, unknown>;
-  logger: { info(...args: any[]): void; warn(...args: any[]): void; error(...args: any[]): void };
+  logger: {
+    info(...args: any[]): void;
+    warn(...args: any[]): void;
+    error(...args: any[]): void;
+  };
 }
 
-// ── Plugin entry point ───────────────────────────────────────────────────────
 export function register(api: PluginApi) {
   const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
 
-  // Warn if internal hooks are not enabled — session save and memory file
-  // write policies depend on command:new registration ordering with the
-  // session-memory hook, which only works when internal hooks are active.
-  const hooksInternalEnabled = (api.config as any)?.hooks?.internal?.enabled === true;
+  const hooksInternalEnabled =
+    (api.config as any)?.hooks?.internal?.enabled === true;
   if (!hooksInternalEnabled) {
     api.logger.warn(
       "[provenance] ⚠️  hooks.internal.enabled is not true in config — " +
-      "sessionSavePolicy and memoryFileWritePolicy for command:new events " +
-      "will NOT be enforced. Enable internal hooks for full protection."
+        "security hooks will NOT be enforced. Enable internal hooks for full protection.",
     );
   }
 
-  registerSecurityHooks(
-    api,
-    api.logger,
-    {
-      verbose: true,
-      taintPolicy: (cfg.taintPolicy as any) ?? undefined,
-      toolOverrides: (cfg.toolOverrides as any) ?? undefined,
-      approvalTtlSeconds: (cfg.approvalTtlSeconds as number) ?? undefined,
-      maxIterations: (cfg.maxIterations as number) ?? undefined,
-      developerMode: (cfg.developerMode as boolean) ?? undefined,
-      toolOutputTaints: (cfg.toolOutputTaints as any) ?? undefined,
-      memoryFileWritePolicy: (cfg.memoryFileWritePolicy as any) ?? undefined,
-      sessionSavePolicy: (cfg.sessionSavePolicy as any) ?? undefined,
-      workspaceDir: (api.config as any)?.agents?.defaults?.workspace ?? (api.config as any)?.agents?.workspace ?? (api.config as any)?.workspaceDir ?? undefined,
-    },
-  );
+  registerSecurityHooks(api, api.logger, {
+    verbose: true,
+    taintPolicy: (cfg.taintPolicy as any) ?? undefined,
+    toolOverrides: (cfg.toolOverrides as any) ?? undefined,
+    maxIterations: (cfg.maxIterations as number) ?? undefined,
+    developerMode: (cfg.developerMode as boolean) ?? undefined,
+    toolOutputTaints: (cfg.toolOutputTaints as any) ?? undefined,
+    trustedSenderIds: (cfg.trustedSenderIds as string[]) ?? undefined,
+    workspaceDir:
+      (api.config as any)?.agents?.defaults?.workspace ??
+      (api.config as any)?.agents?.workspace ??
+      (api.config as any)?.workspaceDir ??
+      undefined,
+  });
 }

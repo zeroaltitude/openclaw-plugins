@@ -1,267 +1,129 @@
 /**
- * Per-session tool approval store with security codes.
- * 
- * Approval requires a time-limited, randomly generated code that must be
- * repeated back by the owner. This prevents social engineering attacks where
- * injected content tricks the user into approving dangerous tool access.
- * 
- * Format: .approve <all|tool> <code>
- * Codes expire after APPROVAL_TTL_MS (default: 60 seconds).
+ * Owner-verified approval state management.
+ *
+ * Tracks which tools have been approved by the owner for a given session.
+ * Approvals are gated by verified owner identity (senderIsOwner), not by codes.
+ *
+ * Approvals can be:
+ * - Turn-scoped (default): cleared when the turn ends
+ * - Time-scoped: expire after N minutes
  */
 
-import { randomBytes } from "crypto";
-
-/** Default approval code TTL (ms).
- * 5 minutes gives the user enough time to read the approval prompt,
- * understand which tools are blocked, and respond — even if interleaved
- * turns (e.g. compaction memory flushes) occur between the prompt and
- * the approval message. The previous 60s TTL caused codes to expire
- * before the user could respond in normal conversational flow.
- */
-const DEFAULT_APPROVAL_TTL_MS = 300_000; // 5 minutes
-
-/** Length of the hex approval code */
-const CODE_LENGTH = 4; // 4 bytes = 8 hex chars
-
-export interface PendingApproval {
+export interface ApprovalEntry {
+  toolName: string;
   sessionKey: string;
-  toolName: string;
-  taintLevel: string;
-  reason: string;
-  requestedAt: number;
-  /** The approval code the user must provide */
-  code: string;
-  /** When the code expires */
-  expiresAt: number;
-}
-
-export interface ActiveApproval {
-  toolName: string;
-  /** When this approval expires (epoch ms). null = turn-scoped (cleared on turn end) */
-  expiresAt: number | null;
+  approvedAt: number;
+  expiresAt: number | null; // null = turn-scoped (cleared at turn end)
 }
 
 export class ApprovalStore {
-  private readonly ttlMs: number;
-
-  constructor(ttlMs?: number) {
-    this.ttlMs = ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
-  }
-
-  /** Map<sessionKey, ActiveApproval[]> — approved tools per session */
-  private approvals: Map<string, ActiveApproval[]> = new Map();
-
-  /** Map<sessionKey, PendingApproval[]> — tools waiting for approval */
-  private pending: Map<string, PendingApproval[]> = new Map();
-
-  /** Generate a random approval code */
-  private generateCode(): string {
-    return randomBytes(CODE_LENGTH).toString("hex");
-  }
+  /** sessionKey → toolName → ApprovalEntry */
+  private approvals = new Map<string, Map<string, ApprovalEntry>>();
 
   /**
-   * Attempt to approve with a code.
-   * Returns { ok, reason } indicating success or why it failed.
+   * Approve a tool for a session.
+   * @param sessionKey - Session to approve for
+   * @param toolName - Tool name (or "all" for wildcard)
+   * @param durationMinutes - Duration in minutes (null = turn-scoped)
    */
-  /**
-   * Attempt to approve with a code.
-   * @param durationMinutes — null = this turn only, number = minutes until expiry
-   */
-  approveWithCode(
+  approve(
     sessionKey: string,
-    target: string, // "all" or a tool name
-    code: string,
-    durationMinutes?: number | null,
-  ): { ok: boolean; approved: string[]; reason?: string } {
-    const pendingList = this.pending.get(sessionKey);
-    if (!pendingList || pendingList.length === 0) {
-      return { ok: false, approved: [], reason: "No pending approvals" };
+    toolName: string,
+    durationMinutes: number | null = null,
+  ): void {
+    if (!this.approvals.has(sessionKey)) {
+      this.approvals.set(sessionKey, new Map());
     }
-
+    const sessionApprovals = this.approvals.get(sessionKey)!;
     const now = Date.now();
+    const expiresAt =
+      durationMinutes != null ? now + durationMinutes * 60 * 1000 : null;
 
-    if (target === "all") {
-      // All pending items must share the same code (generated together)
-      // Check that at least one pending item matches the code and isn't expired
-      const matching = pendingList.filter(p => p.code === code && p.expiresAt > now);
-      if (matching.length === 0) {
-        // Check if code was right but expired
-        const expired = pendingList.filter(p => p.code === code && p.expiresAt <= now);
-        if (expired.length > 0) {
-          return { ok: false, approved: [], reason: "Approval code expired. New code will be issued." };
-        }
-        return { ok: false, approved: [], reason: "Invalid approval code" };
-      }
-
-      let list = this.approvals.get(sessionKey);
-      if (!list) {
-        list = [];
-        this.approvals.set(sessionKey, list);
-      }
-      const expiresAt = durationMinutes != null ? Date.now() + durationMinutes * 60_000 : null;
-      const approved: string[] = [];
-      for (const p of matching) {
-        // Remove any existing approval for this tool, then add new one
-        const idx = list.findIndex(a => a.toolName === p.toolName);
-        if (idx >= 0) list.splice(idx, 1);
-        list.push({ toolName: p.toolName, expiresAt });
-        approved.push(p.toolName);
-      }
-      // Clear all pending for this session
-      this.pending.delete(sessionKey);
-      return { ok: true, approved };
-    } else {
-      // Approve a specific tool
-      const match = pendingList.find(p => p.toolName === target && p.code === code);
-      if (!match) {
-        const wrongCode = pendingList.find(p => p.toolName === target);
-        if (!wrongCode) {
-          return { ok: false, approved: [], reason: `No pending approval for tool: ${target}` };
-        }
-        if (wrongCode.expiresAt <= now) {
-          return { ok: false, approved: [], reason: "Approval code expired. New code will be issued." };
-        }
-        return { ok: false, approved: [], reason: "Invalid approval code" };
-      }
-      if (match.expiresAt <= now) {
-        return { ok: false, approved: [], reason: "Approval code expired. New code will be issued." };
-      }
-
-      let list = this.approvals.get(sessionKey);
-      if (!list) {
-        list = [];
-        this.approvals.set(sessionKey, list);
-      }
-      const expiresAt = durationMinutes != null ? Date.now() + durationMinutes * 60_000 : null;
-      const idx = list.findIndex(a => a.toolName === target);
-      if (idx >= 0) list.splice(idx, 1);
-      list.push({ toolName: target, expiresAt });
-      // Remove from pending
-      this.pending.set(sessionKey, pendingList.filter(p => p.toolName !== target));
-      return { ok: true, approved: [target] };
-    }
+    sessionApprovals.set(toolName.toLowerCase(), {
+      toolName: toolName.toLowerCase(),
+      sessionKey,
+      approvedAt: now,
+      expiresAt,
+    });
   }
 
-  /** Check if a tool is approved for a session (respects expiration) */
-  isApproved(sessionKey: string, toolName: string): boolean {
-    const list = this.approvals.get(sessionKey);
-    if (!list) return false;
-    const now = Date.now();
-    const approval = list.find(a => a.toolName === toolName);
-    if (!approval) return false;
-    // null expiresAt = turn-scoped (still valid until explicitly cleared)
-    if (approval.expiresAt !== null && approval.expiresAt <= now) {
-      // Expired — remove it
-      const idx = list.indexOf(approval);
-      if (idx >= 0) list.splice(idx, 1);
-      return false;
-    }
-    return true;
-  }
-
-  /** Clear turn-scoped approvals (expiresAt === null). Called at turn end. */
-  clearTurnScoped(sessionKey: string): void {
-    const list = this.approvals.get(sessionKey);
-    if (!list) return;
-    const remaining = list.filter(a => a.expiresAt !== null);
-    if (remaining.length === 0) {
-      this.approvals.delete(sessionKey);
-    } else {
-      this.approvals.set(sessionKey, remaining);
+  /**
+   * Approve multiple tools at once (e.g., from ".approve all").
+   * @param sessionKey - Session to approve for
+   * @param toolNames - Tool names to approve (or ["all"] for wildcard)
+   * @param durationMinutes - Duration in minutes (null = turn-scoped)
+   */
+  approveMultiple(
+    sessionKey: string,
+    toolNames: string[],
+    durationMinutes: number | null = null,
+  ): void {
+    for (const tool of toolNames) {
+      this.approve(sessionKey, tool, durationMinutes);
     }
   }
 
   /**
-   * Add pending approval requests and generate a shared code.
-   * All tools in a batch share one code so "approve all <code>" works.
-   * Returns the generated code.
+   * Check if a tool is approved for a session.
+   * Checks for both specific tool approval and wildcard "all" approval.
    */
-  addPendingBatch(items: Omit<PendingApproval, "code" | "expiresAt">[]): string {
-    if (items.length === 0) return "";
-    
+  isApproved(sessionKey: string, toolName: string): boolean {
+    const sessionApprovals = this.approvals.get(sessionKey);
+    if (!sessionApprovals) return false;
+
     const now = Date.now();
+    const toolLower = toolName.toLowerCase();
 
-    // Check if any existing pending codes for these tools are still valid.
-    // If so, reuse the existing code to prevent interleaved turns (e.g.
-    // compaction memory flushes) from invalidating codes the user is
-    // actively trying to approve.
-    let reuseCode: string | undefined;
-    for (const item of items) {
-      const list = this.pending.get(item.sessionKey);
-      if (!list) continue;
-      const existing = list.find(p => p.toolName === item.toolName && p.expiresAt > now);
-      if (existing) {
-        reuseCode = existing.code;
-        break;
+    // Check specific tool approval
+    const specific = sessionApprovals.get(toolLower);
+    if (specific) {
+      if (specific.expiresAt === null || specific.expiresAt > now) {
+        return true;
+      }
+      // Expired — clean up
+      sessionApprovals.delete(toolLower);
+    }
+
+    // Check wildcard "all" approval
+    const wildcard = sessionApprovals.get("all");
+    if (wildcard) {
+      if (wildcard.expiresAt === null || wildcard.expiresAt > now) {
+        return true;
+      }
+      sessionApprovals.delete("all");
+    }
+
+    return false;
+  }
+
+  /** Clear turn-scoped approvals for a session (called at turn end) */
+  clearTurnScoped(sessionKey: string): void {
+    const sessionApprovals = this.approvals.get(sessionKey);
+    if (!sessionApprovals) return;
+
+    for (const [key, entry] of sessionApprovals) {
+      if (entry.expiresAt === null) {
+        sessionApprovals.delete(key);
       }
     }
 
-    const code = reuseCode ?? this.generateCode();
-    const expiresAt = now + this.ttlMs;
-
-    for (const item of items) {
-      let list = this.pending.get(item.sessionKey);
-      if (!list) {
-        list = [];
-        this.pending.set(item.sessionKey, list);
-      }
-      const idx = list.findIndex(p => p.toolName === item.toolName);
-      if (idx >= 0 && list[idx].expiresAt > now) {
-        // Existing code is still valid — extend its TTL but keep the code
-        list[idx].expiresAt = Math.max(list[idx].expiresAt, expiresAt);
-        continue;
-      }
-      const entry: PendingApproval = { ...item, code, expiresAt };
-      if (idx >= 0) {
-        list[idx] = entry;
-      } else {
-        list.push(entry);
-      }
+    if (sessionApprovals.size === 0) {
+      this.approvals.delete(sessionKey);
     }
-    return code;
   }
 
-  /** @deprecated Use addPendingBatch instead */
-  addPending(pending: Omit<PendingApproval, "code" | "expiresAt">): string {
-    return this.addPendingBatch([pending]);
-  }
-
-  /** Get pending approvals for a session (filters out expired) */
-  getPending(sessionKey: string): PendingApproval[] {
-    const list = this.pending.get(sessionKey) ?? [];
-    const now = Date.now();
-    // Filter expired
-    const valid = list.filter(p => p.expiresAt > now);
-    if (valid.length !== list.length) {
-      this.pending.set(sessionKey, valid);
-    }
-    return valid;
-  }
-
-  /** Get the current approval code for a session (if any pending) */
-  getCurrentCode(sessionKey: string): string | null {
-    const pending = this.getPending(sessionKey);
-    return pending.length > 0 ? pending[0].code : null;
-  }
-
-  /** Get TTL remaining in seconds for the current code */
-  getCodeTtlSeconds(sessionKey: string): number {
-    const pending = this.getPending(sessionKey);
-    if (pending.length === 0) return 0;
-    return Math.max(0, Math.ceil((pending[0].expiresAt - Date.now()) / 1000));
-  }
-
-  /** Clear all approvals and pending for a session */
-  clearSession(sessionKey: string): void {
+  /** Clear all approvals for a session */
+  clearAll(sessionKey: string): void {
     this.approvals.delete(sessionKey);
-    this.pending.delete(sessionKey);
   }
 
-  /** Get all currently approved tools for a session */
-  getApproved(sessionKey: string): string[] {
-    const list = this.approvals.get(sessionKey);
-    if (!list) return [];
+  /** List active approvals for a session (for diagnostics) */
+  listApprovals(sessionKey: string): ApprovalEntry[] {
+    const sessionApprovals = this.approvals.get(sessionKey);
+    if (!sessionApprovals) return [];
     const now = Date.now();
-    return list.filter(a => a.expiresAt === null || a.expiresAt > now).map(a => a.toolName);
+    return Array.from(sessionApprovals.values()).filter(
+      (e) => e.expiresAt === null || e.expiresAt > now,
+    );
   }
 }

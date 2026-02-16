@@ -1,18 +1,22 @@
 /**
- * Security Policy Engine — Simplified Model
- * 
+ * Security Policy Engine — 4-Level Model
+ *
  * The policy model is:
  *   1. Determine taint level from provenance graph (e.g., "untrusted")
  *   2. Look up default mode for that taint level (e.g., "confirm")
- *   3. For each tool, check toolOverrides for a stricter mode
- *   4. Apply: allow = pass, confirm = prompt with code, restrict = silently remove, deny = block turn
- * 
- * Overrides can only make things STRICTER, never more permissive.
+ *   3. For each tool, check toolOverrides for a different mode
+ *   4. Apply: allow = pass, confirm = block until owner approves, restrict = silently remove
+ *
  * Monotonicity is enforced: stricter taint levels must have equal or stricter modes.
  */
 
 import type { TrustLevel } from "./trust-levels.js";
-import { TRUST_ORDER, DEFAULT_TAINT_POLICY } from "./trust-levels.js";
+import {
+  TRUST_ORDER,
+  mapLegacyTaintPolicy,
+  mapLegacyToolOverride,
+  hasLegacyKeys,
+} from "./trust-levels.js";
 import type { TaintPolicyConfig } from "./trust-levels.js";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
@@ -26,7 +30,6 @@ const MODE_ORDER: PolicyMode[] = ["allow", "confirm", "restrict"];
 
 /**
  * Per-tool override: maps taint levels (or "*") to a policy mode.
- * Can only make things stricter than the taint-level default.
  */
 export type ToolOverride = Partial<Record<TrustLevel | "*", PolicyMode>>;
 
@@ -35,18 +38,13 @@ export interface PolicyConfig {
   taintPolicy: Record<TrustLevel, PolicyMode>;
   /** Per-tool overrides (key = lowercase tool name) */
   toolOverrides: Record<string, ToolOverride>;
-  /** Max iterations before blocking turn (default: 10) */
+  /** Max iterations before warning (default: 30) */
   maxIterations: number;
 }
 
 /** Return the stricter of two modes */
 export function strictest(a: PolicyMode, b: PolicyMode): PolicyMode {
   return MODE_ORDER.indexOf(a) >= MODE_ORDER.indexOf(b) ? a : b;
-}
-
-/** Return the more permissive of two modes */
-function mostPermissive(a: PolicyMode, b: PolicyMode): PolicyMode {
-  return MODE_ORDER.indexOf(a) <= MODE_ORDER.indexOf(b) ? a : b;
 }
 
 /**
@@ -59,14 +57,12 @@ export function validateMonotonicity(
   const corrected = { ...taintPolicy };
   const warnings: string[] = [];
 
-  // Walk from most trusted to least trusted
-  // Each level must be >= the previous level in strictness
   let prevMode: PolicyMode = "allow";
   for (const level of TRUST_ORDER) {
     const current = corrected[level];
     if (MODE_ORDER.indexOf(current) < MODE_ORDER.indexOf(prevMode)) {
       warnings.push(
-        `taintPolicy.${level} (${current}) is less strict than a more-trusted level (${prevMode}). Auto-corrected to ${prevMode}.`
+        `taintPolicy.${level} (${current}) is less strict than a more-trusted level (${prevMode}). Auto-corrected to ${prevMode}.`,
       );
       corrected[level] = prevMode;
     }
@@ -88,13 +84,8 @@ export function getToolMode(
   const override = config.toolOverrides[toolName.toLowerCase()];
 
   if (!override) {
-    // Unknown tool (not in DEFAULT_SAFE_TOOLS, DEFAULT_DANGEROUS_TOOLS, or user overrides).
-    // When the taint policy already allows tools at this level, trust
-    // the policy — unknown tools aren't dangerous in a trusted context.
-    // The untrusted fallback only applies when the taint level is already
-    // restrictive (shared/external/untrusted), preventing tool rename
-    // attacks where a dangerous tool is re-registered under an unlisted
-    // name to bypass restrictions.
+    // Unknown tool: when taint policy allows at this level, trust the policy.
+    // When restrictive, use the untrusted mode to prevent tool rename attacks.
     if (defaultMode === "allow") {
       return defaultMode;
     }
@@ -107,8 +98,7 @@ export function getToolMode(
   if (!overrideMode) return defaultMode;
 
   // The override IS the effective mode for this tool.
-  // It can be more permissive (safe tools: "allow") or more restrictive (dangerous tools: "restrict").
-  // This is intentional: safe tools MUST be able to override "restrict" back to "allow".
+  // It can be more permissive (safe tools: "allow") or more restrictive.
   return overrideMode;
 }
 
@@ -122,9 +112,9 @@ export interface PolicyResult {
   defaultMode: PolicyMode;
   /** Tools that are allowed (no restriction) */
   allowed: string[];
-  /** Tools that need confirmation (approval code) */
+  /** Tools that need owner approval */
   confirm: Array<{ tool: string; reason: string }>;
-  /** Tools that are silently restricted (no override possible) */
+  /** Tools that are silently restricted */
   restricted: string[];
   /** Whether the entire turn should be blocked */
   blockTurn: boolean;
@@ -152,13 +142,10 @@ export function evaluatePolicy(
     maxIterationsExceeded: false,
   };
 
-  // Check max iterations (soft warning - does not block turn)
   if (graph.iterationCount >= config.maxIterations) {
     result.maxIterationsExceeded = true;
-    // Note: blockTurn remains false - this is just a warning flag
   }
 
-  // Evaluate each tool — even in "allow" mode, tool overrides may be stricter
   for (const tool of availableTools) {
     const mode = getToolMode(tool, taintLevel, config);
     switch (mode) {
@@ -209,8 +196,12 @@ export function evaluateWithApprovals(
     };
   }
 
-  // Even in "allow" mode, check if any tools have overrides that are stricter
-  if (result.defaultMode === "allow" && result.confirm.length === 0 && result.restricted.length === 0) {
+  // Fast path: everything allowed
+  if (
+    result.defaultMode === "allow" &&
+    result.confirm.length === 0 &&
+    result.restricted.length === 0
+  ) {
     return {
       mode: "allow",
       toolRemovals: new Set(),
@@ -221,27 +212,26 @@ export function evaluateWithApprovals(
   const toolRemovals = new Set<string>();
   const pendingConfirmations: Array<{ toolName: string; reason: string }> = [];
 
-  // Restricted tools are always removed (no override)
+  // Restricted tools are always removed
   for (const tool of result.restricted) {
     toolRemovals.add(tool);
   }
 
-  // Confirm tools: check if already approved
+  // Confirm tools: check if already approved by owner
   for (const { tool, reason } of result.confirm) {
     if (approvalStore.isApproved(sessionKey, tool)) {
-      // Already approved — allow it
       continue;
     }
     toolRemovals.add(tool);
     pendingConfirmations.push({ toolName: tool, reason });
   }
 
-  // Effective mode: if default is "allow" but overrides triggered, report the strictest override
-  const effectiveMode = pendingConfirmations.length > 0
-    ? strictest(result.defaultMode, "confirm")
-    : result.restricted.length > 0
-      ? strictest(result.defaultMode, "restrict")
-      : result.defaultMode;
+  const effectiveMode =
+    pendingConfirmations.length > 0
+      ? strictest(result.defaultMode, "confirm")
+      : result.restricted.length > 0
+        ? strictest(result.defaultMode, "restrict")
+        : result.defaultMode;
 
   return {
     mode: effectiveMode,
@@ -255,64 +245,48 @@ export function evaluateWithApprovals(
  * These are read-only tools with no side effects.
  */
 export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
-  // Read-only filesystem
-  "read":              { "*": "allow" },
-  // Memory (read-only)
-  "memory_search":     { "*": "allow" },
-  "memory_get":        { "*": "allow" },
-  // Web read (these ARE the taint sources — safe to call, but their
-  // responses taint the context for subsequent tool calls)
-  "web_fetch":         { "*": "allow" },
-  "web_search":        { "*": "allow" },
-  // Image analysis (read-only)
-  "image":             { "*": "allow" },
-  // Session introspection (read-only)
-  "session_status":    { "*": "allow" },
-  "sessions_list":     { "*": "allow" },
-  "sessions_history":  { "*": "allow" },
-  "agents_list":       { "*": "allow" },
-  // Gateway configuration (system tool, safe to call)
-  "gateway":           { "*": "allow" },
-  // Vestige memory (search + promote/demote are read-only-ish)
-  "vestige_search":    { "*": "allow" },
-  "vestige_promote":   { "*": "allow" },
-  "vestige_demote":    { "*": "allow" },
+  read: { "*": "allow" },
+  memory_search: { "*": "allow" },
+  memory_get: { "*": "allow" },
+  web_fetch: { "*": "allow" },
+  web_search: { "*": "allow" },
+  image: { "*": "allow" },
+  session_status: { "*": "allow" },
+  sessions_list: { "*": "allow" },
+  sessions_history: { "*": "allow" },
+  agents_list: { "*": "allow" },
+  gateway: { "*": "allow" },
+  vestige_search: { "*": "allow" },
+  vestige_promote: { "*": "allow" },
+  vestige_demote: { "*": "allow" },
 };
 
 /**
  * Default taint-level-default tools — known tools that follow the taint-level
  * default policy (no per-tool override). Explicitly listing them ensures they
  * are recognized as "known" and don't fall through to the unknown-tool policy.
- * 
- * An empty override {} means "use the taint-level default for all levels."
  */
 export const DEFAULT_TAINT_DEFAULT_TOOLS: Record<string, ToolOverride> = {
-  // Dangerous action tools — follow taint-level default
-  "exec":              {},
-  "edit":              {},
-  "write":             {},
-  "process":           {},
-  "browser":           {},
-  "message":           {},
-  "canvas":            {},
-  "nodes":             {},
-  "tts":               {},
-  "cron":              {},
-  "sessions_send":     {},
-  "sessions_spawn":    {},
-  // Vestige write operations
-  "vestige_ingest":    {},
-  "vestige_smart_ingest": {},
-  // External data tools
-  "gog":               {},
+  exec: {},
+  edit: {},
+  write: {},
+  process: {},
+  browser: {},
+  message: {},
+  canvas: {},
+  nodes: {},
+  tts: {},
+  cron: {},
+  sessions_send: {},
+  sessions_spawn: {},
+  vestige_ingest: {},
+  vestige_smart_ingest: {},
+  gog: {},
 };
 
 /**
  * Default dangerous tool overrides — tools that should be stricter than the
  * taint-level default at certain levels.
- *
- * Currently empty - most tools follow the taint-level default policy.
- * Users can add custom overrides via config.toolOverrides.
  */
 export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {};
 
@@ -320,23 +294,37 @@ export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {};
  * Build a complete PolicyConfig from user-provided config, merging with defaults.
  */
 export function buildPolicyConfig(
-  taintPolicy?: Partial<Record<TrustLevel, PolicyMode>>,
+  taintPolicy?: Partial<Record<string, PolicyMode>>,
   toolOverrides?: Record<string, ToolOverride>,
   maxIterations?: number,
+  logger?: {
+    warn(...args: any[]): void;
+  },
 ): PolicyConfig {
-  // Merge taint policy with defaults
+  // Handle legacy 6-level configs
+  let resolvedPolicy: Partial<Record<string, PolicyMode>> = (taintPolicy ?? {}) as Partial<Record<string, PolicyMode>>;
+  if (taintPolicy && hasLegacyKeys(taintPolicy as Record<string, unknown>)) {
+    const { mapped, warnings } = mapLegacyTaintPolicy(
+      taintPolicy as Record<string, string>,
+    );
+    for (const w of warnings) {
+      logger?.warn(`[provenance] ${w}`);
+    }
+    resolvedPolicy = mapped as Partial<Record<string, PolicyMode>>;
+  }
+
   const rawPolicy: Record<TrustLevel, PolicyMode> = {
-    system: "allow",
-    owner: "allow",
-    local: "allow",
+    trusted: "allow",
     shared: "confirm",
     external: "confirm",
     untrusted: "confirm",
-    ...taintPolicy,
+    ...(resolvedPolicy as Partial<Record<TrustLevel, PolicyMode>>),
   };
 
-  // Validate monotonicity
   const { corrected, warnings } = validateMonotonicity(rawPolicy);
+  for (const w of warnings) {
+    logger?.warn(`[provenance] ${w}`);
+  }
 
   // Merge tool overrides: defaults first, then user overrides on top
   const mergedOverrides: Record<string, ToolOverride> = {
@@ -345,11 +333,17 @@ export function buildPolicyConfig(
     ...DEFAULT_DANGEROUS_TOOLS,
   };
 
-  // User overrides merge per-tool (user values take precedence per taint level)
   if (toolOverrides) {
     for (const [tool, override] of Object.entries(toolOverrides)) {
       const key = tool.toLowerCase();
-      mergedOverrides[key] = { ...mergedOverrides[key], ...override };
+      // Map legacy 6-level keys in tool overrides
+      const mappedOverride = hasLegacyKeys(override as Record<string, unknown>)
+        ? mapLegacyToolOverride(override as Record<string, string>)
+        : override;
+      mergedOverrides[key] = {
+        ...mergedOverrides[key],
+        ...(mappedOverride as ToolOverride),
+      };
     }
   }
 

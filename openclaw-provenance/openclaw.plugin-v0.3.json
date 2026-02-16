@@ -33,10 +33,11 @@
           }
         }
       },
-      "approvalTtlSeconds": {
-        "type": "number",
-        "description": "How long an approval code is valid (default: 60)",
-        "default": 60
+      "trustedSenderIds": {
+        "type": "array",
+        "description": "Additional sender IDs (platform-specific) classified as trusted. Messages from these senders are treated as fully trusted, equivalent to owner messages.",
+        "items": { "type": "string" },
+        "default": []
       },
       "maxIterations": {
         "type": "number",
