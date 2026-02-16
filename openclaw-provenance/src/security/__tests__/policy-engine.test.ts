@@ -182,18 +182,20 @@ describe("getToolMode()", () => {
     expect(getToolMode("session_status", "untrusted", config)).toBe("allow");
   });
 
-  it("returns 'confirm' for gateway at local+ (default override)", () => {
-    // Default override only covers local/shared/external/untrusted
-    expect(getToolMode("gateway", "owner", config)).toBe("allow"); // no override at owner
-    expect(getToolMode("gateway", "local", config)).toBe("confirm");
-    expect(getToolMode("gateway", "external", config)).toBe("confirm");
-    expect(getToolMode("gateway", "untrusted", config)).toBe("confirm");
+  it("returns 'allow' for gateway at all levels (safe tool)", () => {
+    // Gateway is a system tool, always safe to call
+    expect(getToolMode("gateway", "system", config)).toBe("allow");
+    expect(getToolMode("gateway", "owner", config)).toBe("allow");
+    expect(getToolMode("gateway", "local", config)).toBe("allow");
+    expect(getToolMode("gateway", "shared", config)).toBe("allow");
+    expect(getToolMode("gateway", "external", config)).toBe("allow");
+    expect(getToolMode("gateway", "untrusted", config)).toBe("allow");
   });
 
-  it("returns 'confirm' for gateway at all levels with glob override", () => {
-    const configWithGlob = buildPolicyConfig(undefined, { "gateway": { "*": "confirm" } });
-    expect(getToolMode("gateway", "owner", configWithGlob)).toBe("confirm");
-    expect(getToolMode("gateway", "system", configWithGlob)).toBe("confirm");
+  it("user can override gateway to require confirm", () => {
+    const configWithOverride = buildPolicyConfig(undefined, { "gateway": { "*": "confirm" } });
+    expect(getToolMode("gateway", "owner", configWithOverride)).toBe("confirm");
+    expect(getToolMode("gateway", "local", configWithOverride)).toBe("confirm");
   });
 
   it("override can make things more permissive (safe tools)", () => {
@@ -223,8 +225,8 @@ describe("getToolMode()", () => {
   });
 
   it("is case-insensitive on tool name", () => {
-    expect(getToolMode("Gateway", "local", config)).toBe("confirm");
-    expect(getToolMode("GATEWAY", "local", config)).toBe("confirm");
+    expect(getToolMode("Gateway", "local", config)).toBe("allow");  // Gateway is a safe tool
+    expect(getToolMode("GATEWAY", "untrusted", config)).toBe("allow");
     expect(getToolMode("Read", "untrusted", config)).toBe("allow");
     expect(getToolMode("READ", "untrusted", config)).toBe("allow");
   });
@@ -268,7 +270,7 @@ describe("buildPolicyConfig()", () => {
       "gateway": { "owner": "restrict" },
     });
     // Should have both the default and user override
-    expect(config.toolOverrides["gateway"]["local"]).toBe("confirm");  // from default
+    expect(config.toolOverrides["gateway"]["*"]).toBe("allow");      // from default (safe tool)
     expect(config.toolOverrides["gateway"]["owner"]).toBe("restrict"); // from user
   });
 
@@ -309,8 +311,7 @@ describe("evaluatePolicy()", () => {
     expect(result.allowed).toContain("read");
     expect(result.allowed).toContain("web_fetch");
     expect(result.allowed).toContain("memory_search");
-    // Gateway override is "confirm" at untrusted — same as default but explicit
-    expect(result.confirm.map(c => c.tool)).toContain("gateway");
+    expect(result.allowed).toContain("gateway");  // Gateway is a safe tool
   });
 
   it("sets warning flag when max iterations exceeded (soft warning, no block)", () => {
@@ -357,12 +358,12 @@ describe("evaluatePolicy()", () => {
     // Non-safe, non-overridden tools get "restrict"
     expect(result.restricted).toContain("exec");
     expect(result.restricted).toContain("write");
-    
-    // Gateway override only covers local+ — at owner level, no override, so "restrict"
-    expect(result.restricted).toContain("gateway");
+
+    // Gateway is a safe tool, allowed even in restrict mode
+    expect(result.allowed).toContain("gateway");
   });
 
-  it("all-allow mode allows everything (except gateway override)", () => {
+  it("all-allow mode allows everything including safe tools", () => {
     const allowConfig = buildPolicyConfig({
       system: "allow",
       owner: "allow",
@@ -375,8 +376,7 @@ describe("evaluatePolicy()", () => {
     const result = evaluatePolicy(graph, ALL_TOOLS, allowConfig);
     expect(result.allowed).toContain("exec");
     expect(result.allowed).toContain("message");
-    // Gateway still requires confirm due to DEFAULT_DANGEROUS_TOOLS
-    expect(result.confirm.map(c => c.tool)).toContain("gateway");
+    expect(result.allowed).toContain("gateway");  // Gateway is a safe tool
   });
 });
 
@@ -447,24 +447,22 @@ describe("evaluateWithApprovals()", () => {
     expect(result.toolRemovals.has("memory_search")).toBe(false);
   });
 
-  it("gateway requires approval at local taint (override covers local+)", () => {
-    const graph = graphWithTaint("local");
-    const result = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
-    expect(result.toolRemovals.has("gateway")).toBe(true);
-    expect(result.pendingConfirmations.map(p => p.toolName)).toContain("gateway");
+  it("gateway always allowed (safe system tool)", () => {
+    const graphLocal = graphWithTaint("local");
+    const resultLocal = evaluateWithApprovals(graphLocal, ALL_TOOLS, config, approvalStore, "session-1");
+    expect(resultLocal.toolRemovals.has("gateway")).toBe(false);
+
+    const graphUntrusted = graphWithTaint("untrusted");
+    const resultUntrusted = evaluateWithApprovals(graphUntrusted, ALL_TOOLS, config, approvalStore, "session-2");
+    expect(resultUntrusted.toolRemovals.has("gateway")).toBe(false);
   });
 
-  it("gateway allowed at owner taint (no override at owner level)", () => {
-    const graph = graphWithTaint("owner");
-    const result = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
-    expect(result.toolRemovals.has("gateway")).toBe(false);
-  });
-
-  it("reports effective mode as confirm when overrides trigger", () => {
+  it("reports effective mode based on most restrictive non-safe tool", () => {
     const graph = graphWithTaint("local");
-    const result = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
-    // Default mode is "allow" but gateway override at local makes effective mode "confirm"
-    expect(result.mode).toBe("confirm");
+    const result = evaluateWithApprovals(graph, ["gateway", "read", "exec"], config, approvalStore, "session-1");
+    // Gateway and read are safe (allow), but exec at local defaults to allow too
+    // All tools are allowed at local, so mode is "allow"
+    expect(result.mode).toBe("allow");
   });
 });
 

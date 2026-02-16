@@ -257,7 +257,7 @@ export function evaluateWithApprovals(
 export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
   // Read-only filesystem
   "read":              { "*": "allow" },
-  // Memory (read-only)  
+  // Memory (read-only)
   "memory_search":     { "*": "allow" },
   "memory_get":        { "*": "allow" },
   // Web read (these ARE the taint sources — safe to call, but their
@@ -271,6 +271,8 @@ export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
   "sessions_list":     { "*": "allow" },
   "sessions_history":  { "*": "allow" },
   "agents_list":       { "*": "allow" },
+  // Gateway configuration (system tool, safe to call)
+  "gateway":           { "*": "allow" },
   // Vestige memory (search + promote/demote are read-only-ish)
   "vestige_search":    { "*": "allow" },
   "vestige_promote":   { "*": "allow" },
@@ -308,11 +310,11 @@ export const DEFAULT_TAINT_DEFAULT_TOOLS: Record<string, ToolOverride> = {
 /**
  * Default dangerous tool overrides — tools that should be stricter than the
  * taint-level default at certain levels.
+ *
+ * Currently empty - most tools follow the taint-level default policy.
+ * Users can add custom overrides via config.toolOverrides.
  */
-export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {
-  // Gateway config requires approval even at local level (prevents policy circumvention)
-  "gateway":  { "local": "confirm", "shared": "confirm", "external": "confirm", "untrusted": "confirm" },
-};
+export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {};
 
 /**
  * Build a complete PolicyConfig from user-provided config, merging with defaults.
