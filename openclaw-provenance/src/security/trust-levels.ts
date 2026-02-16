@@ -37,6 +37,7 @@ export type LegacyTrustLevel =
 /** Map a legacy 6-level trust to the new 4-level model */
 export function mapLegacyTrust(level: string): TrustLevel {
   switch (level) {
+    case "trusted":
     case "system":
     case "owner":
     case "local":
