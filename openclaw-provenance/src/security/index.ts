@@ -18,6 +18,7 @@ import { BlockedWriteStore } from "./blocked-write-store.js";
 import {
   buildPolicyConfig,
   evaluateWithApprovals,
+  type PolicyConfig,
   type PolicyMode,
   type ToolOverride,
 } from "./policy-engine.js";
@@ -57,6 +58,13 @@ interface AgentContext {
   spawnedBy?: string | null;
 }
 
+/** Per-agent overrides for taint policy and tool classifications */
+export interface AgentPolicyOverride {
+  taintPolicy?: Partial<Record<string, PolicyMode>>;
+  toolOverrides?: Record<string, ToolOverride>;
+  toolOutputTaints?: Record<string, TrustLevel>;
+}
+
 export interface SecurityPluginConfig {
   toolOverrides?: Record<string, ToolOverride>;
   toolTrustOverrides?: Record<string, TrustLevel>;
@@ -69,6 +77,8 @@ export interface SecurityPluginConfig {
   workspaceDir?: string;
   /** Additional sender IDs classified as trusted */
   trustedSenderIds?: string[];
+  /** Per-agent policy overrides keyed by agent ID */
+  agentOverrides?: Record<string, AgentPolicyOverride>;
 }
 
 /** Get a short session key for log prefixes */
@@ -223,23 +233,81 @@ export function registerSecurityHooks(
     `[provenance] Blocked write store: ${workspaceDir}/.provenance/blocked-writes/`,
   );
 
-  const policyConfig = buildPolicyConfig(
+  const defaultPolicyConfig = buildPolicyConfig(
     config?.taintPolicy as any,
     config?.toolOverrides,
     config?.maxIterations,
     logger,
   );
 
+  // Build per-agent policy configs and tool taint maps
+  const agentOverrides = config?.agentOverrides ?? {};
+  const agentPolicyConfigs = new Map<string, PolicyConfig>();
+  const agentToolTaints = new Map<string, Record<string, TrustLevel>>();
+
+  for (const [agentId, overrides] of Object.entries(agentOverrides)) {
+    // Merge taint policy: agent overrides on top of defaults
+    const mergedTaintPolicy = {
+      ...(config?.taintPolicy as Partial<Record<string, PolicyMode>> ?? {}),
+      ...(overrides.taintPolicy ?? {}),
+    };
+    // Merge tool overrides: agent overrides on top of defaults
+    const mergedToolOverrides = {
+      ...(config?.toolOverrides ?? {}),
+      ...(overrides.toolOverrides ?? {}),
+    };
+    agentPolicyConfigs.set(
+      agentId,
+      buildPolicyConfig(mergedTaintPolicy as any, mergedToolOverrides, config?.maxIterations, logger),
+    );
+
+    // Merge tool output taints: agent overrides on top of defaults
+    if (overrides.toolOutputTaints) {
+      const mergedOutputTaints = {
+        ...(toolOutputTaintOverrides ?? {}),
+        ...overrides.toolOutputTaints,
+      };
+      agentToolTaints.set(agentId, mergedOutputTaints);
+    }
+
+    logger.info(`[provenance] Agent override loaded for '${agentId}':`);
+    if (overrides.taintPolicy) {
+      logger.info(`[provenance]   Taint policy: ${JSON.stringify(overrides.taintPolicy)}`);
+    }
+    if (overrides.toolOverrides) {
+      logger.info(`[provenance]   Tool overrides: ${Object.keys(overrides.toolOverrides).length} tools`);
+    }
+    if (overrides.toolOutputTaints) {
+      logger.info(`[provenance]   Tool output taints: ${JSON.stringify(overrides.toolOutputTaints)}`);
+    }
+  }
+
+  /** Resolve the effective policy config for a given agent */
+  function getPolicyConfig(agentId?: string): PolicyConfig {
+    if (agentId && agentPolicyConfigs.has(agentId)) {
+      return agentPolicyConfigs.get(agentId)!;
+    }
+    return defaultPolicyConfig;
+  }
+
+  /** Resolve the effective tool taint map for a given agent */
+  function getResolvedToolTaints(agentId?: string): Record<string, TrustLevel> {
+    if (agentId && agentToolTaints.has(agentId)) {
+      return buildToolOutputTaintMap(agentToolTaints.get(agentId));
+    }
+    return resolvedToolTaints;
+  }
+
   // Log policy config at startup
-  logger.info(`[provenance] Policy config loaded:`);
+  logger.info(`[provenance] Default policy config loaded:`);
   logger.info(
-    `[provenance]   Taint policy: ${JSON.stringify(policyConfig.taintPolicy)}`,
+    `[provenance]   Taint policy: ${JSON.stringify(defaultPolicyConfig.taintPolicy)}`,
   );
   logger.info(
-    `[provenance]   Tool overrides: ${Object.keys(policyConfig.toolOverrides).length} tools configured`,
+    `[provenance]   Tool overrides: ${Object.keys(defaultPolicyConfig.toolOverrides).length} tools configured`,
   );
   logger.info(
-    `[provenance]   Max iterations: ${policyConfig.maxIterations}`,
+    `[provenance]   Max iterations: ${defaultPolicyConfig.maxIterations}`,
   );
   if (trustedSenderIds.size > 0) {
     logger.info(
@@ -259,11 +327,17 @@ export function registerSecurityHooks(
       `[provenance]   Developer mode: ON (taint headers will be prepended to outbound messages)`,
     );
   }
+  if (Object.keys(agentOverrides).length > 0) {
+    logger.info(
+      `[provenance]   Agent overrides: ${Object.keys(agentOverrides).join(", ")}`,
+    );
+  }
 
   // Per-session state
   const lastLlmNodeBySession = new Map<string, string>();
   const blockedToolsBySession = new Map<string, Set<string>>();
   const lastImpactedToolBySession = new Map<string, string>();
+  const sessionAgentMap = new Map<string, string>();
 
   // --- before_agent_start ---
   api.on(
@@ -290,6 +364,7 @@ export function registerSecurityHooks(
     "context_assembled",
     failOpen("context_assembled", logger, (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
+      if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       const graph = store.startTurn(sessionKey);
 
       const initialTrust = classifyInitialTrust(ctx, trustedSenderIds);
@@ -461,13 +536,15 @@ export function registerSecurityHooks(
         }
       }
 
-      // Evaluate policy
+      // Evaluate policy (agent-aware)
       const currentTools: Array<{ name: string }> = event.tools ?? [];
       const currentToolNames = currentTools.map((t: any) => t.name);
+      const agentId = sessionAgentMap.get(sessionKey);
+      const effectivePolicyConfig = getPolicyConfig(agentId);
       const result = evaluateWithApprovals(
         graph,
         currentToolNames,
-        policyConfig,
+        effectivePolicyConfig,
         approvalStore,
         sessionKey,
       );
@@ -657,18 +734,21 @@ export function registerSecurityHooks(
       const llmNodeId = lastLlmNodeBySession.get(sessionKey);
       const toolCalls: Array<{ name: string }> = event.toolCalls ?? [];
 
+      const agentId = sessionAgentMap.get(sessionKey);
+      const effectiveToolTaints = getResolvedToolTaints(agentId);
+
       for (const tc of toolCalls) {
         graph.recordToolCall(
           tc.name,
           event.iteration ?? 0,
           llmNodeId,
-          resolvedToolTaints,
+          effectiveToolTaints,
         );
       }
 
       const sk = shortKey(sessionKey);
       const toolDescriptions = toolCalls.map((tc: any) => {
-        const trust = getToolTrust(tc.name, resolvedToolTaints);
+        const trust = getToolTrust(tc.name, effectiveToolTaints);
         return `${tc.name}(${trust})`;
       });
       logger.info(
