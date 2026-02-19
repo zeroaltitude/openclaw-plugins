@@ -134,7 +134,8 @@ function classifyInitialTrust(
  * Check if the current session is an owner DM (for message tool exception).
  */
 function isOwnerDm(ctx: AgentContext): boolean {
-  return ctx.senderIsOwner === true && !ctx.groupId;
+  // Owner DM: direct owner session, or sub-agent spawned by owner (no group context)
+  return (ctx.senderIsOwner === true || !!ctx.spawnedBy) && !ctx.groupId;
 }
 
 /**
