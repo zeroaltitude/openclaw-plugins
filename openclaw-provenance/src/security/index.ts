@@ -183,18 +183,31 @@ function truncate(s: string, max: number): string {
 
 /**
  * Wrap a hook handler in try/catch for fail-open behavior.
+ * When profiling is enabled, logs execution time for hooks > 1ms.
  */
 function failOpen<T extends (...args: any[]) => any>(
   hookName: string,
-  logger: { error(...args: any[]): void },
+  logger: { error(...args: any[]): void; info?(...args: any[]): void },
   handler: T,
+  profile = false,
 ): T {
   return ((...args: any[]) => {
+    const t0 = profile ? performance.now() : 0;
     try {
-      return handler(...args);
+      const result = handler(...args);
+      if (profile) {
+        const ms = performance.now() - t0;
+        if (ms > 1) {
+          (logger as any).info?.(
+            `[provenance] ⏱ ${hookName}: ${ms.toFixed(1)}ms`,
+          );
+        }
+      }
+      return result;
     } catch (err) {
+      const ms = profile ? performance.now() - t0 : -1;
       logger.error(
-        `[provenance] FAIL-OPEN: Error in ${hookName} hook — agent continues without taint tracking`,
+        `[provenance] FAIL-OPEN: Error in ${hookName} hook${ms >= 0 ? ` after ${ms.toFixed(1)}ms` : ""} — agent continues without taint tracking`,
         err,
       );
       return undefined;
@@ -340,6 +353,12 @@ export function registerSecurityHooks(
   const lastImpactedToolBySession = new Map<string, string>();
   const sessionAgentMap = new Map<string, string>();
 
+  /** Shorthand: failOpen with profiling enabled when verbose is on */
+  const profiled = <T extends (...args: any[]) => any>(
+    hookName: string,
+    handler: T,
+  ) => failOpen(hookName, logger, handler, verbose);
+
   // --- before_agent_start ---
   // NOTE: Watermark clearing for fresh sessions is handled in context_assembled,
   // which has access to the real messageCount. The before_agent_start event's
@@ -351,7 +370,7 @@ export function registerSecurityHooks(
   // --- context_assembled ---
   api.on(
     "context_assembled",
-    failOpen("context_assembled", logger, (event: any, ctx: AgentContext) => {
+    profiled("context_assembled", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       const graph = store.startTurn(sessionKey);
@@ -423,7 +442,7 @@ export function registerSecurityHooks(
   // --- before_llm_call ---
   api.on(
     "before_llm_call",
-    failOpen("before_llm_call", logger, (event: any, ctx: AgentContext) => {
+    profiled("before_llm_call", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       const graph = store.getActive(sessionKey);
       if (!graph) return;
@@ -635,7 +654,7 @@ export function registerSecurityHooks(
   // --- before_tool_call --- (EXECUTION-LAYER ENFORCEMENT)
   api.on(
     "before_tool_call",
-    failOpen("before_tool_call", logger, (event: any, ctx: AgentContext) => {
+    profiled("before_tool_call", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       const sk = shortKey(sessionKey);
       const graph = store.getActive(sessionKey);
@@ -730,7 +749,7 @@ export function registerSecurityHooks(
   // --- after_llm_call ---
   api.on(
     "after_llm_call",
-    failOpen("after_llm_call", logger, (event: any, ctx: AgentContext) => {
+    profiled("after_llm_call", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       const graph = store.getActive(sessionKey);
       if (!graph) return;
@@ -770,9 +789,8 @@ export function registerSecurityHooks(
   // --- loop_iteration_start ---
   api.on(
     "loop_iteration_start",
-    failOpen(
+    profiled(
       "loop_iteration_start",
-      logger,
       (event: any, _ctx: AgentContext) => {
         if (verbose) {
           logger.info(
@@ -786,9 +804,8 @@ export function registerSecurityHooks(
   // --- loop_iteration_end ---
   api.on(
     "loop_iteration_end",
-    failOpen(
+    profiled(
       "loop_iteration_end",
-      logger,
       (event: any, ctx: AgentContext) => {
         const sessionKey = ctx.sessionKey ?? "unknown";
         const graph = store.getActive(sessionKey);
@@ -813,9 +830,8 @@ export function registerSecurityHooks(
   // --- before_response_emit ---
   api.on(
     "before_response_emit",
-    failOpen(
+    profiled(
       "before_response_emit",
-      logger,
       (event: any, ctx: AgentContext) => {
         const sessionKey = ctx.sessionKey ?? "unknown";
         const graph = store.getActive(sessionKey);
