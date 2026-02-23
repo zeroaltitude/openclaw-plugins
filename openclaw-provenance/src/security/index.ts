@@ -564,7 +564,7 @@ export function registerSecurityHooks(
 
       // Latency tracking: log time from context_assembled to first LLM call
       const iteration = event.iteration ?? 0;
-      if (iteration === 0) {
+      if (iteration <= 1 && turnStartTimes.has(sessionKey)) {
         const turnT0 = turnStartTimes.get(sessionKey);
         if (turnT0 !== undefined) {
           const latencyMs = performance.now() - turnT0;
