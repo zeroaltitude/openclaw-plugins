@@ -341,24 +341,12 @@ export function registerSecurityHooks(
   const sessionAgentMap = new Map<string, string>();
 
   // --- before_agent_start ---
-  api.on(
-    "before_agent_start",
-    failOpen("before_agent_start", logger, (event: any, ctx: AgentContext) => {
-      const sessionKey = ctx.sessionKey ?? "unknown";
-      const messages: unknown[] = event.messages ?? [];
-      // Fresh session: clear watermark
-      if (messages.length <= 1) {
-        const cleared = watermarkStore.clearWithAudit(sessionKey);
-        if (cleared) {
-          const sk = shortKey(sessionKey);
-          logger.info(
-            `[provenance:${sk}] 🔄 Watermark cleared on fresh session start (was: ${cleared.level}, reason: ${cleared.reason})`,
-          );
-          watermarkStore.flush();
-        }
-      }
-    }),
-  );
+  // NOTE: Watermark clearing for fresh sessions is handled in context_assembled,
+  // which has access to the real messageCount. The before_agent_start event's
+  // event.messages may only contain the triggering message (not full history),
+  // so using it to detect "fresh session" caused watermarks to be cleared on
+  // every turn — completely defeating cross-turn taint persistence.
+  // See: fix/watermark-clearing-on-every-turn
 
   // --- context_assembled ---
   api.on(
@@ -367,6 +355,21 @@ export function registerSecurityHooks(
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       const graph = store.startTurn(sessionKey);
+
+      // Fresh session detection: clear watermark only when messageCount <= 1
+      // (context_assembled has the real assembled message count, unlike
+      // before_agent_start which may only have the triggering message)
+      const messageCount = event.messageCount ?? 0;
+      if (messageCount <= 1) {
+        const cleared = watermarkStore.clearWithAudit(sessionKey);
+        if (cleared) {
+          const sk = shortKey(sessionKey);
+          logger.info(
+            `[provenance:${sk}] 🔄 Watermark cleared on fresh session (messageCount: ${messageCount}, was: ${cleared.level}, reason: ${cleared.reason})`,
+          );
+          watermarkStore.flush();
+        }
+      }
 
       const initialTrust = classifyInitialTrust(ctx, trustedSenderIds);
 
