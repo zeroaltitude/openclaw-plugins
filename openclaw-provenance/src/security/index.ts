@@ -365,15 +365,9 @@ export function registerSecurityHooks(
   const turnStartTimes = new Map<string, number>();
 
   // --- before_agent_start ---
-  // Watermark clearing moved to context_assembled (see fix/watermark-clearing-on-every-turn).
-  // This hook now only records the turn start timestamp for latency tracking.
-  api.on(
-    "before_agent_start",
-    profiled("before_agent_start", (_event: any, ctx: AgentContext) => {
-      const sessionKey = ctx.sessionKey ?? "unknown";
-      turnStartTimes.set(sessionKey, performance.now());
-    }),
-  );
+  // NOTE: This hook may not fire on all OpenClaw versions. Watermark clearing
+  // is in context_assembled. Latency tracking now also uses context_assembled
+  // as the baseline since before_agent_start is unreliable.
 
   // --- context_assembled ---
   api.on(
@@ -381,6 +375,7 @@ export function registerSecurityHooks(
     profiled("context_assembled", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
+      turnStartTimes.set(sessionKey, performance.now());
       const graph = store.startTurn(sessionKey);
 
       // Fresh session detection: clear watermark only when messageCount <= 1
@@ -567,14 +562,14 @@ export function registerSecurityHooks(
         }
       }
 
-      // Latency tracking: log time from turn start to first LLM call
+      // Latency tracking: log time from context_assembled to first LLM call
       const iteration = event.iteration ?? 0;
       if (iteration === 0) {
         const turnT0 = turnStartTimes.get(sessionKey);
         if (turnT0 !== undefined) {
           const latencyMs = performance.now() - turnT0;
           logger.info(
-            `[provenance:${sk}] ⏱ turn→first_llm_call: ${latencyMs.toFixed(0)}ms (hooks + context assembly)`,
+            `[provenance:${sk}] ⏱ ctx_assembled→first_llm: ${latencyMs.toFixed(0)}ms`,
           );
           turnStartTimes.delete(sessionKey);
         }
