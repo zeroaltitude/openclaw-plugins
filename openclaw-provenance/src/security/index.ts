@@ -359,13 +359,21 @@ export function registerSecurityHooks(
     handler: T,
   ) => failOpen(hookName, logger, handler, verbose);
 
+  // --- Latency tracking ---
+  // Tracks wall-clock time from the earliest hook (before_agent_start) through
+  // the processing pipeline to help diagnose message-to-typing-indicator latency.
+  const turnStartTimes = new Map<string, number>();
+
   // --- before_agent_start ---
-  // NOTE: Watermark clearing for fresh sessions is handled in context_assembled,
-  // which has access to the real messageCount. The before_agent_start event's
-  // event.messages may only contain the triggering message (not full history),
-  // so using it to detect "fresh session" caused watermarks to be cleared on
-  // every turn — completely defeating cross-turn taint persistence.
-  // See: fix/watermark-clearing-on-every-turn
+  // Watermark clearing moved to context_assembled (see fix/watermark-clearing-on-every-turn).
+  // This hook now only records the turn start timestamp for latency tracking.
+  api.on(
+    "before_agent_start",
+    profiled("before_agent_start", (_event: any, ctx: AgentContext) => {
+      const sessionKey = ctx.sessionKey ?? "unknown";
+      turnStartTimes.set(sessionKey, performance.now());
+    }),
+  );
 
   // --- context_assembled ---
   api.on(
@@ -556,6 +564,19 @@ export function registerSecurityHooks(
           logger.warn(
             `[provenance:${sk}] 🚫 Non-owner attempted security command (senderId: ${ctx.senderId ?? "unknown"})`,
           );
+        }
+      }
+
+      // Latency tracking: log time from turn start to first LLM call
+      const iteration = event.iteration ?? 0;
+      if (iteration === 0) {
+        const turnT0 = turnStartTimes.get(sessionKey);
+        if (turnT0 !== undefined) {
+          const latencyMs = performance.now() - turnT0;
+          logger.info(
+            `[provenance:${sk}] ⏱ turn→first_llm_call: ${latencyMs.toFixed(0)}ms (hooks + context assembly)`,
+          );
+          turnStartTimes.delete(sessionKey);
         }
       }
 
