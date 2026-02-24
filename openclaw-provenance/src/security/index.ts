@@ -156,7 +156,11 @@ function classifyInitialTrust(
     return "external";
   }
 
-  return "untrusted";
+  // No senderId at all — this is a system-internal injection (sub-agent
+  // announce, cron delivery, exec completion notification, etc.).
+  // Real channel messages always carry a senderId, so missing senderId
+  // means the gateway injected this message internally → trusted.
+  return "trusted";
 }
 
 /**
