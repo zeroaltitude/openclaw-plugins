@@ -95,6 +95,12 @@
           }
         }
       },
+      "missingIdentityTrust": {
+        "type": "string",
+        "description": "Trust level assigned when sender identity is missing or unrecognized. Defaults to 'shared'.",
+        "enum": ["trusted", "shared", "external", "untrusted"],
+        "default": "shared"
+      },
       "uriTrust": {
         "type": "object",
         "description": "URI pattern-to-trust-level overrides. Keys are glob-like URI patterns (e.g. 'slack://C0ACUTPFSJ3/**'), values are trust levels. Most-specific pattern wins. Merged with built-in defaults.",
