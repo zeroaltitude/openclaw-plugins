@@ -271,8 +271,8 @@ export function registerSecurityHooks(
   // Build composite tools, URI extractors, and URI trust config
   const compositeTools = buildCompositeToolMap(config?.compositeTools);
   const uriExtractors = buildUriExtractorMap(config?.uriExtractors);
-  const defaultUriTrustConfig = buildUriTrustConfig(config?.uriTrust, workspaceDir);
   const workspaceDir = config?.workspaceDir ?? process.cwd();
+  const defaultUriTrustConfig = buildUriTrustConfig(config?.uriTrust, workspaceDir);
   const trustedSenderIds = new Set(config?.trustedSenderIds ?? []);
 
   const watermarkStore = new WatermarkStore(workspaceDir);

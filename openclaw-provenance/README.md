@@ -119,6 +119,137 @@ The resolved taint map is logged at startup when overrides are present:
 [provenance] Tool output taint overrides: {"web_fetch":"external","web_search":"external"}
 ```
 
+### Composite Tool Keys
+
+Some tools bundle many unrelated operations under one name. `message(action=send)` is a safe output that introduces no data into context. `message(action=search)` pulls arbitrary external content in. They have fundamentally different risk profiles.
+
+The plugin resolves tool calls into **composite keys** like `message.send`, `browser.navigate` by inspecting a declared action parameter. Both `toolOutputTaints` and `toolOverrides` support composite keys with fallback to the bare tool name.
+
+#### Built-in Composites (No Config Required)
+
+The plugin ships with composite definitions for `message` and `browser`:
+
+| Composite Key | Output Taint | Rationale |
+|--------------|-------------|-----------|
+| `message.send` | `trusted` | Output-only — doesn't incorporate external data |
+| `message.react` | `trusted` | Output-only |
+| `message.read` | `external` | Reads channel messages into context |
+| `message.search` | `external` | Searches channel messages |
+| `message.channel-info` | `shared` | Metadata, not message content |
+| `browser.navigate` | `untrusted` | Reads external web content |
+| `browser.act` | `trusted` | Action-only, no data read |
+| `browser.snapshot` | `untrusted` | Captures external page content |
+| `browser.status` | `shared` | Browser metadata |
+
+`message.send` and `message.react` also get execution policy `allow` at all taint levels — the agent must always be able to reply and react, even in a tainted session.
+
+#### Custom Composite Tools
+
+For plugin-provided or custom tools, declare the action parameter in config:
+
+```json
+{
+  "compositeTools": {
+    "my_custom_tool": { "actionParam": "operation" }
+  }
+}
+```
+
+The lookup chain for any tool call: composite key → bare tool name → `untrusted` default.
+
+### URI Source Tracking
+
+Every tool call that introduces data has an identifiable source address (URI). The plugin extracts and tracks these URIs in the provenance graph:
+
+| Tool | Example URI |
+|------|------------|
+| `web_fetch` | `https://github.com/owner/repo` |
+| `Read` | `file:///home/user/.openclaw/workspace/SOUL.md` |
+| `message.read` | `slack://C0ACUTPFSJ3/read` |
+| `browser.navigate` | `https://docs.example.com/page` |
+| `vestige_search` | `vestige://user preferences` |
+
+URIs are normalized (absolute paths get `file://`, bare values get their tool's default scheme). The extracted URIs are stored on each `GraphNode` and propagated to the watermark's `UriTaintRecord` audit trail.
+
+#### URI Extraction Config
+
+Built-in extractors cover all known OpenClaw tools. For custom tools, declare which parameters contain URIs:
+
+```json
+{
+  "uriExtractors": {
+    "my_api_tool": {
+      "params": ["target"],
+      "scheme": "https"
+    }
+  }
+}
+```
+
+### URI Trust Classification
+
+URIs are classified into trust levels using glob-like pattern matching. This provides **fine-grained trust** beyond the tool-level default.
+
+**Default/Override Model:** Tool trust is the sensible default for the average case. URI trust overrides it in either direction — can elevate (github.com → trusted) or restrict (known-bad-site → untrusted). No URI match → tool default stands.
+
+#### Built-in URI Trust Defaults
+
+| URI Pattern | Default Trust | Rationale |
+|------------|--------------|-----------|
+| `file://<workspaceDir>/**` | `trusted` | Own workspace files |
+| `file:///**` | `shared` | Other local files |
+| `vestige://**`, `memory://**` | `shared` | Cross-agent memory |
+| `google://**` | `external` | Google Workspace |
+| `slack://**`, `discord://**` | `external` | Channel messages |
+| `exec://**` | `trusted` | Local commands |
+| `https://**`, `http://**` | `untrusted` | Unknown web |
+
+#### Config Overrides
+
+```json
+{
+  "uriTrust": {
+    "https://github.com/**": "trusted",
+    "https://api.github.com/**": "trusted",
+    "https://linear.app/**": "trusted",
+    "https://*.bighatbio.com/**": "trusted",
+    "slack://C0ACUTPFSJ3/**": "shared",
+    "discord://1467008598780678164/**": "trusted",
+    "https://**": "untrusted"
+  }
+}
+```
+
+#### Pattern Matching
+
+- `*` matches a single segment (no dots in domain, no slashes in path)
+- `**` matches any number of segments
+- **CSS-style specificity**: most specific pattern wins. `https://github.com/**` beats `https://**`
+
+#### Examples
+
+```
+web_fetch("https://github.com/bighat/repo")
+  → toolTrust: untrusted (web_fetch default)
+  → URI match: "https://github.com/**" → trusted
+  → effectiveTrust: trusted (URI overrides tool default)
+
+web_fetch("https://sketchy-site.com/inject")
+  → toolTrust: untrusted
+  → URI match: "https://**" → untrusted
+  → effectiveTrust: untrusted
+
+message.read(channel=slack, target=C0ACUTPFSJ3)
+  → URI: slack://C0ACUTPFSJ3/read
+  → URI match: "slack://C0ACUTPFSJ3/**" → shared
+  → effectiveTrust: shared (internal Slack channel)
+
+Read("/tmp/downloaded-file.json")
+  → toolTrust: trusted (Read default)
+  → URI match: "file:///tmp/**" → shared
+  → effectiveTrust: shared (URI overrides to less trusted)
+```
+
 ### Trust Levels
 
 Content is classified into four trust levels, ordered from most to least trusted:
@@ -395,12 +526,16 @@ A tool is "safe to call" when it has **no dangerous side effects** — it cannot
 
 The safe tool's response still taints the context via `recordToolCall()`. After a `web_fetch` completes, the turn's `maxTaint` escalates to `untrusted`, and subsequent iterations will restrict dangerous tools. The safe tool itself is never blocked — only tools called *after* its tainted response enters the context.
 
-### The `message` Tool: Owner DM Exception
+### The `message` Tool: Composite Keys and Owner DM Exception
 
-The `message` tool has a split personality:
+With composite tool keys, `message` is no longer a single tool with one trust classification:
 
-- **Sending to the owner in a 1:1 DM** (senderIsOwner=true, no groupId, or target is the owner): **Always allowed**, regardless of taint level. This is equivalent to the agent's normal response — just talking to its owner.
-- **Sending to a group channel or another user**: **Follows taint-level default** (confirm/restrict when tainted).
+- **`message.send`**: Output taint `trusted` (doesn't incorporate data), execution `allow` at all taint levels. The agent can always reply.
+- **`message.read`**: Output taint `external` (reads channel messages into context). Follows taint policy.
+- **`message.search`**: Output taint `external`. Follows taint policy.
+- **`message.channel-info`**: Output taint `shared` (metadata only). Follows taint policy.
+
+Additionally, when `senderIsOwner === true` in a DM (no groupId), message read actions are auto-classified as `trusted` — the owner's own messages are trusted content.
 
 The threat model for `message` is the agent being tricked into sending content *to other people* or *into public channels*. Talking to the owner in their own DM is not a risk — and if `message` gets restricted in a DM, the agent can't even report that something is wrong. That's a fail-closed trap.
 
@@ -567,13 +702,26 @@ The watermark is cleared in two scenarios:
 
 ### Watermark File Format
 
+Watermarks now include **URI taint records** — a full audit trail of which URIs contributed to the taint level, with decomposed trust (tool trust, URI trust, and effective trust):
+
 ```json
 {
   "version": 1,
   "watermarks": {
     "session:abc123": {
       "level": "untrusted",
-      "reason": "web_fetch response",
+      "reason": "web_fetch",
+      "uriTaintRecords": [
+        {
+          "uri": "https://sketchy-site.com/page",
+          "toolTrust": "untrusted",
+          "uriTrust": "untrusted",
+          "effectiveTrust": "untrusted",
+          "tool": "web_fetch",
+          "firstSeenAt": "2026-02-10T20:15:00.000Z",
+          "turnId": "turn-1707595200000-abc123"
+        }
+      ],
       "escalatedAt": "2026-02-10T20:15:00.000Z",
       "escalatedBy": "web_fetch",
       "lastImpactedTool": "exec",
@@ -582,6 +730,11 @@ The watermark is cleared in two scenarios:
   }
 }
 ```
+
+The `uriTaintRecords` array accumulates across turns. Each record preserves:
+- **`toolTrust`**: what the tool/composite key classification said
+- **`uriTrust`**: what URI pattern classification said (if matched)
+- **`effectiveTrust`**: the final trust level used (URI overrides tool default)
 
 The file is stored at `<workspaceDir>/.provenance/watermarks.json` and is created automatically on first use.
 
@@ -595,9 +748,11 @@ Here's what I found...
 ```
 
 ```
-🔴 [taint: untrusted | reason: web_fetch response | last impacted: exec]
+🔴 [taint: untrusted | reason: web_fetch | last impacted: exec | sources: web_fetch(https://sketchy-site.com/page)]
 I can see the page content, but exec is currently blocked.
 ```
+
+When URI source tracking is active, the header includes the specific URIs that contributed to taint escalation (up to 3), making it immediately actionable — you can see *which* URL caused the restriction.
 
 The taint emoji indicates severity:
 - 🟢 `trusted` — no restrictions
@@ -687,7 +842,10 @@ A deprecation warning is logged when old-format configs are detected. Old `toolO
 | `maxIterations` | number | `10` | Max agent loop iterations |
 | `developerMode` | boolean | `false` | Prepend taint header to outbound messages (debugging) |
 | `workspaceDir` | string | `process.cwd()` | Directory for persistent state (`.provenance/`) |
-| `toolOutputTaints` | object | `{}` | Per-tool output taint overrides. Key = tool name, value = trust level. Merged with built-in defaults. |
+| `toolOutputTaints` | object | `{}` | Per-tool output taint overrides. Key = tool name or composite key (e.g., `message.search`), value = trust level. Merged with built-in defaults. |
+| `compositeTools` | object | `{}` | Custom composite tool definitions. Key = tool name, value = `{ actionParam: string }`. Built-in defaults for `message` and `browser` are automatic. |
+| `uriExtractors` | object | `{}` | Custom URI extractor configs. Key = tool name or composite key, value = `{ params: string[], scheme?: string, schemeMap?: object }`. Built-in defaults for known tools are automatic. |
+| `uriTrust` | object | `{}` | URI trust patterns. Key = glob pattern (e.g., `https://github.com/**`), value = trust level. Merged with built-in defaults. Most specific pattern wins. |
 
 ### Example Configurations
 
@@ -719,6 +877,46 @@ A deprecation warning is logged when old-format configs are detected. Old `toolO
   "taintPolicy": {
     "external": "confirm",
     "untrusted": "restrict"
+  }
+}
+```
+
+**Per-Agent Overrides with URI Trust** — different agents, different trust boundaries:
+```json
+{
+  "agentOverrides": {
+    "tank": {
+      "taintPolicy": {
+        "shared": "allow",
+        "external": "allow",
+        "untrusted": "confirm"
+      },
+      "toolOutputTaints": {
+        "web_search": "trusted",
+        "web_fetch": "trusted",
+        "message": "trusted"
+      },
+      "uriTrust": {
+        "slack://**": "trusted",
+        "https://api.github.com/**": "trusted"
+      }
+    }
+  }
+}
+```
+
+**Full URI Trust Configuration** — fine-grained control over data sources:
+```json
+{
+  "uriTrust": {
+    "https://github.com/**": "trusted",
+    "https://api.github.com/**": "trusted",
+    "https://linear.app/**": "trusted",
+    "https://*.bighatbio.com/**": "trusted",
+    "https://*.slack.com/**": "shared",
+    "slack://C0ACUTPFSJ3/**": "shared",
+    "discord://1467008598780678164/**": "trusted",
+    "https://**": "untrusted"
   }
 }
 ```
@@ -799,14 +997,17 @@ openclaw-provenance/
 └── src/
     ├── index.ts             # Plugin entry point (register function)
     └── security/
-        ├── index.ts         # Hook registration, enforcement logic, fail-open wrappers
-        ├── policy-engine.ts # Policy evaluation, approval integration
-        ├── approval-store.ts # Owner-verified approval state management
-        ├── provenance-graph.ts # Per-turn DAG construction
-        ├── trust-levels.ts  # 4-level trust definitions and tool classification
-        ├── watermark-store.ts # Persistent session taint watermarks (disk-backed)
+        ├── index.ts             # Hook registration, enforcement logic, fail-open wrappers
+        ├── policy-engine.ts     # Policy evaluation, approval integration
+        ├── approval-store.ts    # Owner-verified approval state management
+        ├── provenance-graph.ts  # Per-turn DAG construction
+        ├── trust-levels.ts      # 4-level trust definitions and tool classification
+        ├── composite-tools.ts   # Composite tool key resolution (message.send, browser.navigate)
+        ├── uri-extractor.ts     # Config-driven URI extraction from tool parameters
+        ├── uri-trust.ts         # URI pattern matching and trust classification
+        ├── watermark-store.ts   # Persistent session taint watermarks (disk-backed, URI-aware)
         ├── blocked-write-store.ts # Persists blocked memory file writes to disk
-        ├── SECURITY.md      # Internal security documentation
+        ├── SECURITY.md          # Internal security documentation
         └── __tests__/
             └── policy-engine.test.ts  # Tests covering all components
 ```
