@@ -26,11 +26,31 @@ import {
   getToolTrust,
   buildToolOutputTaintMap,
   TRUST_ORDER,
+  minTrust,
 } from "./trust-levels.js";
 import type { TrustLevel } from "./trust-levels.js";
 import { ApprovalStore } from "./approval-store.js";
 import { isMemoryFile } from "./memory-file-detector.js";
 import { basename } from "node:path";
+import {
+  resolveToolKey,
+  buildCompositeToolMap,
+  DEFAULT_COMPOSITE_OUTPUT_TAINTS,
+  DEFAULT_COMPOSITE_TOOL_OVERRIDES,
+  type CompositeToolConfig,
+} from "./composite-tools.js";
+import {
+  extractToolSourceUris,
+  buildUriExtractorMap,
+  type UriExtractorConfig,
+} from "./uri-extractor.js";
+import {
+  buildUriTrustConfig,
+  classifyUri,
+  classifyUris,
+  type UriTrustConfig,
+} from "./uri-trust.js";
+import type { UriTaintRecord } from "./watermark-store.js";
 
 // Types matching OpenClaw's hook system
 interface HookApi {
@@ -63,6 +83,8 @@ export interface AgentPolicyOverride {
   taintPolicy?: Partial<Record<string, PolicyMode>>;
   toolOverrides?: Record<string, ToolOverride>;
   toolOutputTaints?: Record<string, TrustLevel>;
+  /** Per-agent URI trust pattern overrides */
+  uriTrust?: Record<string, TrustLevel>;
 }
 
 export interface SecurityPluginConfig {
@@ -79,6 +101,12 @@ export interface SecurityPluginConfig {
   trustedSenderIds?: string[];
   /** Per-agent policy overrides keyed by agent ID */
   agentOverrides?: Record<string, AgentPolicyOverride>;
+  /** Custom composite tool definitions (built-ins for message/browser are automatic) */
+  compositeTools?: Record<string, CompositeToolConfig>;
+  /** Custom URI extractor configs for plugin tools */
+  uriExtractors?: Record<string, UriExtractorConfig>;
+  /** URI trust patterns — glob-like URI → trust level mappings */
+  uriTrust?: Record<string, TrustLevel>;
 }
 
 /** Get a short session key for log prefixes */
@@ -231,9 +259,19 @@ export function registerSecurityHooks(
   const approvalStore = new ApprovalStore();
   const toolOutputTaintOverrides =
     config?.toolOutputTaints ?? config?.toolTrustOverrides;
-  const resolvedToolTaints = buildToolOutputTaintMap(toolOutputTaintOverrides);
+  // Merge composite output taints into tool output taints
+  const mergedToolOutputTaintOverrides = {
+    ...DEFAULT_COMPOSITE_OUTPUT_TAINTS,
+    ...(toolOutputTaintOverrides ?? {}),
+  };
+  const resolvedToolTaints = buildToolOutputTaintMap(mergedToolOutputTaintOverrides);
   const verbose = config?.verbose ?? false;
   const developerMode = config?.developerMode ?? false;
+
+  // Build composite tools, URI extractors, and URI trust config
+  const compositeTools = buildCompositeToolMap(config?.compositeTools);
+  const uriExtractors = buildUriExtractorMap(config?.uriExtractors);
+  const defaultUriTrustConfig = buildUriTrustConfig(config?.uriTrust, workspaceDir);
   const workspaceDir = config?.workspaceDir ?? process.cwd();
   const trustedSenderIds = new Set(config?.trustedSenderIds ?? []);
 
@@ -247,17 +285,23 @@ export function registerSecurityHooks(
     `[provenance] Blocked write store: ${workspaceDir}/.provenance/blocked-writes/`,
   );
 
+  // Merge composite tool overrides with user-provided tool overrides
+  const mergedToolOverridesForPolicy = {
+    ...DEFAULT_COMPOSITE_TOOL_OVERRIDES,
+    ...(config?.toolOverrides ?? {}),
+  };
   const defaultPolicyConfig = buildPolicyConfig(
     config?.taintPolicy as any,
-    config?.toolOverrides,
+    mergedToolOverridesForPolicy,
     config?.maxIterations,
     logger,
   );
 
-  // Build per-agent policy configs and tool taint maps
+  // Build per-agent policy configs, tool taint maps, and URI trust configs
   const agentOverrides = config?.agentOverrides ?? {};
   const agentPolicyConfigs = new Map<string, PolicyConfig>();
   const agentToolTaints = new Map<string, Record<string, TrustLevel>>();
+  const agentUriTrustConfigs = new Map<string, UriTrustConfig>();
 
   for (const [agentId, overrides] of Object.entries(agentOverrides)) {
     // Merge taint policy: agent overrides on top of defaults
@@ -265,8 +309,9 @@ export function registerSecurityHooks(
       ...(config?.taintPolicy as Partial<Record<string, PolicyMode>> ?? {}),
       ...(overrides.taintPolicy ?? {}),
     };
-    // Merge tool overrides: agent overrides on top of defaults
+    // Merge tool overrides: agent overrides on top of defaults (include composite defaults)
     const mergedToolOverrides = {
+      ...DEFAULT_COMPOSITE_TOOL_OVERRIDES,
       ...(config?.toolOverrides ?? {}),
       ...(overrides.toolOverrides ?? {}),
     };
@@ -275,13 +320,26 @@ export function registerSecurityHooks(
       buildPolicyConfig(mergedTaintPolicy as any, mergedToolOverrides, config?.maxIterations, logger),
     );
 
-    // Merge tool output taints: agent overrides on top of defaults
+    // Merge tool output taints: agent overrides on top of defaults (include composite)
     if (overrides.toolOutputTaints) {
       const mergedOutputTaints = {
+        ...DEFAULT_COMPOSITE_OUTPUT_TAINTS,
         ...(toolOutputTaintOverrides ?? {}),
         ...overrides.toolOutputTaints,
       };
       agentToolTaints.set(agentId, mergedOutputTaints);
+    }
+
+    // Per-agent URI trust (Phase 4): agent patterns overlay default patterns
+    if (overrides.uriTrust) {
+      const mergedUriTrust = {
+        ...(config?.uriTrust ?? {}),
+        ...overrides.uriTrust,
+      };
+      agentUriTrustConfigs.set(
+        agentId,
+        buildUriTrustConfig(mergedUriTrust, workspaceDir),
+      );
     }
 
     logger.info(`[provenance] Agent override loaded for '${agentId}':`);
@@ -293,6 +351,9 @@ export function registerSecurityHooks(
     }
     if (overrides.toolOutputTaints) {
       logger.info(`[provenance]   Tool output taints: ${JSON.stringify(overrides.toolOutputTaints)}`);
+    }
+    if (overrides.uriTrust) {
+      logger.info(`[provenance]   URI trust patterns: ${Object.keys(overrides.uriTrust).length} patterns`);
     }
   }
 
@@ -310,6 +371,14 @@ export function registerSecurityHooks(
       return buildToolOutputTaintMap(agentToolTaints.get(agentId));
     }
     return resolvedToolTaints;
+  }
+
+  /** Resolve the effective URI trust config for a given agent */
+  function getUriTrustConfig(agentId?: string): UriTrustConfig {
+    if (agentId && agentUriTrustConfigs.has(agentId)) {
+      return agentUriTrustConfigs.get(agentId)!;
+    }
+    return defaultUriTrustConfig;
   }
 
   // Log policy config at startup
@@ -346,6 +415,12 @@ export function registerSecurityHooks(
       `[provenance]   Agent overrides: ${Object.keys(agentOverrides).join(", ")}`,
     );
   }
+  logger.info(
+    `[provenance]   Composite tools: ${Object.keys(compositeTools).join(", ")}`,
+  );
+  logger.info(
+    `[provenance]   URI trust patterns: ${defaultUriTrustConfig.patterns.length} (${config?.uriTrust ? Object.keys(config.uriTrust).length + " user + " : ""}built-in defaults)`,
+  );
 
   // Per-session state
   const lastLlmNodeBySession = new Map<string, string>();
@@ -730,10 +805,32 @@ export function registerSecurityHooks(
         }
       }
 
+      // Resolve composite key for policy checks
+      const params = event.params ?? {};
+      const toolKey = resolveToolKey(toolName, params, compositeTools);
+      const toolKeyLower = toolKey.toLowerCase();
+
       // Message tool: owner DM exception
       if (toolNameLower === "message" && isOwnerDm(ctx)) {
         // Always allow message in owner DMs regardless of taint
         return undefined;
+      }
+
+      // Composite key policy check: if the composite key has an explicit
+      // "allow" override at the current taint level, let it through even
+      // if the bare tool is blocked (e.g., message.send is always allowed)
+      if (graph && toolKey !== toolName) {
+        const agentId = sessionAgentMap.get(sessionKey);
+        const effectivePolicyConfig = getPolicyConfig(agentId);
+        const compositeOverride =
+          effectivePolicyConfig.toolOverrides[toolKeyLower];
+        if (compositeOverride) {
+          const mode =
+            compositeOverride[graph.maxTaint] ?? compositeOverride["*"];
+          if (mode === "allow") {
+            return undefined; // Composite key explicitly allowed
+          }
+        }
       }
 
       // Existing blocked tool check
@@ -741,7 +838,9 @@ export function registerSecurityHooks(
       if (!blocked || blocked.size === 0) return undefined;
 
       const isBlocked = Array.from(blocked).some(
-        (b) => b.toLowerCase() === toolNameLower,
+        (b) =>
+          b.toLowerCase() === toolNameLower ||
+          b.toLowerCase() === toolKeyLower,
       );
       if (isBlocked) {
         const blockedList = Array.from(blocked).join(", ");
@@ -771,24 +870,67 @@ export function registerSecurityHooks(
       if (!graph) return;
 
       const llmNodeId = lastLlmNodeBySession.get(sessionKey);
-      const toolCalls: Array<{ name: string }> = event.toolCalls ?? [];
+      const toolCalls: Array<{ name: string; params?: Record<string, unknown> }> =
+        event.toolCalls ?? [];
 
       const agentId = sessionAgentMap.get(sessionKey);
       const effectiveToolTaints = getResolvedToolTaints(agentId);
+      const effectiveUriTrustConfig = getUriTrustConfig(agentId);
+
+      // Owner DM detection for message trust exception
+      const ownerDm = isOwnerDm(ctx);
 
       for (const tc of toolCalls) {
-        graph.recordToolCall(
+        const params = tc.params ?? {};
+        // Resolve composite key (e.g., message.send, browser.navigate)
+        const toolKey = resolveToolKey(tc.name, params, compositeTools);
+
+        // Extract source URIs
+        const sourceUris = extractToolSourceUris(
+          toolKey,
           tc.name,
+          params,
+          uriExtractors,
+        );
+
+        // Compute tool trust using composite key
+        const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+
+        // Compute URI trust (overrides tool trust if matched)
+        let effectiveTrust = toolTrust;
+        if (sourceUris.length > 0) {
+          const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
+          if (uriTrust !== undefined) {
+            effectiveTrust = uriTrust;
+          }
+        }
+
+        // Owner DM exception: message read actions from owner are trusted
+        if (ownerDm && toolKey.startsWith("message.") && effectiveTrust !== "trusted") {
+          effectiveTrust = "trusted";
+        }
+
+        graph.recordToolCall(
+          toolKey, // Use composite key as the tool name in the graph
           event.iteration ?? 0,
           llmNodeId,
           effectiveToolTaints,
+          { sourceUris, effectiveTrust },
         );
       }
 
       const sk = shortKey(sessionKey);
       const toolDescriptions = toolCalls.map((tc: any) => {
-        const trust = getToolTrust(tc.name, effectiveToolTaints);
-        return `${tc.name}(${trust})`;
+        const params = tc.params ?? {};
+        const toolKey = resolveToolKey(tc.name, params, compositeTools);
+        const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+        const sourceUris = extractToolSourceUris(toolKey, tc.name, params, uriExtractors);
+        if (sourceUris.length > 0) {
+          const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
+          const effective = uriTrust ?? toolTrust;
+          return `${toolKey}(${effective}${uriTrust ? ` uri:${sourceUris[0]}` : ""})`;
+        }
+        return `${toolKey}(${toolTrust})`;
       });
       logger.info(
         `[provenance:${sk}] ── LLM Response (iteration ${event.iteration ?? 0}) ──`,
@@ -868,13 +1010,40 @@ export function registerSecurityHooks(
         const summary = store.completeTurn(sessionKey);
         if (!summary) return;
 
-        // Persist watermark
+        // Collect URI taint records from the completed graph
+        const agentId = sessionAgentMap.get(sessionKey);
+        const effectiveToolTaints = getResolvedToolTaints(agentId);
+        const effectiveUriTrustConfig = getUriTrustConfig(agentId);
+        const uriTaintRecords: UriTaintRecord[] = graph
+          .getAllNodes()
+          .filter(
+            (n) => n.kind === "tool_call" && n.sourceUris?.length,
+          )
+          .flatMap((n) => {
+            const toolKey = n.tool!;
+            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+            return n.sourceUris!.map((uri) => {
+              const uriTrust = classifyUri(uri, effectiveUriTrustConfig);
+              return {
+                uri,
+                toolTrust,
+                uriTrust,
+                effectiveTrust: uriTrust ?? toolTrust,
+                tool: toolKey,
+                firstSeenAt: new Date(n.timestamp).toISOString(),
+                turnId: graph.turnId,
+              } satisfies UriTaintRecord;
+            });
+          });
+
+        // Persist watermark with URI taint records
         const wmReason = buildWatermarkReason(graph);
         watermarkStore.escalate(
           sessionKey,
           summary.maxTaint,
           wmReason,
           wmReason,
+          uriTaintRecords.length > 0 ? uriTaintRecords : undefined,
         );
         watermarkStore.flush();
 
@@ -911,7 +1080,13 @@ export function registerSecurityHooks(
                 : taintLevel === "external"
                   ? "🟠"
                   : "🔴";
-          const header = `${taintEmoji} [taint: ${taintLevel} | reason: ${taintReason} | last impacted: ${lastImpacted}]`;
+          // Include URI sources in header if available
+          const uriSummary = uriTaintRecords
+            .filter((r) => r.effectiveTrust !== "trusted")
+            .map((r) => `${r.tool}(${truncate(r.uri, 40)})`)
+            .slice(0, 3);
+          const uriPart = uriSummary.length > 0 ? ` | sources: ${uriSummary.join(", ")}` : "";
+          const header = `${taintEmoji} [taint: ${taintLevel} | reason: ${taintReason} | last impacted: ${lastImpacted}${uriPart}]`;
           return { content: header + "\n" + event.content };
         }
       },

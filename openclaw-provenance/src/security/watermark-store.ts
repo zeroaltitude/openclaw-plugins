@@ -17,9 +17,22 @@ import {
 import { dirname, join } from "node:path";
 import { type TrustLevel, TRUST_ORDER, minTrust } from "./trust-levels.js";
 
+/** Decomposed trust record for a single URI source */
+export interface UriTaintRecord {
+  uri: string;
+  toolTrust: TrustLevel;
+  uriTrust?: TrustLevel;
+  effectiveTrust: TrustLevel;
+  tool: string;
+  firstSeenAt: string;
+  turnId: string;
+}
+
 export interface WatermarkEntry {
   level: TrustLevel;
   reason: string;
+  /** URI-level taint records — audit trail for what caused taint */
+  uriTaintRecords?: UriTaintRecord[];
   escalatedAt: string; // ISO-8601 timestamp
   escalatedBy: string; // what caused the escalation
   lastImpactedTool?: string;
@@ -120,6 +133,7 @@ export class WatermarkStore {
     level: TrustLevel,
     reason: string,
     escalatedBy: string,
+    uriTaintRecords?: UriTaintRecord[],
   ): boolean {
     const existing = this.data.watermarks[sessionKey];
 
@@ -128,12 +142,28 @@ export class WatermarkStore {
       const existingIdx = TRUST_ORDER.indexOf(existing.level);
       const mergedIdx = TRUST_ORDER.indexOf(merged);
 
-      if (mergedIdx <= existingIdx) return false;
+      if (mergedIdx <= existingIdx) {
+        // Even if level didn't escalate, append new URI records
+        if (uriTaintRecords?.length) {
+          existing.uriTaintRecords = [
+            ...(existing.uriTaintRecords ?? []),
+            ...uriTaintRecords,
+          ];
+        }
+        this.scheduleSave();
+        return false;
+      }
 
       existing.level = merged;
       existing.reason = reason;
       existing.escalatedAt = new Date().toISOString();
       existing.escalatedBy = escalatedBy;
+      if (uriTaintRecords?.length) {
+        existing.uriTaintRecords = [
+          ...(existing.uriTaintRecords ?? []),
+          ...uriTaintRecords,
+        ];
+      }
     } else {
       // Only create watermark if taint is worse than trusted
       if (level === "trusted") return false;
@@ -141,6 +171,7 @@ export class WatermarkStore {
       this.data.watermarks[sessionKey] = {
         level,
         reason,
+        uriTaintRecords: uriTaintRecords?.length ? uriTaintRecords : undefined,
         escalatedAt: new Date().toISOString(),
         escalatedBy,
         resetHistory: [],

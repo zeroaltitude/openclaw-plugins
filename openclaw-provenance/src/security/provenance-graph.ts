@@ -26,6 +26,7 @@ export interface GraphNode {
     | "policy_decision";
   trust: TrustLevel;
   tool?: string;
+  sourceUris?: string[];
   iteration?: number;
   blocked?: boolean;
   blockReason?: string;
@@ -189,14 +190,21 @@ export class TurnProvenanceGraph {
     iteration: number,
     llmNodeId?: string,
     toolTrustOverrides?: Record<string, TrustLevel>,
+    opts?: {
+      sourceUris?: string[];
+      effectiveTrust?: TrustLevel;
+    },
   ): string {
-    const trust = getToolTrust(toolName, toolTrustOverrides);
+    const toolTrust = getToolTrust(toolName, toolTrustOverrides);
+    // URI trust overrides tool trust (default/override model)
+    const trust = opts?.effectiveTrust ?? toolTrust;
     const nodeId = this.nextNodeId("tool");
     this.addNode({
       id: nodeId,
       kind: "tool_call",
       trust,
       tool: toolName,
+      sourceUris: opts?.sourceUris?.length ? opts.sourceUris : undefined,
       iteration,
     });
     this._toolsUsed.push(toolName);
