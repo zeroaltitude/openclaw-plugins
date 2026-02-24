@@ -937,6 +937,14 @@ export function registerSecurityHooks(
         // Compute tool trust using composite key
         const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
 
+        // Diagnostic: log agent ID resolution for debugging multi-agent taint issues
+        if (developerMode) {
+          const sk = shortKey(sessionKey);
+          logger.info(
+            `[provenance:${sk}] 🔍 Tool trust resolution: agentId=${agentId ?? "NONE"} tool=${toolKey} toolTrust=${toolTrust} hasAgentOverride=${agentId ? agentToolTaints.has(agentId) : false}`,
+          );
+        }
+
         // Compute URI trust (overrides tool trust if matched)
         let effectiveTrust = toolTrust;
         if (sourceUris.length > 0) {

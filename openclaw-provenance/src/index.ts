@@ -52,6 +52,10 @@ export function register(api: PluginApi) {
     developerMode: (cfg.developerMode as boolean) ?? undefined,
     toolOutputTaints: (cfg.toolOutputTaints as any) ?? undefined,
     trustedSenderIds: (cfg.trustedSenderIds as string[]) ?? undefined,
+    agentOverrides: (cfg.agentOverrides as any) ?? undefined,
+    compositeTools: (cfg.compositeTools as any) ?? undefined,
+    uriExtractors: (cfg.uriExtractors as any) ?? undefined,
+    uriTrust: (cfg.uriTrust as any) ?? undefined,
     workspaceDir:
       (api.config as any)?.agents?.defaults?.workspace ??
       (api.config as any)?.agents?.workspace ??
