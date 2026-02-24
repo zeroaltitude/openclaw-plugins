@@ -427,6 +427,7 @@ export function registerSecurityHooks(
   const lastLlmNodeBySession = new Map<string, string>();
   const blockedToolsBySession = new Map<string, Set<string>>();
   const lastImpactedToolBySession = new Map<string, string>();
+  const lastProcessedMessageCount = new Map<string, number>();
   const sessionAgentMap = new Map<string, string>();
 
   /** Shorthand: failOpen with profiling enabled when verbose is on */
@@ -535,13 +536,22 @@ export function registerSecurityHooks(
       const sk = shortKey(sessionKey);
 
       // Process owner commands (.approve, .reset-trust)
+      // Track processed message indices to prevent repeated firing from conversation history.
       const isOwner = ctx.senderIsOwner === true;
       const messages = event.messages ?? [];
       const lastUserMsg = [...messages]
         .reverse()
         .find((m: any) => m.role === "user");
+      // Deduplicate: only process commands from NEW messages (not replayed history).
+      // Use message count as a proxy — if we've seen this message count before, skip command processing.
+      const messageCount = event.messageCount ?? messages.length;
+      const lastProcessedCount = lastProcessedMessageCount.get(sessionKey) ?? 0;
+      const isNewMessage = messageCount > lastProcessedCount;
+      if (messageCount > 0) {
+        lastProcessedMessageCount.set(sessionKey, messageCount);
+      }
 
-      if (lastUserMsg && isOwner) {
+      if (lastUserMsg && isOwner && isNewMessage) {
         const content =
           typeof lastUserMsg.content === "string"
             ? lastUserMsg.content
