@@ -18,6 +18,7 @@ import { BlockedWriteStore } from "./blocked-write-store.js";
 import {
   buildPolicyConfig,
   evaluateWithApprovals,
+  getToolMode,
   type PolicyConfig,
   type PolicyMode,
   type ToolOverride,
@@ -534,8 +535,7 @@ export function registerSecurityHooks(
       const sk = shortKey(sessionKey);
 
       // Process owner commands (.approve, .reset-trust)
-      const isOwner =
-        ctx.senderIsOwner !== undefined ? ctx.senderIsOwner : true;
+      const isOwner = ctx.senderIsOwner === true;
       const messages = event.messages ?? [];
       const lastUserMsg = [...messages]
         .reverse()
@@ -631,9 +631,15 @@ export function registerSecurityHooks(
           content.includes(".approve") ||
           content.includes(".reset-trust")
         ) {
-          logger.warn(
-            `[provenance:${sk}] 🚫 Non-owner attempted security command (senderId: ${ctx.senderId ?? "unknown"})`,
-          );
+          if (ctx.senderIsOwner === undefined) {
+            logger.error(
+              `[provenance:${sk}] 🚫 Security command IGNORED: senderIsOwner unavailable — extended security hooks required (senderId: ${ctx.senderId ?? "unknown"})`,
+            );
+          } else {
+            logger.warn(
+              `[provenance:${sk}] 🚫 Non-owner attempted security command (senderId: ${ctx.senderId ?? "unknown"})`,
+            );
+          }
         }
       }
 
@@ -833,7 +839,42 @@ export function registerSecurityHooks(
         }
       }
 
-      // Existing blocked tool check
+      // Real-time policy re-evaluation against current graph taint.
+      // This catches tools that were allowed at before_llm_call time but
+      // should be blocked now (e.g., parallel tool calls where an earlier
+      // tool in the same batch escalated taint via after_llm_call).
+      if (graph) {
+        const agentId = sessionAgentMap.get(sessionKey);
+        const effectivePolicyConfig = getPolicyConfig(agentId);
+        const mode = getToolMode(toolKeyLower, graph.maxTaint, effectivePolicyConfig);
+        if (mode === "restrict") {
+          logger.warn(
+            `[provenance:${sk}] 🛑 BLOCKED at execution layer (real-time re-eval): ${toolName} | taint: ${graph.maxTaint}`,
+          );
+          lastImpactedToolBySession.set(sessionKey, toolName);
+          return {
+            block: true,
+            blockReason:
+              `Tool '${toolName}' is restricted at taint level '${graph.maxTaint}'.\n` +
+              `Use .reset-trust to clear taint, or review the context.`,
+          };
+        }
+        if (mode === "confirm" && !approvalStore.isApproved(sessionKey, toolKeyLower)) {
+          logger.warn(
+            `[provenance:${sk}] 🛑 BLOCKED at execution layer (real-time re-eval, needs approval): ${toolName} | taint: ${graph.maxTaint}`,
+          );
+          lastImpactedToolBySession.set(sessionKey, toolName);
+          return {
+            block: true,
+            blockReason:
+              `Tool '${toolName}' requires approval at taint level '${graph.maxTaint}'.\n` +
+              `Approve: .approve ${toolName}  (or .approve all)\n` +
+              `Or use .reset-trust to clear all restrictions.`,
+          };
+        }
+      }
+
+      // Fallback: stale blocked tool check (defense in depth)
       const blocked = blockedToolsBySession.get(sessionKey);
       if (!blocked || blocked.size === 0) return undefined;
 

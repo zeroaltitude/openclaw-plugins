@@ -123,22 +123,44 @@ function calculateSpecificity(pattern: string): number {
  * - `**` matches any number of segments (including zero)
  */
 function compilePattern(pattern: string): RegExp {
-  // Escape regex special chars except * and /
-  let regex = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  // Split pattern at :// to handle domain and path contexts separately.
+  // In domain context (before first / after ://), * matches a single label (no dots).
+  // In path context, * matches a single segment (no slashes).
+  const schemeEnd = pattern.indexOf("://");
+  let domainPart: string;
+  let pathPart: string;
 
-  // Replace ** with a placeholder first (to avoid double-processing)
-  regex = regex.replace(/\*\*/g, "___GLOBSTAR___");
+  if (schemeEnd !== -1) {
+    const afterScheme = pattern.slice(schemeEnd + 3);
+    const firstSlash = afterScheme.indexOf("/");
+    if (firstSlash !== -1) {
+      domainPart = pattern.slice(0, schemeEnd + 3 + firstSlash);
+      pathPart = afterScheme.slice(firstSlash);
+    } else {
+      domainPart = pattern;
+      pathPart = "";
+    }
+  } else {
+    domainPart = "";
+    pathPart = pattern;
+  }
 
-  // Replace remaining * with single-segment match
-  // In domain context (before first /): no dots
-  // In path context (after ://...): no slashes
-  // Simplified: * matches [^/]* (any chars except slash)
-  regex = regex.replace(/\*/g, "[^/]*");
+  function compileSegment(segment: string, singleStarPattern: string): string {
+    // Escape regex special chars except * and /
+    let regex = segment.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    // Replace ** with placeholder first
+    regex = regex.replace(/\*\*/g, "___GLOBSTAR___");
+    // Replace remaining * with context-appropriate match
+    regex = regex.replace(/\*/g, singleStarPattern);
+    // Replace globstar with match-anything
+    regex = regex.replace(/___GLOBSTAR___/g, ".*");
+    return regex;
+  }
 
-  // Replace globstar with match-anything
-  regex = regex.replace(/___GLOBSTAR___/g, ".*");
+  const domainRegex = compileSegment(domainPart, "[^./]*");
+  const pathRegex = compileSegment(pathPart, "[^/]*");
 
-  return new RegExp(`^${regex}$`, "i");
+  return new RegExp(`^${domainRegex}${pathRegex}$`, "i");
 }
 
 // ── Config builder ──────────────────────────────────────────────────────────

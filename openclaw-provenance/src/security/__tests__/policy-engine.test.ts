@@ -166,17 +166,17 @@ describe("getToolMode()", () => {
     expect(getToolMode("session_status", "untrusted", config)).toBe("allow");
   });
 
-  it("returns 'allow' for gateway at all levels (safe tool)", () => {
-    expect(getToolMode("gateway", "trusted", config)).toBe("allow");
-    expect(getToolMode("gateway", "shared", config)).toBe("allow");
-    expect(getToolMode("gateway", "external", config)).toBe("allow");
-    expect(getToolMode("gateway", "untrusted", config)).toBe("allow");
+  it("returns 'confirm' for gateway at all levels (dangerous tool)", () => {
+    expect(getToolMode("gateway", "trusted", config)).toBe("confirm");
+    expect(getToolMode("gateway", "shared", config)).toBe("confirm");
+    expect(getToolMode("gateway", "external", config)).toBe("confirm");
+    expect(getToolMode("gateway", "untrusted", config)).toBe("confirm");
   });
 
-  it("user can override gateway to require confirm", () => {
-    const configWithOverride = buildPolicyConfig(undefined, { "gateway": { "*": "confirm" } });
-    expect(getToolMode("gateway", "trusted", configWithOverride)).toBe("confirm");
-    expect(getToolMode("gateway", "shared", configWithOverride)).toBe("confirm");
+  it("user can override gateway to allow", () => {
+    const configWithOverride = buildPolicyConfig(undefined, { "gateway": { "*": "allow" } });
+    expect(getToolMode("gateway", "trusted", configWithOverride)).toBe("allow");
+    expect(getToolMode("gateway", "shared", configWithOverride)).toBe("allow");
   });
 
   it("override can make things more permissive (safe tools)", () => {
@@ -205,8 +205,8 @@ describe("getToolMode()", () => {
   });
 
   it("is case-insensitive on tool name", () => {
-    expect(getToolMode("Gateway", "shared", config)).toBe("allow");
-    expect(getToolMode("GATEWAY", "untrusted", config)).toBe("allow");
+    expect(getToolMode("Gateway", "shared", config)).toBe("confirm");
+    expect(getToolMode("GATEWAY", "untrusted", config)).toBe("confirm");
     expect(getToolMode("Read", "untrusted", config)).toBe("allow");
     expect(getToolMode("READ", "untrusted", config)).toBe("allow");
   });
@@ -244,7 +244,7 @@ describe("buildPolicyConfig()", () => {
     const config = buildPolicyConfig(undefined, {
       "gateway": { "trusted": "restrict" },
     });
-    expect(config.toolOverrides["gateway"]["*"]).toBe("allow");       // from default (safe tool)
+    expect(config.toolOverrides["gateway"]["*"]).toBe("confirm");       // from default (dangerous tool)
     expect(config.toolOverrides["gateway"]["trusted"]).toBe("restrict"); // from user
   });
 
@@ -285,13 +285,13 @@ describe("buildPolicyConfig()", () => {
 describe("evaluatePolicy()", () => {
   const config = buildPolicyConfig();
 
-  it("allows all tools at trusted taint", () => {
+  it("allows all tools at trusted taint except gateway (requires confirm)", () => {
     const graph = graphWithTaint("trusted");
     const result = evaluatePolicy(graph, ALL_TOOLS, config);
     expect(result.defaultMode).toBe("allow");
     expect(result.allowed).toContain("exec");
     expect(result.allowed).toContain("message");
-    expect(result.allowed).toContain("gateway");
+    expect(result.confirm.map(c => c.tool)).toContain("gateway");
     expect(result.restricted).toHaveLength(0);
   });
 
@@ -301,10 +301,10 @@ describe("evaluatePolicy()", () => {
     expect(result.defaultMode).toBe("confirm");
     expect(result.confirm.map(c => c.tool)).toContain("exec");
     expect(result.confirm.map(c => c.tool)).toContain("write");
+    expect(result.confirm.map(c => c.tool)).toContain("gateway");
     expect(result.allowed).toContain("read");
     expect(result.allowed).toContain("web_fetch");
     expect(result.allowed).toContain("memory_search");
-    expect(result.allowed).toContain("gateway");
   });
 
   it("sets warning flag when max iterations exceeded (soft warning, no block)", () => {
@@ -330,7 +330,7 @@ describe("evaluatePolicy()", () => {
     expect(result.blockTurn).toBe(false);
   });
 
-  it("all-restrict mode removes non-safe tools, safe tool overrides still win", () => {
+  it("all-restrict mode removes non-safe tools, safe tool overrides still win, gateway requires confirm", () => {
     const restrictConfig = buildPolicyConfig({
       trusted: "restrict",
       shared: "restrict",
@@ -345,10 +345,10 @@ describe("evaluatePolicy()", () => {
     expect(result.allowed).toContain("memory_search");
     expect(result.restricted).toContain("exec");
     expect(result.restricted).toContain("write");
-    expect(result.allowed).toContain("gateway");
+    expect(result.confirm.map(c => c.tool)).toContain("gateway");
   });
 
-  it("all-allow mode allows everything including safe tools", () => {
+  it("all-allow mode allows everything except gateway (which always requires confirm)", () => {
     const allowConfig = buildPolicyConfig({
       trusted: "allow",
       shared: "allow",
@@ -359,7 +359,7 @@ describe("evaluatePolicy()", () => {
     const result = evaluatePolicy(graph, ALL_TOOLS, allowConfig);
     expect(result.allowed).toContain("exec");
     expect(result.allowed).toContain("message");
-    expect(result.allowed).toContain("gateway");
+    expect(result.confirm.map(c => c.tool)).toContain("gateway");
   });
 });
 
@@ -420,20 +420,32 @@ describe("evaluateWithApprovals()", () => {
     expect(result.toolRemovals.has("memory_search")).toBe(false);
   });
 
-  it("gateway always allowed (safe system tool)", () => {
+  it("gateway requires approval at all taint levels (dangerous tool)", () => {
     const graphShared = graphWithTaint("shared");
     const resultShared = evaluateWithApprovals(graphShared, ALL_TOOLS, config, approvalStore, "session-1");
-    expect(resultShared.toolRemovals.has("gateway")).toBe(false);
+    expect(resultShared.toolRemovals.has("gateway")).toBe(true);
 
     const graphUntrusted = graphWithTaint("untrusted");
     const resultUntrusted = evaluateWithApprovals(graphUntrusted, ALL_TOOLS, config, approvalStore, "session-2");
-    expect(resultUntrusted.toolRemovals.has("gateway")).toBe(false);
+    expect(resultUntrusted.toolRemovals.has("gateway")).toBe(true);
+
+    // Even at trusted taint, gateway requires confirm
+    const graphTrusted = graphWithTaint("trusted");
+    const resultTrusted = evaluateWithApprovals(graphTrusted, ALL_TOOLS, config, approvalStore, "session-3");
+    expect(resultTrusted.toolRemovals.has("gateway")).toBe(true);
   });
 
-  it("reports effective mode based on most restrictive non-safe tool", () => {
+  it("gateway can be approved by owner", () => {
+    const graph = graphWithTaint("trusted");
+    approvalStore.approve("session-1", "gateway", null);
+    const result = evaluateWithApprovals(graph, ["gateway", "read", "exec"], config, approvalStore, "session-1");
+    expect(result.toolRemovals.has("gateway")).toBe(false);
+  });
+
+  it("reports effective mode based on most restrictive tool", () => {
     const graph = graphWithTaint("trusted");
     const result = evaluateWithApprovals(graph, ["gateway", "read", "exec"], config, approvalStore, "session-1");
-    expect(result.mode).toBe("allow");
+    expect(result.mode).toBe("confirm"); // gateway requires confirm even at trusted
   });
 });
 

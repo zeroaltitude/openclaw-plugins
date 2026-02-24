@@ -255,7 +255,6 @@ export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
   sessions_list: { "*": "allow" },
   sessions_history: { "*": "allow" },
   agents_list: { "*": "allow" },
-  gateway: { "*": "allow" },
   vestige_search: { "*": "allow" },
   vestige_promote: { "*": "allow" },
   vestige_demote: { "*": "allow" },
@@ -288,7 +287,9 @@ export const DEFAULT_TAINT_DEFAULT_TOOLS: Record<string, ToolOverride> = {
  * Default dangerous tool overrides — tools that should be stricter than the
  * taint-level default at certain levels.
  */
-export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {};
+export const DEFAULT_DANGEROUS_TOOLS: Record<string, ToolOverride> = {
+  gateway: { "*": "confirm" },
+};
 
 /**
  * Build a complete PolicyConfig from user-provided config, merging with defaults.

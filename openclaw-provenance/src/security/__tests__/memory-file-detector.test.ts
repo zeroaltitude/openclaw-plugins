@@ -31,10 +31,11 @@ describe("isMemoryFile()", () => {
     expect(isMemoryFile(`${WORKSPACE}/scripts/test.sh`, WORKSPACE)).toBe(false);
   });
 
-  it("detects bootstrap files regardless of directory", () => {
-    // basename match means SOUL.md in any subdirectory matches
+  it("detects bootstrap files in workspace subdirectories but not outside workspace", () => {
+    // SOUL.md in workspace subdirectory matches (still inside workspace)
     expect(isMemoryFile(`${WORKSPACE}/subdir/SOUL.md`, WORKSPACE)).toBe(true);
-    expect(isMemoryFile("/tmp/MEMORY.md", WORKSPACE)).toBe(true);
+    // MEMORY.md outside workspace does NOT match (scoped to workspace)
+    expect(isMemoryFile("/tmp/MEMORY.md", WORKSPACE)).toBe(false);
   });
 
   it("is case-sensitive on bootstrap file names", () => {
