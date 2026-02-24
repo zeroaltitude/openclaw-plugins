@@ -108,6 +108,8 @@ export interface SecurityPluginConfig {
   uriExtractors?: Record<string, UriExtractorConfig>;
   /** URI trust patterns — glob-like URI → trust level mappings */
   uriTrust?: Record<string, TrustLevel>;
+  /** Trust level for messages with no senderId (default: "shared") */
+  missingIdentityTrust?: TrustLevel;
 }
 
 /** Get a short session key for log prefixes */
@@ -130,6 +132,7 @@ function shortKey(sessionKey: string): string {
 function classifyInitialTrust(
   ctx: AgentContext,
   trustedSenderIds: Set<string>,
+  missingIdentityTrust: TrustLevel = "shared",
 ): TrustLevel {
   if (
     !ctx.messageProvider ||
@@ -156,11 +159,9 @@ function classifyInitialTrust(
     return "external";
   }
 
-  // No senderId at all — this is a system-internal injection (sub-agent
-  // announce, cron delivery, exec completion notification, etc.).
-  // Real channel messages always carry a senderId, so missing senderId
-  // means the gateway injected this message internally → trusted.
-  return "trusted";
+  // No senderId — system-internal injection (sub-agent announce, cron
+  // delivery, exec completion notification). Trust level is configurable.
+  return missingIdentityTrust;
 }
 
 /**
@@ -474,7 +475,7 @@ export function registerSecurityHooks(
         }
       }
 
-      const initialTrust = classifyInitialTrust(ctx, trustedSenderIds);
+      const initialTrust = classifyInitialTrust(ctx, trustedSenderIds, config?.missingIdentityTrust);
 
       graph.recordContextAssembled(
         event.systemPrompt ?? "",
