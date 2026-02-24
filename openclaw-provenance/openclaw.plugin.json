@@ -94,6 +94,40 @@
             }
           }
         }
+      },
+      "uriTrust": {
+        "type": "object",
+        "description": "URI pattern-to-trust-level overrides. Keys are glob-like URI patterns (e.g. 'slack://C0ACUTPFSJ3/**'), values are trust levels. Most-specific pattern wins. Merged with built-in defaults.",
+        "additionalProperties": {
+          "type": "string",
+          "enum": ["trusted", "shared", "external", "untrusted"]
+        }
+      },
+      "compositeTools": {
+        "type": "object",
+        "description": "Custom composite tool definitions. Key = tool name, value = config with actionParam. Built-in defaults for message/browser are automatic.",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "actionParam": { "type": "string" }
+          },
+          "required": ["actionParam"]
+        }
+      },
+      "uriExtractors": {
+        "type": "object",
+        "description": "Custom URI extractor configs for plugin tools. Key = tool name or composite key, value = extractor config.",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "scheme": { "type": "string" }
+          },
+          "required": ["params"]
+        }
       }
     }
   }
