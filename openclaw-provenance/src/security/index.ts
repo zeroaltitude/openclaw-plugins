@@ -460,20 +460,12 @@ export function registerSecurityHooks(
       turnStartTimes.set(sessionKey, performance.now());
       const graph = store.startTurn(sessionKey);
 
-      // Fresh session detection: clear watermark only when messageCount <= 1
-      // (context_assembled has the real assembled message count, unlike
-      // before_agent_start which may only have the triggering message)
-      const messageCount = event.messageCount ?? 0;
-      if (messageCount <= 1) {
-        const cleared = watermarkStore.clearWithAudit(sessionKey);
-        if (cleared) {
-          const sk = shortKey(sessionKey);
-          logger.info(
-            `[provenance:${sk}] 🔄 Watermark cleared on fresh session (messageCount: ${messageCount}, was: ${cleared.level}, reason: ${cleared.reason})`,
-          );
-          watermarkStore.flush();
-        }
-      }
+      // Watermark clearing is ONLY allowed via explicit owner commands:
+      //   - .reset-trust  (processed in before_llm_call)
+      //   - /new           (creates a new session key with no watermark entry)
+      // Never clear based on messageCount — it's unreliable in thread/channel
+      // contexts where each turn may report messageCount=1 despite being an
+      // ongoing conversation.
 
       const initialTrust = classifyInitialTrust(ctx, trustedSenderIds, config?.missingIdentityTrust);
 
