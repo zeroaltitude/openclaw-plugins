@@ -445,6 +445,7 @@ export function registerSecurityHooks(
   // Tracks wall-clock time from the earliest hook (before_agent_start) through
   // the processing pipeline to help diagnose message-to-typing-indicator latency.
   const turnStartTimes = new Map<string, number>();
+  const turnStartTaintBySession = new Map<string, { level: TrustLevel; reason: string }>();
 
   // --- before_agent_start ---
   // NOTE: This hook may not fire on all OpenClaw versions. Watermark clearing
@@ -517,6 +518,13 @@ export function registerSecurityHooks(
 
       const sk = shortKey(sessionKey);
       const effectiveTaint = graph.maxTaint;
+
+      // Capture turn-start taint for developerMode header
+      const startReason = watermark && watermark.level !== "trusted"
+        ? watermark.reason
+        : `sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}`;
+      turnStartTaintBySession.set(sessionKey, { level: effectiveTaint, reason: startReason });
+
       logger.info(`[provenance:${sk}] ── Turn Start ──`);
       logger.info(
         `[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`,
@@ -1149,21 +1157,25 @@ export function registerSecurityHooks(
         if (developerMode && event.content) {
           const lastImpacted =
             lastImpactedToolBySession.get(sessionKey) ?? "none";
-          const taintEmoji =
-            taintLevel === "trusted"
+          const taintEmoji = (level: string) =>
+            level === "trusted"
               ? "🟢"
-              : taintLevel === "shared"
+              : level === "shared"
                 ? "🟡"
-                : taintLevel === "external"
+                : level === "external"
                   ? "🟠"
                   : "🔴";
+          // Turn start taint
+          const turnStart = turnStartTaintBySession.get(sessionKey);
+          const startLevel = turnStart?.level ?? "trusted";
+          const startReason = turnStart?.reason ?? "unknown";
           // Include URI sources in header if available
           const uriSummary = uriTaintRecords
             .filter((r) => r.effectiveTrust !== "trusted")
             .map((r) => `${r.tool}(${truncate(r.uri, 40)})`)
             .slice(0, 3);
           const uriPart = uriSummary.length > 0 ? ` | sources: ${uriSummary.join(", ")}` : "";
-          const header = `${taintEmoji} [taint: ${taintLevel} | reason: ${taintReason} | last impacted: ${lastImpacted}${uriPart}]`;
+          const header = `${taintEmoji(startLevel)} start: ${startLevel} (${truncate(startReason, 40)}) → ${taintEmoji(taintLevel)} end: ${taintLevel} (${truncate(taintReason, 40)}) | last impacted: ${lastImpacted}${uriPart}`;
           return { content: header + "\n" + event.content };
         }
       },
