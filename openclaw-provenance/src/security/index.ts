@@ -483,9 +483,30 @@ export function registerSecurityHooks(
         initialTrust,
       );
 
+      // Peek ahead: if the owner is about to .reset-trust, skip watermark
+      // inheritance so the graph starts clean rather than inheriting taint
+      // that will be immediately undone.
+      const messages = event.messages ?? [];
+      const peekLastUserMsg = [...messages]
+        .reverse()
+        .find((m: any) => m.role === "user");
+      const peekContent = peekLastUserMsg
+        ? typeof peekLastUserMsg.content === "string"
+          ? peekLastUserMsg.content
+          : Array.isArray(peekLastUserMsg.content)
+            ? peekLastUserMsg.content
+                .filter((c: any) => c?.type === "text")
+                .map((c: any) => c.text)
+                .join("")
+            : ""
+        : "";
+      const ownerIsResettingTrust =
+        ctx.senderIsOwner === true &&
+        /\.reset-trust(?:\s+[a-z]+)?/i.test(peekContent.trim());
+
       // Inherit taint watermark from previous turns
       const watermark = watermarkStore.getLevel(sessionKey);
-      if (watermark) {
+      if (watermark && !ownerIsResettingTrust) {
         const watermarkIdx = TRUST_ORDER.indexOf(watermark.level);
         const initialIdx = TRUST_ORDER.indexOf(initialTrust);
         if (watermarkIdx > initialIdx) {
