@@ -459,7 +459,26 @@ export function registerSecurityHooks(
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       turnStartTimes.set(sessionKey, performance.now());
-      const graph = store.startTurn(sessionKey);
+      const { graph, sealedPrevious } = store.startTurn(sessionKey);
+
+      // If a previous turn was interrupted (sealed without completing),
+      // persist its watermark escalation now so taint is never silently lost.
+      if (sealedPrevious) {
+        const sealedMaxTaint = sealedPrevious.summary().maxTaint;
+        if (sealedMaxTaint && sealedMaxTaint !== "trusted") {
+          const agentId = sessionAgentMap.get(sessionKey) ?? ctx.agentId ?? "unknown";
+          watermarkStore.escalate(
+            sessionKey,
+            sealedMaxTaint,
+            `interrupted turn (sealed by overlapping message)`,
+            `interrupted turn (sealed by overlapping message)`,
+          );
+          watermarkStore.flush();
+          logger.warn(
+            `[provenance:${sessionKey}] Interrupted turn had maxTaint=${sealedMaxTaint}; watermark escalated before replacement`,
+          );
+        }
+      }
 
       // Watermark clearing is ONLY allowed via explicit owner commands:
       //   - .reset-trust  (processed in before_llm_call)

@@ -345,15 +345,17 @@ export class ProvenanceStore {
   }
 
   /** Start a new turn graph for a session */
-  startTurn(sessionKey: string): TurnProvenanceGraph {
+  startTurn(sessionKey: string): { graph: TurnProvenanceGraph; sealedPrevious?: TurnProvenanceGraph } {
     const existing = this.activeGraphs.get(sessionKey);
+    let sealedPrevious: TurnProvenanceGraph | undefined;
     if (existing && !existing.sealed) {
       existing.seal();
       this.archiveGraph(existing, sessionKey);
+      sealedPrevious = existing;
     }
     const graph = new TurnProvenanceGraph(sessionKey);
     this.activeGraphs.set(sessionKey, graph);
-    return graph;
+    return { graph, sealedPrevious };
   }
 
   /** Get the active graph for a session */
