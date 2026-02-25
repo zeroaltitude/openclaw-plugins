@@ -152,6 +152,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   canvas: "trusted",
   gateway: "trusted",
   session_status: "trusted",
+  subagents: "trusted",
 
   // ── Shared (cross-agent memory) ───────────────────────────────────
   vestige_search: "shared",
