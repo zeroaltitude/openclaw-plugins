@@ -470,6 +470,13 @@ export function registerSecurityHooks(
 
       const initialTrust = classifyInitialTrust(ctx, trustedSenderIds, config?.missingIdentityTrust);
 
+      // DEBUG: write ctx fields to file for sender diagnosis
+      {
+        const fs = require("fs");
+        const debugLine = `${new Date().toISOString()} session=${sessionKey} senderId=${ctx.senderId ?? "UNDEFINED"} senderName=${ctx.senderName ?? "UNDEFINED"} senderIsOwner=${ctx.senderIsOwner ?? "UNDEFINED"} messageProvider=${ctx.messageProvider ?? "UNDEFINED"} spawnedBy=${ctx.spawnedBy ?? "UNDEFINED"} agentId=${ctx.agentId ?? "UNDEFINED"} groupId=${ctx.groupId ?? "UNDEFINED"} initialTrust=${initialTrust}\n`;
+        try { fs.appendFileSync("/tmp/provenance-debug.log", debugLine); } catch {}
+      }
+
       graph.recordContextAssembled(
         event.systemPrompt ?? "",
         event.messageCount ?? 0,
