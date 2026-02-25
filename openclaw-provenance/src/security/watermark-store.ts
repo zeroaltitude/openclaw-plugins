@@ -232,4 +232,21 @@ export class WatermarkStore {
     if (removed > 0) this.scheduleSave();
     return removed;
   }
+
+  /**
+   * Remove watermark entries older than the given age (in milliseconds).
+   * Returns the number of entries pruned.
+   */
+  pruneOlderThan(maxAgeMs: number): number {
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    let pruned = 0;
+    for (const [key, entry] of Object.entries(this.data.watermarks)) {
+      if (entry.escalatedAt < cutoff) {
+        delete this.data.watermarks[key];
+        pruned++;
+      }
+    }
+    if (pruned > 0) this.scheduleSave();
+    return pruned;
+  }
 }

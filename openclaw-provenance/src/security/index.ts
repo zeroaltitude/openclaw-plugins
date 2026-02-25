@@ -166,10 +166,13 @@ function classifyInitialTrust(
 
 /**
  * Check if the current session is an owner DM (for message tool exception).
+ *
+ * Only interactive owner sessions qualify — subagent sessions do NOT get this
+ * exception. Subagents are automated and may inherit tainted context from their
+ * parent; granting them blanket message-send bypass would enable taint laundering.
  */
 function isOwnerDm(ctx: AgentContext): boolean {
-  // Owner DM: direct owner session, or sub-agent spawned by owner (no group context)
-  return (ctx.senderIsOwner === true || !!ctx.spawnedBy) && !ctx.groupId;
+  return ctx.senderIsOwner === true && !ctx.groupId && !ctx.spawnedBy;
 }
 
 /**
@@ -326,14 +329,15 @@ export function registerSecurityHooks(
       buildPolicyConfig(mergedTaintPolicy as any, mergedToolOverrides, config?.maxIterations, logger),
     );
 
-    // Merge tool output taints: agent overrides on top of defaults (include composite)
+    // Merge tool output taints: agent overrides on top of defaults (include composite).
+    // Pre-build the resolved map at startup to avoid rebuilding on every call.
     if (overrides.toolOutputTaints) {
       const mergedOutputTaints = {
         ...DEFAULT_COMPOSITE_OUTPUT_TAINTS,
         ...(toolOutputTaintOverrides ?? {}),
         ...overrides.toolOutputTaints,
       };
-      agentToolTaints.set(agentId, mergedOutputTaints);
+      agentToolTaints.set(agentId, buildToolOutputTaintMap(mergedOutputTaints));
     }
 
     // Per-agent URI trust (Phase 4): agent patterns overlay default patterns
@@ -371,10 +375,10 @@ export function registerSecurityHooks(
     return defaultPolicyConfig;
   }
 
-  /** Resolve the effective tool taint map for a given agent */
+  /** Resolve the effective tool taint map for a given agent (pre-built at startup) */
   function getResolvedToolTaints(agentId?: string): Record<string, TrustLevel> {
     if (agentId && agentToolTaints.has(agentId)) {
-      return buildToolOutputTaintMap(agentToolTaints.get(agentId));
+      return agentToolTaints.get(agentId)!;
     }
     return resolvedToolTaints;
   }
@@ -459,6 +463,16 @@ export function registerSecurityHooks(
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       turnStartTimes.set(sessionKey, performance.now());
+
+      // Probabilistic pruning: ~1% of turns, remove watermarks older than 24h.
+      // Prevents unbounded growth from ephemeral subagent sessions.
+      if (Math.random() < 0.01) {
+        const pruned = watermarkStore.pruneOlderThan(24 * 60 * 60 * 1000);
+        if (pruned > 0) {
+          logger.info(`[provenance] Pruned ${pruned} stale watermark(s) older than 24h`);
+        }
+      }
+
       const { graph, sealedPrevious } = store.startTurn(sessionKey);
 
       // If a previous turn was interrupted (sealed without completing),
@@ -516,7 +530,7 @@ export function registerSecurityHooks(
         ctx.senderIsOwner === true &&
         /\.reset-trust(?:\s+[a-z]+)?/i.test(peekContent.trim());
 
-      // Inherit taint watermark from previous turns
+      // Inherit taint watermark from previous turns (same-session)
       const watermark = watermarkStore.getLevel(sessionKey);
       if (watermark && !ownerIsResettingTrust) {
         const watermarkIdx = TRUST_ORDER.indexOf(watermark.level);
@@ -532,6 +546,47 @@ export function registerSecurityHooks(
                 "inherited taint watermark from previous turn",
             },
           });
+        }
+      }
+
+      // Inherit taint from parent session (cross-session propagation).
+      // When a tainted parent spawns a subagent, the child must inherit
+      // the parent's taint to prevent taint laundering.
+      if (ctx.spawnedBy && !ownerIsResettingTrust) {
+        // Check parent's persisted watermark (completed previous turns)
+        const parentWm = watermarkStore.getLevel(ctx.spawnedBy);
+        // Check parent's active graph (current in-flight turn — the parent's
+        // before_response_emit hasn't fired yet, so its watermark hasn't
+        // been flushed for the current turn)
+        const parentGraph = store.getActive(ctx.spawnedBy);
+        let parentTaint: TrustLevel = "trusted";
+        if (parentWm) parentTaint = minTrust(parentTaint, parentWm.level);
+        if (parentGraph) parentTaint = minTrust(parentTaint, parentGraph.maxTaint);
+
+        if (parentTaint !== "trusted") {
+          const parentSk = shortKey(ctx.spawnedBy);
+          graph.addNode({
+            id: "inherited-parent-taint",
+            kind: "history",
+            trust: parentTaint,
+            metadata: {
+              reason: `inherited from parent (${parentSk})`,
+              parentSessionKey: ctx.spawnedBy,
+              parentWatermarkLevel: parentWm?.level,
+              parentGraphTaint: parentGraph?.maxTaint,
+            },
+          });
+          // Pre-seed the child's watermark so taint persists across
+          // the subagent's own multi-turn interactions
+          watermarkStore.escalate(
+            sessionKey,
+            parentTaint,
+            `inherited from parent (${parentSk})`,
+            `parent taint inheritance`,
+          );
+          logger.info(
+            `[provenance:${shortKey(sessionKey)}]   Inherited parent taint: ${parentTaint} (parent: ${parentSk}, wm: ${parentWm?.level ?? "none"}, graph: ${parentGraph?.maxTaint ?? "none"})`,
+          );
         }
       }
 
