@@ -1201,5 +1201,38 @@ export function registerSecurityHooks(
     ),
   );
 
+  // --- message_sending ---
+  // Inject taint header on outbound messages sent via the message tool.
+  // This complements before_response_emit (which only covers native responses).
+  api.on(
+    "message_sending" as any,
+    profiled("message_sending", (event: any, ctx: any) => {
+      if (!developerMode || !event.content) return;
+      const sessionKey = ctx.sessionKey;
+      if (!sessionKey) return;
+
+      const graph = store.getActive(sessionKey);
+      const watermark = watermarkStore.getLevel(sessionKey);
+      const taintLevel = graph?.maxTaint ?? watermark?.level ?? "trusted";
+      const taintReason = graph
+        ? buildTaintReason(graph, watermark?.reason)
+        : watermark?.reason ?? "unknown";
+
+      const turnStart = turnStartTaintBySession.get(sessionKey);
+      const startLevel = turnStart?.level ?? "trusted";
+      const startReason = turnStart?.reason ?? "unknown";
+      const lastImpacted = lastImpactedToolBySession.get(sessionKey) ?? "none";
+
+      const taintEmoji = (level: string) =>
+        level === "trusted" ? "🟢"
+          : level === "shared" ? "🟡"
+            : level === "external" ? "🟠"
+              : "🔴";
+
+      const header = `${taintEmoji(startLevel)} start: ${startLevel} (${truncate(startReason, 40)}) → ${taintEmoji(taintLevel)} end: ${taintLevel} (${truncate(taintReason, 40)}) | last impacted: ${lastImpacted}`;
+      return { content: header + "\n" + event.content };
+    }),
+  );
+
   return { store, approvalStore };
 }
