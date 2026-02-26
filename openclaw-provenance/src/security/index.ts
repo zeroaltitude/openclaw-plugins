@@ -548,6 +548,53 @@ export function registerSecurityHooks(
         logger.info(`[provenance:${shortKey(sessionKey)}]   BROWSER_TAB_URLS: seeded ${tabsFound} tab URL(s) from conversation history`);
       }
 
+      // Also scan for browser tool results containing { targetId, url } pairs.
+      // browser.snapshot/screenshot results include these in their details,
+      // enabling URI trust resolution for subsequent calls using the same targetId.
+      let browserUrlsFound = 0;
+      for (const msg of ctxMessages) {
+        const contents: string[] = [];
+        if (typeof msg.content === "string") {
+          contents.push(msg.content);
+        } else if (Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (typeof part === "string") contents.push(part);
+            else if (part?.type === "text" && typeof part.text === "string") contents.push(part.text);
+            else if (part?.type === "tool_result" && typeof part.content === "string") contents.push(part.content);
+          }
+        }
+        for (const raw of contents) {
+          if (!raw.includes('"targetId"') || !raw.includes('"url"')) continue;
+          const candidates = [
+            raw,
+            raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1),
+          ];
+          for (const candidate of candidates) {
+            if (!candidate) continue;
+            try {
+              const parsed = JSON.parse(candidate);
+              // Direct { targetId, url } (e.g., from browser tool result top-level)
+              if (typeof parsed?.targetId === "string" && typeof parsed?.url === "string") {
+                recordTabUrls([{ targetId: parsed.targetId, url: parsed.url }]);
+                browserUrlsFound++;
+                break;
+              }
+              // Nested in details: { details: { targetId, url } }
+              if (typeof parsed?.details?.targetId === "string" && typeof parsed?.details?.url === "string") {
+                recordTabUrls([{ targetId: parsed.details.targetId, url: parsed.details.url }]);
+                browserUrlsFound++;
+                break;
+              }
+            } catch {
+              // Try next candidate
+            }
+          }
+        }
+      }
+      if (browserUrlsFound > 0) {
+        logger.info(`[provenance:${shortKey(sessionKey)}]   BROWSER_RESULT_URLS: seeded ${browserUrlsFound} URL(s) from browser tool results in conversation history`);
+      }
+
       // Probabilistic pruning: ~1% of turns, remove watermarks older than 24h.
       // Prevents unbounded growth from ephemeral subagent sessions.
       if (Math.random() < 0.01) {
@@ -1240,6 +1287,17 @@ export function registerSecurityHooks(
           }
         }
 
+        // Defer taint for browser tools with unresolvable targetId.
+        // The URL isn't known until after execution — don't escalate prematurely.
+        // after_tool_call will classify the actual URL from the tool result.
+        if (
+          sourceUris.length === 0 &&
+          toolKey.startsWith("browser.") &&
+          typeof params.targetId === "string"
+        ) {
+          effectiveTrust = graph.maxTaint;
+        }
+
         // Owner DM exception: message read actions from owner are trusted
         if (ownerDm && toolKey.startsWith("message.") && effectiveTrust !== "trusted") {
           effectiveTrust = "trusted";
@@ -1542,6 +1600,13 @@ export function registerSecurityHooks(
                 undefined,
                 effectiveToolTaints,
                 { sourceUris: [url], effectiveTrust },
+              );
+            } else if (uriTrust !== undefined) {
+              // Log resolved URI classification (deferred from after_llm_call
+              // when targetId couldn't be resolved to a URL at call time)
+              const sk = shortKey(sessionKey);
+              logger.info(
+                `[provenance:${sk}]   BROWSER_URI_RESOLVED: ${toolKey} on ${truncate(url, 60)} → trust ${effectiveTrust} (graph at ${graph.maxTaint})`,
               );
             }
           }

@@ -52,10 +52,12 @@ export const DEFAULT_COMPOSITE_URI_EXTRACTORS: Record<
   // snapshot/screenshot/console/pdf operate on existing tabs via targetId,
   // not URLs. URI resolution handled by tab URL tracking fallback in
   // extractToolSourceUris (targetId → URL via recordTabUrls).
-  "browser.snapshot": { params: ["targetId"] },
-  "browser.screenshot": { params: ["targetId"] },
-  "browser.console": { params: ["targetId"] },
-  "browser.pdf": { params: ["targetId"] },
+  // Also accept url/targetUrl as fallback — some MCP browser servers
+  // include the URL directly alongside targetId in params.
+  "browser.snapshot": { params: ["targetId", "url", "targetUrl"] },
+  "browser.screenshot": { params: ["targetId", "url", "targetUrl"] },
+  "browser.console": { params: ["targetId", "url", "targetUrl"] },
+  "browser.pdf": { params: ["targetId", "url", "targetUrl"] },
 };
 
 // ── Browser tab URL tracking ────────────────────────────────────────────────
