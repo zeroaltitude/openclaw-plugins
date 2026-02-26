@@ -49,10 +49,13 @@ export const DEFAULT_COMPOSITE_URI_EXTRACTORS: Record<
 > = {
   "browser.navigate": { params: ["targetUrl", "url"] },
   "browser.open": { params: ["targetUrl", "url"] },
-  "browser.snapshot": { params: ["targetUrl"] },
-  "browser.screenshot": { params: ["targetUrl"] },
-  "browser.console": { params: ["targetUrl"] },
-  "browser.pdf": { params: ["targetUrl"] },
+  // snapshot/screenshot/console/pdf operate on existing tabs via targetId,
+  // not URLs. URI resolution handled by tab URL tracking fallback in
+  // extractToolSourceUris (targetId → URL via recordTabUrls).
+  "browser.snapshot": { params: ["targetId"] },
+  "browser.screenshot": { params: ["targetId"] },
+  "browser.console": { params: ["targetId"] },
+  "browser.pdf": { params: ["targetId"] },
 };
 
 // ── Browser tab URL tracking ────────────────────────────────────────────────
@@ -199,7 +202,24 @@ export function extractToolSourceUris(
   // 2. Config-driven composite extractor
   if (extractors[toolKey]) {
     const uris = extractFromConfig(params, extractors[toolKey]);
-    // Fallback: if no URI extracted but targetId is present, resolve from tab URL map
+    // For browser tools: resolve targetId values to actual URLs via tab tracking.
+    // The extractor pulls the raw targetId; we translate it to the tab's URL
+    // so URI trust classification can match domain patterns.
+    if (toolKey.startsWith("browser.") && uris.length > 0) {
+      const resolved: string[] = [];
+      for (const uri of uris) {
+        // If this looks like a tab ID (not a URL), resolve it
+        if (!uri.includes("://")) {
+          const tabUrl = resolveTabUrl(uri);
+          if (tabUrl) resolved.push(tabUrl);
+          // If tab URL unknown, drop it — can't classify an opaque ID
+        } else {
+          resolved.push(uri);
+        }
+      }
+      return resolved;
+    }
+    // Fallback: if no URI extracted but targetId is present, try tab URL map directly
     if (uris.length === 0 && typeof params.targetId === "string" && toolKey.startsWith("browser.")) {
       const tabUrl = resolveTabUrl(params.targetId);
       if (tabUrl) return [tabUrl];
