@@ -68,7 +68,7 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "message.permissions": "shared",
   "message.emoji-list": "shared",
 
-  // ── browser: action-only (no data read) ──
+  // ── browser: control actions (no external data incorporated) ──
   "browser.act": "trusted",
   "browser.open": "trusted",
   "browser.start": "trusted",
@@ -78,17 +78,18 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "browser.dialog": "trusted",
   "browser.upload": "trusted",
 
-  // ── browser: reads external content ──
-  "browser.navigate": "untrusted",
-  "browser.snapshot": "untrusted",
-  "browser.screenshot": "untrusted",
-  "browser.console": "untrusted",
-  "browser.pdf": "untrusted",
+  // ── browser: reads external page content ──
+  // URI trust config can override these per-domain (e.g., docs.openclaw.ai → trusted)
+  "browser.navigate": "external",
+  "browser.snapshot": "external",
+  "browser.screenshot": "external",
+  "browser.console": "external",
+  "browser.pdf": "external",
 
-  // ── browser: metadata ──
-  "browser.status": "shared",
-  "browser.tabs": "shared",
-  "browser.profiles": "shared",
+  // ── browser: local introspection (own browser state, no external data) ──
+  "browser.status": "trusted",
+  "browser.tabs": "trusted",
+  "browser.profiles": "trusted",
 };
 
 // ── Composite execution policy defaults ─────────────────────────────────────

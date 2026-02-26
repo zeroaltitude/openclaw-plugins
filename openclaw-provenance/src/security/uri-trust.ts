@@ -68,6 +68,11 @@ export const DEFAULT_URI_TRUST_PATTERNS: Record<string, TrustLevel> = {
   // Local commands
   "exec://**": "trusted",
 
+  // OpenClaw first-party domains
+  "https://openclaw.ai/**": "trusted",
+  "https://docs.openclaw.ai/**": "trusted",
+  "https://clawhub.com/**": "trusted",
+
   // Web (catch-all — should be last)
   "https://**": "untrusted",
   "http://**": "untrusted",
