@@ -34,10 +34,10 @@ export const DEFAULT_URI_EXTRACTORS: Record<string, UriExtractorConfig> = {
   image: { params: ["image", "images"], scheme: "file" },
   gog: { params: ["query"], scheme: "google" },
   vestige_search: { params: ["query"], scheme: "vestige" },
-  vestige_smart_ingest: { params: ["content"], scheme: "vestige" },
-  vestige_ingest: { params: ["content"], scheme: "vestige" },
-  vestige_promote: { params: ["memory_id"], scheme: "vestige" },
-  vestige_demote: { params: ["memory_id"], scheme: "vestige" },
+  // vestige write ops intentionally omitted — content is going OUT, not
+  // coming IN. Extracting a URI from the content param would cause the
+  // vestige://** URI trust pattern ("shared") to override the tool output
+  // taint ("trusted"), incorrectly tainting write-only operations.
   memory_search: { params: ["query"], scheme: "memory" },
   memory_get: { params: ["path"], scheme: "file" },
 };
