@@ -7,6 +7,7 @@
  */
 
 import { registerSecurityHooks } from "./security/index.js";
+import type { TrustLevel } from "./security/trust-levels.js";
 
 interface PluginApi {
   registerTool(def: {
@@ -56,6 +57,7 @@ export function register(api: PluginApi) {
     compositeTools: (cfg.compositeTools as any) ?? undefined,
     uriExtractors: (cfg.uriExtractors as any) ?? undefined,
     uriTrust: (cfg.uriTrust as any) ?? undefined,
+    missingIdentityTrust: (cfg.missingIdentityTrust as TrustLevel) ?? undefined,
     workspaceDir:
       (api.config as any)?.agents?.defaults?.workspace ??
       (api.config as any)?.agents?.workspace ??

@@ -72,6 +72,10 @@ interface AgentContext {
   sessionKey?: string;
   workspaceDir?: string;
   messageProvider?: string;
+  /** Original message source before delivery channel resolution.
+   *  E.g. "heartbeat", "cron-event", "exec-event". When present,
+   *  used for trust classification instead of messageProvider. */
+  sourceProvider?: string;
   senderId?: string | null;
   senderName?: string | null;
   senderIsOwner?: boolean;
@@ -134,11 +138,18 @@ function classifyInitialTrust(
   trustedSenderIds: Set<string>,
   missingIdentityTrust: TrustLevel = "shared",
 ): TrustLevel {
+  // Check sourceProvider first — it reflects the true message origin
+  // (e.g. "heartbeat") even when messageProvider reflects the delivery
+  // channel (e.g. "discord"). Falls back to messageProvider when
+  // sourceProvider is not set.
+  const effectiveProvider = ctx.sourceProvider ?? ctx.messageProvider;
   if (
-    !ctx.messageProvider ||
-    ctx.messageProvider === "heartbeat" ||
-    ctx.messageProvider === "cron" ||
-    ctx.messageProvider === "webchat"
+    !effectiveProvider ||
+    effectiveProvider === "heartbeat" ||
+    effectiveProvider === "cron" ||
+    effectiveProvider === "cron-event" ||
+    effectiveProvider === "exec-event" ||
+    effectiveProvider === "webchat"
   ) {
     return "trusted";
   }
@@ -283,6 +294,11 @@ export function registerSecurityHooks(
   const workspaceDir = config?.workspaceDir ?? process.cwd();
   const defaultUriTrustConfig = buildUriTrustConfig(config?.uriTrust, workspaceDir);
   const trustedSenderIds = new Set(config?.trustedSenderIds ?? []);
+
+  const resolvedMissingIdentityTrust = config?.missingIdentityTrust ?? "shared";
+  logger.info(
+    `[provenance] missingIdentityTrust: ${resolvedMissingIdentityTrust}${config?.missingIdentityTrust ? " (from config)" : " (default)"}`,
+  );
 
   const watermarkStore = new WatermarkStore(workspaceDir);
   logger.info(
@@ -604,7 +620,7 @@ export function registerSecurityHooks(
         `[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`,
       );
       logger.info(
-        `[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"})`,
+        `[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"}${ctx.sourceProvider && ctx.sourceProvider !== ctx.messageProvider ? `, source: ${ctx.sourceProvider}` : ""})`,
       );
       if (watermark && watermark.level !== initialTrust) {
         logger.info(
