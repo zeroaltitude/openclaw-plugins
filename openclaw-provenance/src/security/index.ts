@@ -479,6 +479,9 @@ export function registerSecurityHooks(
   // Tracks wall-clock time from the earliest hook (before_agent_start) through
   // the processing pipeline to help diagnose message-to-typing-indicator latency.
   const turnStartTimes = new Map<string, number>();
+  // Track sessionKey from before_tool_call so after_tool_call can use it
+  // (core passes sessionKey: undefined to after_tool_call in some code paths)
+  let lastToolCallSessionKey = "unknown";
   const turnStartTaintBySession = new Map<string, { level: TrustLevel; reason: string }>();
 
   // --- before_agent_start ---
@@ -979,6 +982,7 @@ export function registerSecurityHooks(
     "before_tool_call",
     profiled("before_tool_call", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
+      lastToolCallSessionKey = sessionKey;
       const sk = shortKey(sessionKey);
       const graph = store.getActive(sessionKey);
       const toolName = event.toolName;
@@ -1430,6 +1434,90 @@ export function registerSecurityHooks(
         }
       },
     ),
+  );
+
+  // --- after_tool_call ---
+  // Update browser tab URL map from actual tool results.
+  // This ensures URI trust classification uses the CURRENT page URL,
+  // not stale data from a prior browser.tabs call.
+  api.on(
+    "after_tool_call",
+    profiled("after_tool_call", (event: any, _ctx: any) => {
+      const toolName = event.toolName;
+      const params = event.params ?? {};
+      const result = event.result;
+      if (!result || typeof result !== "object") return;
+
+      const toolKey = resolveToolKey(toolName, params, compositeTools);
+
+      // browser.tabs: seed tab URL map from response
+      if (toolKey === "browser.tabs") {
+        const content = Array.isArray((result as any).content) ? (result as any).content : [];
+        for (const part of content) {
+          if (part?.type === "text" && typeof part.text === "string") {
+            const raw = part.text;
+            if (!raw.includes('"tabs"')) continue;
+            const candidates = [
+              raw,
+              raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1),
+            ];
+            for (const candidate of candidates) {
+              if (!candidate) continue;
+              try {
+                const parsed = JSON.parse(candidate);
+                if (parsed?.tabs && Array.isArray(parsed.tabs)) {
+                  recordTabUrls(parsed.tabs);
+                  break;
+                }
+              } catch { /* skip */ }
+            }
+          }
+        }
+      }
+
+      // browser.snapshot/screenshot/console/pdf: update tab URL from result details
+      if (toolKey.startsWith("browser.") && toolKey !== "browser.tabs") {
+        const details = (result as any).details;
+        const url = details?.url;
+        const targetId = details?.targetId ?? params.targetId;
+        if (typeof url === "string" && typeof targetId === "string") {
+          // Update the tab map with the ACTUAL current URL
+          recordTabUrls([{ targetId, url }]);
+
+          // Re-classify: if the actual URL differs from what was used at after_llm_call,
+          // we may need to escalate taint
+          const sessionKey = _ctx.sessionKey ?? lastToolCallSessionKey;
+          const graph = store.getActive(sessionKey);
+          if (graph) {
+            const agentId = sessionAgentMap.get(sessionKey);
+            const effectiveUriTrustConfig = getUriTrustConfig(agentId);
+            const uriTrust = classifyUri(url, effectiveUriTrustConfig);
+            const effectiveToolTaints = getResolvedToolTaints(agentId);
+            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+            const effectiveTrust = uriTrust ?? toolTrust;
+
+            // If the actual URL yields worse trust than what was recorded,
+            // escalate the graph to reflect reality
+            const currentMax = TRUST_ORDER.indexOf(graph.maxTaint);
+            const actualIdx = TRUST_ORDER.indexOf(effectiveTrust);
+            if (actualIdx > currentMax) {
+              const sk = shortKey(sessionKey);
+              logger.warn(
+                `[provenance:${sk}]   BROWSER_URL_RECLASSIFICATION: tab ${shortKey(targetId)} navigated to ${truncate(url, 60)} → trust ${effectiveTrust} (was cached as trusted). Escalating taint.`,
+              );
+              // Record a corrective tool call node with the real URL trust
+              graph.recordToolCall(
+                toolKey,
+                0, // iteration unknown at this point
+                undefined,
+                effectiveToolTaints,
+                { sourceUris: [url], effectiveTrust },
+              );
+            }
+          }
+        }
+      }
+    }),
   );
 
   return { store, approvalStore };
