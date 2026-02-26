@@ -1082,7 +1082,7 @@ export function registerSecurityHooks(
 
         const header = `${taintEmoji(startLevel)} start: ${startLevel} (${truncate(startReason, 80)}) → ${taintEmoji(taintLevel)} end: ${taintLevel} (${truncate(taintReason, 80)}) | last impacted: ${lastImpacted}`;
         return {
-          params: { ...event.params, message: header + "\n\n" + event.params.message },
+          params: { ...event.params, message: header + "\n───\n" + event.params.message },
         };
       }
 
@@ -1513,7 +1513,7 @@ export function registerSecurityHooks(
             .slice(0, 3);
           const uriPart = uriSummary.length > 0 ? ` | sources: ${uriSummary.join(", ")}` : "";
           const header = `${taintEmoji(startLevel)} start: ${startLevel} (${truncate(startReason, 80)}) → ${taintEmoji(taintLevel)} end: ${taintLevel} (${truncate(taintReason, 80)}) | last impacted: ${lastImpacted}${uriPart}`;
-          return { content: header + "\n\n" + event.content };
+          return { content: header + "\n───\n" + event.content };
         }
       },
     ),
