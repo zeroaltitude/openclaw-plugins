@@ -498,13 +498,25 @@ export function registerSecurityHooks(
       // This enables URI trust classification for browser.snapshot/screenshot calls
       // that use targetId instead of targetUrl.
       const ctxMessages = event.messages ?? [];
+      let tabsFound = 0;
       for (const msg of ctxMessages) {
-        if (msg.role === "tool" && typeof msg.content === "string") {
+        // Check both "tool" role and assistant content parts (tool results may
+        // appear as either depending on the provider message format)
+        const contents: string[] = [];
+        if (typeof msg.content === "string") {
+          contents.push(msg.content);
+        } else if (Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (typeof part === "string") contents.push(part);
+            else if (part?.type === "text" && typeof part.text === "string") contents.push(part.text);
+            else if (part?.type === "tool_result" && typeof part.content === "string") contents.push(part.content);
+          }
+        }
+        for (const raw of contents) {
+          if (!raw.includes('"tabs"')) continue;
           // Extract tab URLs from browser.tabs responses for URI trust resolution.
           // Content may be wrapped in EXTERNAL_UNTRUSTED_CONTENT markers — try
           // raw first, then strip wrappers and find the JSON object.
-          const raw = msg.content;
-          if (!raw.includes('"tabs"')) continue;
           const candidates = [
             raw,
             // Strip content markers: find first { to last }
@@ -516,6 +528,7 @@ export function registerSecurityHooks(
               const parsed = JSON.parse(candidate);
               if (parsed?.tabs && Array.isArray(parsed.tabs)) {
                 recordTabUrls(parsed.tabs);
+                tabsFound += parsed.tabs.length;
                 break;
               }
             } catch {
@@ -523,6 +536,9 @@ export function registerSecurityHooks(
             }
           }
         }
+      }
+      if (tabsFound > 0) {
+        logger.info(`[provenance:${shortKey(sessionKey)}]   BROWSER_TAB_URLS: seeded ${tabsFound} tab URL(s) from conversation history`);
       }
 
       // Probabilistic pruning: ~1% of turns, remove watermarks older than 24h.
