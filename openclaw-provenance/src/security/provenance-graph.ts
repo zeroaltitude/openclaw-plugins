@@ -320,8 +320,12 @@ export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
       n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx,
   );
   if (toolNodes.length > 0) {
-    const toolNames = toolNodes.map((n) => n.tool).filter(Boolean);
-    return `tool output: ${toolNames.join(", ") || "unknown tool"}`;
+    const toolParts = toolNodes.map((n) => {
+      const name = n.tool ?? "unknown";
+      const uris = n.sourceUris?.length ? n.sourceUris.map((u: string) => u.length > 60 ? u.slice(0, 57) + "..." : u).join(", ") : null;
+      return uris ? `${name}(${uris})` : name;
+    });
+    return `tool output: ${toolParts.join(", ") || "unknown tool"}`;
   }
 
   // Sender/context classification — the initial trust from classifyInitialTrust
