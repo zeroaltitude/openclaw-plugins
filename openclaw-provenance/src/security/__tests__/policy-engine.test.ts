@@ -160,7 +160,8 @@ describe("getToolMode()", () => {
   it("returns 'allow' for safe tools even at untrusted", () => {
     expect(getToolMode("read", "untrusted", config)).toBe("allow");
     expect(getToolMode("web_fetch", "untrusted", config)).toBe("allow");
-    expect(getToolMode("memory_search", "untrusted", config)).toBe("allow");
+    // memory_search is restricted at shared+ taint (protects memory from tainted queries)
+    expect(getToolMode("memory_search", "untrusted", config)).toBe("restrict");
     expect(getToolMode("vestige_search", "untrusted", config)).toBe("allow");
     expect(getToolMode("image", "untrusted", config)).toBe("allow");
     expect(getToolMode("session_status", "untrusted", config)).toBe("allow");
@@ -236,7 +237,13 @@ describe("buildPolicyConfig()", () => {
     const config = buildPolicyConfig();
     for (const tool of Object.keys(DEFAULT_SAFE_TOOLS)) {
       expect(config.toolOverrides[tool]).toBeDefined();
-      expect(config.toolOverrides[tool]["*"]).toBe("allow");
+      // memory_search/memory_get have per-level overrides instead of glob
+      if (tool === "memory_search" || tool === "memory_get") {
+        expect(config.toolOverrides[tool]["trusted"]).toBe("allow");
+        expect(config.toolOverrides[tool]["shared"]).toBe("restrict");
+      } else {
+        expect(config.toolOverrides[tool]["*"]).toBe("allow");
+      }
     }
   });
 
@@ -304,7 +311,8 @@ describe("evaluatePolicy()", () => {
     expect(result.confirm.map(c => c.tool)).toContain("gateway");
     expect(result.allowed).toContain("read");
     expect(result.allowed).toContain("web_fetch");
-    expect(result.allowed).toContain("memory_search");
+    // memory_search is restricted at shared+ taint (protects memory from tainted queries)
+    expect(result.restricted).toContain("memory_search");
   });
 
   it("sets warning flag when max iterations exceeded (soft warning, no block)", () => {
@@ -417,7 +425,8 @@ describe("evaluateWithApprovals()", () => {
     const result = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
     expect(result.toolRemovals.has("read")).toBe(false);
     expect(result.toolRemovals.has("web_fetch")).toBe(false);
-    expect(result.toolRemovals.has("memory_search")).toBe(false);
+    // memory_search is restricted at shared+ taint (protects memory from tainted queries)
+    expect(result.toolRemovals.has("memory_search")).toBe(true);
   });
 
   it("gateway requires approval at all taint levels (dangerous tool)", () => {

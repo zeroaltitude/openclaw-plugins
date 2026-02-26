@@ -154,14 +154,16 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   session_status: "trusted",
   subagents: "trusted",
 
+  // ── Local memory (trusted: writes are guarded, so reads are safe) ──
+  memory_search: "trusted",
+  memory_get: "trusted",
+
   // ── Shared (cross-agent memory) ───────────────────────────────────
   vestige_search: "shared",
   vestige_smart_ingest: "shared",
   vestige_ingest: "shared",
   vestige_promote: "shared",
   vestige_demote: "shared",
-  memory_search: "shared",
-  memory_get: "shared",
 
   // ── External sources ──────────────────────────────────────────────
   message: "external", // channel messages contain external content

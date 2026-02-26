@@ -246,8 +246,8 @@ export function evaluateWithApprovals(
  */
 export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
   read: { "*": "allow" },
-  memory_search: { "*": "allow" },
-  memory_get: { "*": "allow" },
+  memory_search: { trusted: "allow", shared: "restrict", external: "restrict", untrusted: "restrict" },
+  memory_get: { trusted: "allow", shared: "restrict", external: "restrict", untrusted: "restrict" },
   web_fetch: { "*": "allow" },
   web_search: { "*": "allow" },
   image: { "*": "allow" },
