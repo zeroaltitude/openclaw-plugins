@@ -109,7 +109,7 @@ describe("Cross-session taint inheritance", () => {
 
     // Check that the child inherited taint
     const inheritLog = logger.logs.find(l =>
-      l.includes("Inherited parent taint") && l.includes(childSession.slice(-8)),
+      l.includes("PARENT_TAINT_INHERITANCE") && l.includes(childSession.slice(-8)),
     );
     expect(inheritLog).toBeDefined();
     expect(inheritLog).toContain("external");
@@ -175,7 +175,7 @@ describe("Cross-session taint inheritance", () => {
 
     // No parent taint inheritance log
     const inheritLog = logger.logs.find(l =>
-      l.includes("Inherited parent taint") && l.includes(childSession.slice(-8)),
+      l.includes("PARENT_TAINT_INHERITANCE") && l.includes(childSession.slice(-8)),
     );
     expect(inheritLog).toBeUndefined();
 
@@ -251,7 +251,7 @@ describe("Cross-session taint inheritance", () => {
     });
 
     const inheritLog = logger.logs.find(l =>
-      l.includes("Inherited parent taint") && l.includes(childSession.slice(-8)),
+      l.includes("PARENT_TAINT_INHERITANCE") && l.includes(childSession.slice(-8)),
     );
     expect(inheritLog).toBeDefined();
     expect(inheritLog).toContain("external");
@@ -297,7 +297,7 @@ describe("Cross-session taint inheritance", () => {
     });
 
     const inheritLog = logger.logs.find(l =>
-      l.includes("Inherited parent taint") && l.includes(childSession.slice(-8)),
+      l.includes("PARENT_TAINT_INHERITANCE") && l.includes(childSession.slice(-8)),
     );
     expect(inheritLog).toBeDefined();
     expect(inheritLog).toContain("untrusted");

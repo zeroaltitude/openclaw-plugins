@@ -82,8 +82,6 @@ describe("Heartbeat trust classification", () => {
   it("classifies heartbeat with sourceProvider as trusted", () => {
     const { api, logger } = setup();
 
-    // Simulate a heartbeat delivered via discord:
-    // messageProvider="discord" but sourceProvider="heartbeat"
     api.fire("context_assembled", {
       systemPrompt: "test",
       messages: [{ role: "user", content: "heartbeat" }],
@@ -95,17 +93,15 @@ describe("Heartbeat trust classification", () => {
       sourceProvider: "heartbeat",
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
     expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("Initial trust: trusted");
-    expect(trustLine).toContain("source: heartbeat");
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
+    expect(trustLine).toContain("sourceProvider=heartbeat");
   });
 
   it("classifies heartbeat WITHOUT sourceProvider as shared (default missingIdentityTrust)", () => {
     const { api, logger } = setup();
 
-    // Old behavior: no sourceProvider, no senderId, messageProvider="discord"
-    // Falls through to missingIdentityTrust default of "shared"
     api.fire("context_assembled", {
       systemPrompt: "test",
       messages: [{ role: "user", content: "heartbeat" }],
@@ -114,13 +110,11 @@ describe("Heartbeat trust classification", () => {
       agentId: "main",
       sessionKey: "agent:main:discord:channel:123",
       messageProvider: "discord",
-      // no sourceProvider, no senderId, no senderIsOwner
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
     expect(trustLine).toBeDefined();
-    // Without sourceProvider or missingIdentityTrust config, defaults to "shared"
-    expect(trustLine).toContain("Initial trust: shared");
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: shared");
   });
 
   it("classifies heartbeat WITHOUT sourceProvider as trusted when missingIdentityTrust is configured", () => {
@@ -128,8 +122,6 @@ describe("Heartbeat trust classification", () => {
       missingIdentityTrust: "trusted",
     });
 
-    // Bug 2 fix: missingIdentityTrust="trusted" prevents escalation
-    // even when sourceProvider is not available
     api.fire("context_assembled", {
       systemPrompt: "test",
       messages: [{ role: "user", content: "heartbeat" }],
@@ -138,12 +130,11 @@ describe("Heartbeat trust classification", () => {
       agentId: "main",
       sessionKey: "agent:main:discord:channel:123",
       messageProvider: "discord",
-      // no sourceProvider, no senderId, no senderIsOwner
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
     expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("Initial trust: trusted");
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
   });
 
   it("classifies cron-event sourceProvider as trusted", () => {
@@ -160,8 +151,9 @@ describe("Heartbeat trust classification", () => {
       sourceProvider: "cron-event",
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
-    expect(trustLine).toContain("Initial trust: trusted");
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
+    expect(trustLine).toBeDefined();
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
   });
 
   it("classifies exec-event sourceProvider as trusted", () => {
@@ -178,14 +170,14 @@ describe("Heartbeat trust classification", () => {
       sourceProvider: "exec-event",
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
-    expect(trustLine).toContain("Initial trust: trusted");
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
+    expect(trustLine).toBeDefined();
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
   });
 
   it("still classifies external discord messages as external/shared", () => {
     const { api, logger } = setup();
 
-    // Real discord message from unknown non-owner sender
     api.fire("context_assembled", {
       systemPrompt: "test",
       messages: [{ role: "user", content: "hello" }],
@@ -194,14 +186,13 @@ describe("Heartbeat trust classification", () => {
       agentId: "main",
       sessionKey: "agent:main:discord:channel:123",
       messageProvider: "discord",
-      // no sourceProvider — this is a real discord message
       senderId: "unknown-user-456",
       senderIsOwner: false,
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
     expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("Initial trust: external");
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: external");
   });
 
   it("classifies owner discord messages as trusted", () => {
@@ -221,8 +212,9 @@ describe("Heartbeat trust classification", () => {
       senderIsOwner: true,
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
-    expect(trustLine).toContain("Initial trust: trusted");
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
+    expect(trustLine).toBeDefined();
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
   });
 
   it("logs sourceProvider when it differs from messageProvider", () => {
@@ -239,8 +231,10 @@ describe("Heartbeat trust classification", () => {
       sourceProvider: "heartbeat",
     });
 
-    const trustLine = logger.logs.find(l => l.includes("Initial trust:"));
-    expect(trustLine).toContain("provider: discord");
-    expect(trustLine).toContain("source: heartbeat");
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
+    expect(trustLine).toBeDefined();
+    expect(trustLine).toContain("provider=discord");
+    expect(trustLine).toContain("sourceProvider=heartbeat");
+    expect(trustLine).toContain("effectiveProvider=heartbeat");
   });
 });

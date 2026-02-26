@@ -300,11 +300,18 @@ export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
   const nodes = graph.getAllNodes();
   const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
 
-  // Inherited taint watermark — carry the original root cause
+  // Inherited taint watermark — carry the original root cause forward
   const inherited = nodes.find((n) => n.id === "inherited-taint");
   if (inherited && TRUST_ORDER.indexOf(inherited.trust) >= taintIdx) {
     const reason = inherited.metadata?.reason as string;
-    return reason ?? "inherited from prev turn";
+    return reason ?? "watermark inherited from prev turn";
+  }
+
+  // Parent session inheritance
+  const parentInherited = nodes.find((n) => n.id === "inherited-parent-taint");
+  if (parentInherited && TRUST_ORDER.indexOf(parentInherited.trust) >= taintIdx) {
+    const parentKey = parentInherited.metadata?.parentSessionKey as string;
+    return `parent session taint (${parentKey ?? "unknown"})`;
   }
 
   // Tool calls that escalated taint
@@ -314,22 +321,23 @@ export function buildWatermarkReason(graph: TurnProvenanceGraph): string {
   );
   if (toolNodes.length > 0) {
     const toolNames = toolNodes.map((n) => n.tool).filter(Boolean);
-    return toolNames.join(", ") || "tool call";
+    return `tool output: ${toolNames.join(", ") || "unknown tool"}`;
   }
 
-  // History contamination
+  // Sender/context classification — the initial trust from classifyInitialTrust
   const historyNode = nodes.find(
     (n) =>
       n.kind === "history" &&
       n.id !== "inherited-taint" &&
+      n.id !== "inherited-parent-taint" &&
       TRUST_ORDER.indexOf(n.trust) >= taintIdx,
   );
   if (historyNode) {
     const reason = historyNode.metadata?.reason as string;
-    return reason ?? "history contamination";
+    return `sender classification: ${reason ?? "unknown sender"}`;
   }
 
-  return "unknown";
+  return "unknown source";
 }
 
 /**

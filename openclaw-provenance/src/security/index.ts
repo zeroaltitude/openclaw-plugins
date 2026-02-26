@@ -196,33 +196,46 @@ function buildTaintReason(
   const nodes = graph.getAllNodes();
   const taintIdx = TRUST_ORDER.indexOf(graph.maxTaint);
 
+  // Check for watermark inheritance (taint carried from previous turn)
   const inherited = nodes.find((n) => n.id === "inherited-taint");
   if (inherited && TRUST_ORDER.indexOf(inherited.trust) >= taintIdx) {
-    return truncate(watermarkReason ?? "inherited from prev turn", 30);
+    return truncate(`watermark: ${watermarkReason ?? "prev turn"}`, 50);
   }
 
+  // Check for parent session inheritance (cross-session taint propagation)
+  const parentInherited = nodes.find((n) => n.id === "inherited-parent-taint");
+  if (parentInherited && TRUST_ORDER.indexOf(parentInherited.trust) >= taintIdx) {
+    const parentKey = (parentInherited.metadata?.parentSessionKey as string) ?? "unknown";
+    return truncate(`parent: ${shortKey(parentKey)}`, 50);
+  }
+
+  // Check for tool-call escalation (most common cause during a turn)
   const toolNodes = nodes.filter(
     (n) =>
       n.kind === "tool_call" && TRUST_ORDER.indexOf(n.trust) >= taintIdx,
   );
   if (toolNodes.length > 0) {
     const toolNames = toolNodes.map((n) => n.tool).filter(Boolean);
-    return truncate(toolNames.join(", ") || "tool call", 30);
+    return truncate(`tools: ${toolNames.join(", ") || "unknown"}`, 50);
   }
 
+  // Check for context classification (initial trust from sender/provider)
   const histNode = nodes.find(
     (n) =>
-      n.kind === "history" && TRUST_ORDER.indexOf(n.trust) >= taintIdx,
+      n.kind === "history" &&
+      n.id !== "inherited-taint" &&
+      n.id !== "inherited-parent-taint" &&
+      TRUST_ORDER.indexOf(n.trust) >= taintIdx,
   );
   if (histNode) {
-    const reason = (histNode.metadata?.reason as string) ?? "context classification";
-    return truncate(reason, 30);
+    // This is the recordContextAssembled history node — taint from sender classification
+    return truncate(`sender classification (${(histNode.metadata?.reason as string) ?? `${histNode.metadata?.messageCount ?? 0} msgs`})`, 50);
   }
 
   if (graph.maxTaint === "trusted") {
-    return truncate("clean context", 30);
+    return "clean";
   }
-  return truncate("unknown", 30);
+  return "unknown source";
 }
 
 function truncate(s: string, max: number): string {
@@ -497,15 +510,19 @@ export function registerSecurityHooks(
         const sealedMaxTaint = sealedPrevious.summary().maxTaint;
         if (sealedMaxTaint && sealedMaxTaint !== "trusted") {
           const agentId = sessionAgentMap.get(sessionKey) ?? ctx.agentId ?? "unknown";
+          const sealedTools = sealedPrevious.summary().toolsUsed;
+          const sealedReason = `interrupted turn sealed with tools: ${sealedTools.length > 0 ? sealedTools.join(", ") : "(none)"}`;
           watermarkStore.escalate(
             sessionKey,
             sealedMaxTaint,
-            `interrupted turn (sealed by overlapping message)`,
-            `interrupted turn (sealed by overlapping message)`,
+            sealedReason,
+            sealedReason,
           );
           watermarkStore.flush();
           logger.warn(
-            `[provenance:${sessionKey}] Interrupted turn had maxTaint=${sealedMaxTaint}; watermark escalated before replacement`,
+            `[provenance:${shortKey(sessionKey)}] ⚠ SEALED_PREVIOUS_ESCALATION: previous turn was interrupted (sealed by overlapping message). ` +
+            `Sealed turn maxTaint=${sealedMaxTaint}, tools=${sealedTools.length > 0 ? sealedTools.join(", ") : "(none)"}. ` +
+            `Watermark escalated to ${sealedMaxTaint}.`,
           );
         }
       }
@@ -601,7 +618,7 @@ export function registerSecurityHooks(
             `parent taint inheritance`,
           );
           logger.info(
-            `[provenance:${shortKey(sessionKey)}]   Inherited parent taint: ${parentTaint} (parent: ${parentSk}, wm: ${parentWm?.level ?? "none"}, graph: ${parentGraph?.maxTaint ?? "none"})`,
+            `[provenance:${shortKey(sessionKey)}]   PARENT_TAINT_INHERITANCE: ${parentTaint} from parent=${parentSk} (parentWatermark=${parentWm?.level ?? "none"}, parentActiveGraph=${parentGraph?.maxTaint ?? "none"}). Child watermark pre-seeded.`,
           );
         }
       }
@@ -620,16 +637,32 @@ export function registerSecurityHooks(
         `[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`,
       );
       logger.info(
-        `[provenance:${sk}]   Initial trust: ${initialTrust} (sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}, owner: ${ctx.senderIsOwner ?? "unknown"}, group: ${ctx.groupId ?? "none"}, provider: ${ctx.messageProvider ?? "none"}${ctx.sourceProvider && ctx.sourceProvider !== ctx.messageProvider ? `, source: ${ctx.sourceProvider}` : ""})`,
+        `[provenance:${sk}]   CLASSIFY_INITIAL_TRUST: ${initialTrust} | sender=${ctx.senderName ?? ctx.senderId ?? "unknown"} owner=${ctx.senderIsOwner ?? "unset"} group=${ctx.groupId ?? "none"} provider=${ctx.messageProvider ?? "none"}${ctx.sourceProvider ? ` sourceProvider=${ctx.sourceProvider}` : ""} effectiveProvider=${ctx.sourceProvider ?? ctx.messageProvider ?? "none"}`,
       );
-      if (watermark && watermark.level !== initialTrust) {
+      if (watermark && !ownerIsResettingTrust) {
+        const wmIdx = TRUST_ORDER.indexOf(watermark.level);
+        const initIdx = TRUST_ORDER.indexOf(initialTrust);
+        if (wmIdx > initIdx) {
+          logger.info(
+            `[provenance:${sk}]   WATERMARK_INHERITANCE: watermark ${watermark.level} > initial ${initialTrust} → inherited-taint node added. Watermark reason: ${watermark.reason ?? "none"}`,
+          );
+        } else {
+          logger.info(
+            `[provenance:${sk}]   WATERMARK_SKIPPED: watermark ${watermark.level} ≤ initial ${initialTrust} → no inheritance needed`,
+          );
+        }
+      } else if (watermark && ownerIsResettingTrust) {
         logger.info(
-          `[provenance:${sk}]   Inherited taint watermark: ${watermark.level} (reason: ${watermark.reason})`,
+          `[provenance:${sk}]   WATERMARK_RESET_PENDING: watermark ${watermark.level} present but owner is resetting trust → skipped inheritance`,
         );
       }
       if (effectiveTaint !== initialTrust) {
         logger.info(
-          `[provenance:${sk}]   Effective taint: ${effectiveTaint} (escalated from ${initialTrust})`,
+          `[provenance:${sk}]   TAINT_ESCALATED_AT_START: ${initialTrust} → ${effectiveTaint} (graph maxTaint after all inheritance nodes)`,
+        );
+      } else {
+        logger.info(
+          `[provenance:${sk}]   TAINT_AT_START: ${effectiveTaint}`,
         );
       }
     }),
@@ -740,7 +773,7 @@ export function registerSecurityHooks(
             watermarkStore.clear(sessionKey);
             watermarkStore.flush();
             logger.info(
-              `[provenance:${sk}] 🔄 Trust reset: ${previousTaint} → ${targetLevel} (owner override, watermark cleared)`,
+              `[provenance:${sk}] 🔄 TRUST_RESET: ${previousTaint} → ${targetLevel} by owner command .reset-trust. Watermark cleared, approvals cleared, blocked tools cleared.`,
             );
           } else {
             logger.warn(
@@ -1133,15 +1166,36 @@ export function registerSecurityHooks(
         }
         return `${toolKey}(${toolTrust})`;
       });
+      const previousTaintForLog = (graph as any).__lastLoggedTaint ?? graph.maxTaint;
+      // Track taint before tool processing to detect escalation
+      const taintBefore = toolCalls.length > 0 ? previousTaintForLog : graph.maxTaint;
+
       logger.info(
         `[provenance:${sk}] ── LLM Response (iteration ${event.iteration ?? 0}) ──`,
       );
       logger.info(
         `[provenance:${sk}]   Tool calls: ${toolDescriptions.length > 0 ? toolDescriptions.join(", ") : "(none)"}`,
       );
-      logger.info(
-        `[provenance:${sk}]   Taint after: ${graph.maxTaint}`,
-      );
+      if (graph.maxTaint !== taintBefore && toolCalls.length > 0) {
+        // Identify which tool(s) caused the escalation
+        const escalatingTools = toolCalls
+          .map((tc: any) => {
+            const params = tc.params ?? {};
+            const toolKey = resolveToolKey(tc.name, params, compositeTools);
+            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+            return { toolKey, toolTrust };
+          })
+          .filter(({ toolTrust }) => TRUST_ORDER.indexOf(toolTrust) > TRUST_ORDER.indexOf(taintBefore));
+        const escalators = escalatingTools.map(t => `${t.toolKey}(${t.toolTrust})`).join(", ");
+        logger.info(
+          `[provenance:${sk}]   TOOL_TAINT_ESCALATION: ${taintBefore} → ${graph.maxTaint} caused by: ${escalators || "(indirect)"}`,
+        );
+      } else {
+        logger.info(
+          `[provenance:${sk}]   Taint after: ${graph.maxTaint}`,
+        );
+      }
+      (graph as any).__lastLoggedTaint = graph.maxTaint;
     }),
   );
 
@@ -1250,10 +1304,18 @@ export function registerSecurityHooks(
 
         const sk = shortKey(sessionKey);
 
+        const wmBefore = currentWatermark?.level ?? "none";
+        const wmAfter = watermarkStore.getLevel(sessionKey)?.level ?? "none";
+
         logger.info(`[provenance:${sk}] ── Turn Complete ──`);
         logger.info(
           `[provenance:${sk}]   Final taint: ${summary.maxTaint}`,
         );
+        if (summary.maxTaint !== "trusted" || wmBefore !== "none") {
+          logger.info(
+            `[provenance:${sk}]   WATERMARK_UPDATE: ${wmBefore} → ${wmAfter} (turn maxTaint=${summary.maxTaint}, reason: ${wmReason})`,
+          );
+        }
         logger.info(
           `[provenance:${sk}]   External sources: ${summary.externalSources.length > 0 ? summary.externalSources.join(", ") : "(none)"}`,
         );
