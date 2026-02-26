@@ -79,7 +79,8 @@ Every tool has a built-in default output taint. Unknown tools default to `untrus
 | Trust Level | Tools |
 |-------------|-------|
 | **trusted** | `Read`, `Edit`, `Write`, `exec`, `process`, `tts`, `cron`, `sessions_spawn`, `sessions_send`, `sessions_list`, `sessions_history`, `agents_list`, `nodes`, `canvas`, `gateway`, `session_status` |
-| **shared** | `vestige_search`, `vestige_smart_ingest`, `vestige_ingest`, `vestige_promote`, `vestige_demote`, `memory_search`, `memory_get` |
+| **trusted** *(memory)* | `vestige_smart_ingest`, `vestige_ingest`, `vestige_promote`, `vestige_demote`, `memory_search`, `memory_get` |
+| **shared** | `vestige_search` |
 | **external** | `message`, `gog`, `image` |
 | **untrusted** | `web_fetch`, `web_search`, `browser` |
 
@@ -946,8 +947,8 @@ The plugin registers handlers on OpenClaw's internal agent loop hooks:
 
 | Hook | Purpose |
 |------|---------|
-| `context_assembled` | Start provenance graph, record initial context |
-| `before_llm_call` | Evaluate policy, filter tool list, process `.approve` / `.reset-trust` commands |
+| `context_assembled` | Start provenance graph, record initial context, execute `.reset-trust` atomically |
+| `before_llm_call` | Evaluate policy, filter tool list, process `.approve` commands (`.reset-trust` fallback) |
 | `after_llm_call` | Record tool calls, update taint level |
 | `before_tool_call` | Execution-layer enforcement (defense in depth), memory file write blocking |
 | `loop_iteration_start` | Logging |
@@ -980,7 +981,7 @@ The "no write down" property is the novel contribution. Without it, an untrusted
 
 1. **Taint is conservative**: The high-water mark over-restricts. If an agent reads one untrusted web page and ten local files, the entire turn is tainted as `untrusted`. Per-branch tracking would reduce false positives but requires agent forks.
 
-2. **Trust classification is static**: Tool trust levels are hardcoded. A `web_fetch` to `https://internal-api.company.com` gets the same `untrusted` classification as `https://random-blog.com`. Future work could support URL-based trust rules.
+2. **Tool trust classification is static without URI overrides**: Tool trust levels are hardcoded defaults. However, the [URI Trust Classification](#uri-trust-classification) system overrides tool defaults on a per-domain basis — `web_fetch` to `https://internal-api.company.com` can be classified differently from `https://random-blog.com` via `uriTrust` config patterns.
 
 3. **Cross-turn tracking is session-scoped**: The persistent watermark store tracks taint across turns within a session, but taint is cleared on `/new` or `/reset` (fresh session start). If a user starts a new session, inherited taint from the previous session is discarded — even if the LLM's conversation history still contains tainted content from before. This is intentional: a fresh session is a fresh trust boundary.
 
