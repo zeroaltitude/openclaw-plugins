@@ -597,9 +597,12 @@ export function registerSecurityHooks(
         initialTrust,
       );
 
-      // Peek ahead: if the owner is about to .reset-trust, skip watermark
-      // inheritance so the graph starts clean rather than inheriting taint
-      // that will be immediately undone.
+      // Early reset: execute .reset-trust atomically at context assembly time.
+      // This ensures the watermark is cleared BEFORE taint is reported to the
+      // user, so the reported taint level is always ground truth. Previously
+      // this was a "peek-ahead" that skipped inheritance but deferred the actual
+      // clear to before_llm_call — if execution failed there (e.g., bad regex),
+      // the reported taint was false.
       const messages = event.messages ?? [];
       const peekLastUserMsg = [...messages]
         .reverse()
@@ -614,9 +617,26 @@ export function registerSecurityHooks(
                 .join("")
             : ""
         : "";
-      const ownerIsResettingTrust =
-        ctx.senderIsOwner === true &&
-        /\.reset-trust(?:\s+[a-z]+)?/i.test(peekContent.trim());
+      let ownerIsResettingTrust = false;
+      if (ctx.senderIsOwner === true) {
+        const resetMatch = peekContent.trim().match(
+          /\.reset-trust(?:\s+(trusted|shared|external|untrusted))?(?:\s|$)/i,
+        );
+        if (resetMatch) {
+          const targetLevel = (resetMatch[1]?.toLowerCase() ?? "trusted") as TrustLevel;
+          ownerIsResettingTrust = true;
+          // Execute the reset NOW — clear watermark, approvals, blocked tools
+          graph.resetTaint(targetLevel);
+          blockedToolsBySession.delete(sessionKey);
+          approvalStore.clearAll(sessionKey);
+          watermarkStore.clear(sessionKey);
+          watermarkStore.flush();
+          const sk = shortKey(sessionKey);
+          logger.info(
+            `[provenance:${sk}] 🔄 TRUST_RESET (early): → ${targetLevel} by owner command .reset-trust. Watermark cleared, approvals cleared, blocked tools cleared.`,
+          );
+        }
+      }
 
       // Inherit taint watermark from previous turns (same-session)
       const watermark = watermarkStore.getLevel(sessionKey);
@@ -811,29 +831,30 @@ export function registerSecurityHooks(
         }
 
         // Process .reset-trust [level]
+        // NOTE: The actual reset is executed early in context_assembled for
+        // atomicity (reported taint = actual taint). This block is a safety
+        // net — if context_assembled didn't fire or missed the command, we
+        // still execute it here.
         const resetMatch = trimmed.match(/\.reset-trust(?:\s+(trusted|shared|external|untrusted))?(?:\s|$)/i);
         if (resetMatch) {
           const targetLevel = (resetMatch[1]?.toLowerCase() ??
             "trusted") as TrustLevel;
-          const validLevels: TrustLevel[] = [
-            "trusted",
-            "shared",
-            "external",
-            "untrusted",
-          ];
-          if (validLevels.includes(targetLevel)) {
+          // Check if already handled by early reset
+          const alreadyCleared = !watermarkStore.getLevel(sessionKey);
+          if (alreadyCleared) {
+            logger.info(
+              `[provenance:${sk}] 🔄 TRUST_RESET (confirmed): already executed in context_assembled → ${targetLevel}`,
+            );
+          } else {
+            // Safety net: execute reset here if early reset missed it
             const previousTaint = graph.maxTaint;
             graph.resetTaint(targetLevel);
             blockedToolsBySession.delete(sessionKey);
             approvalStore.clearAll(sessionKey);
             watermarkStore.clear(sessionKey);
             watermarkStore.flush();
-            logger.info(
-              `[provenance:${sk}] 🔄 TRUST_RESET: ${previousTaint} → ${targetLevel} by owner command .reset-trust. Watermark cleared, approvals cleared, blocked tools cleared.`,
-            );
-          } else {
             logger.warn(
-              `[provenance:${sk}] ❌ Invalid trust level for .reset-trust: ${targetLevel}`,
+              `[provenance:${sk}] 🔄 TRUST_RESET (late fallback): ${previousTaint} → ${targetLevel} by owner command .reset-trust. Watermark cleared. This should have been handled in context_assembled.`,
             );
           }
         }
