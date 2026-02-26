@@ -500,13 +500,27 @@ export function registerSecurityHooks(
       const ctxMessages = event.messages ?? [];
       for (const msg of ctxMessages) {
         if (msg.role === "tool" && typeof msg.content === "string") {
-          try {
-            const parsed = JSON.parse(msg.content);
-            if (parsed?.tabs && Array.isArray(parsed.tabs)) {
-              recordTabUrls(parsed.tabs);
+          // Extract tab URLs from browser.tabs responses for URI trust resolution.
+          // Content may be wrapped in EXTERNAL_UNTRUSTED_CONTENT markers — try
+          // raw first, then strip wrappers and find the JSON object.
+          const raw = msg.content;
+          if (!raw.includes('"tabs"')) continue;
+          const candidates = [
+            raw,
+            // Strip content markers: find first { to last }
+            raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1),
+          ];
+          for (const candidate of candidates) {
+            if (!candidate) continue;
+            try {
+              const parsed = JSON.parse(candidate);
+              if (parsed?.tabs && Array.isArray(parsed.tabs)) {
+                recordTabUrls(parsed.tabs);
+                break;
+              }
+            } catch {
+              // Try next candidate
             }
-          } catch {
-            // Not JSON or no tabs — skip
           }
         }
       }
