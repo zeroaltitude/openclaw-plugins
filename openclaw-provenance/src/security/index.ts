@@ -811,7 +811,7 @@ export function registerSecurityHooks(
         }
 
         // Process .reset-trust [level]
-        const resetMatch = trimmed.match(/\.reset-trust(?:\s+([a-z]+))?/i);
+        const resetMatch = trimmed.match(/\.reset-trust(?:\s+(trusted|shared|external|untrusted))?(?:\s|$)/i);
         if (resetMatch) {
           const targetLevel = (resetMatch[1]?.toLowerCase() ??
             "trusted") as TrustLevel;
