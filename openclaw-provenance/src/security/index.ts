@@ -1115,8 +1115,13 @@ export function registerSecurityHooks(
       if (!graph) return;
 
       const llmNodeId = lastLlmNodeBySession.get(sessionKey);
-      const toolCalls: Array<{ name: string; params?: Record<string, unknown> }> =
+      // Core sends tool calls with `arguments` (from LLM response); normalize to `params` for internal use
+      const rawToolCalls: Array<{ name: string; params?: Record<string, unknown>; arguments?: Record<string, unknown> }> =
         event.toolCalls ?? [];
+      const toolCalls = rawToolCalls.map(tc => ({
+        name: tc.name,
+        params: tc.params ?? tc.arguments ?? {},
+      }));
 
       const agentId = sessionAgentMap.get(sessionKey);
       const effectiveToolTaints = getResolvedToolTaints(agentId);
