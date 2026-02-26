@@ -1451,10 +1451,6 @@ export function registerSecurityHooks(
       const params = event.params ?? {};
       const result = event.result;
 
-      logger.info(
-        `[provenance]   AFTER_TOOL_CALL: tool=${toolName} hasResult=${!!result} resultType=${typeof result} hasDetails=${!!(result as any)?.details} detailsUrl=${(result as any)?.details?.url ?? "none"}`,
-      );
-
       if (!result || typeof result !== "object") return;
 
       const toolKey = resolveToolKey(toolName, params, compositeTools);
@@ -1462,33 +1458,27 @@ export function registerSecurityHooks(
       // browser.tabs: seed tab URL map from response
       if (toolKey === "browser.tabs") {
         const content = Array.isArray((result as any).content) ? (result as any).content : [];
-        logger.info(`[provenance]   AFTER_TOOL_CALL tabs: contentParts=${content.length}`);
         for (const part of content) {
           if (part?.type === "text" && typeof part.text === "string") {
             const raw = part.text;
-            logger.info(`[provenance]   AFTER_TOOL_CALL tabs: textLen=${raw.length} hasTabs=${raw.includes('"tabs"')} first100=${raw.substring(0, 100)}`);
             if (!raw.includes('"tabs"')) continue;
+            // Content may be wrapped in EXTERNAL_UNTRUSTED_CONTENT markers —
+            // try raw first, then extract the JSON object between first { and last }
             const candidates = [
               raw,
               raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1),
             ];
-            let parsed = false;
             for (const candidate of candidates) {
               if (!candidate) continue;
               try {
                 const obj = JSON.parse(candidate);
                 if (obj?.tabs && Array.isArray(obj.tabs)) {
-                  logger.info(`[provenance]   AFTER_TOOL_CALL tabs: parsed ${obj.tabs.length} tabs, recording URLs`);
                   recordTabUrls(obj.tabs);
-                  parsed = true;
                   break;
                 }
-              } catch (e: any) {
-                logger.info(`[provenance]   AFTER_TOOL_CALL tabs: parse failed: ${e.message}`);
+              } catch {
+                // Try next candidate
               }
-            }
-            if (!parsed) {
-              logger.warn(`[provenance]   AFTER_TOOL_CALL tabs: found "tabs" in text but couldn't parse`);
             }
           }
         }
