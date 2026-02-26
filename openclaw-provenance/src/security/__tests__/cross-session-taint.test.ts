@@ -190,8 +190,9 @@ describe("Cross-session taint inheritance", () => {
       spawnedBy: parentSession,
     });
 
-    // No tools removed (allow mode)
-    expect(result).toBeUndefined();
+    // No tools removed (allow mode) — may return systemPrompt for taint introspection
+    expect(result?.block).toBeUndefined();
+    expect((result as any)?.tools).toBeUndefined();
   });
 
   it("subagent inherits taint from parent's persisted watermark", () => {
@@ -360,8 +361,9 @@ describe("Cross-session taint inheritance", () => {
       spawnedBy: parentSession,
     });
 
-    // Tank allows exec at external — no tools removed
-    expect(result).toBeUndefined();
+    // Tank allows exec at external — no tools removed (may return systemPrompt)
+    expect(result?.block).toBeUndefined();
+    expect((result as any)?.tools).toBeUndefined();
   });
 });
 

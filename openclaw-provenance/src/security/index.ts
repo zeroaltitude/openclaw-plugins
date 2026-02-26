@@ -665,6 +665,7 @@ export function registerSecurityHooks(
           `[provenance:${sk}]   TAINT_AT_START: ${effectiveTaint}`,
         );
       }
+
     }),
   );
 
@@ -816,6 +817,24 @@ export function registerSecurityHooks(
       }
 
       // Evaluate policy (agent-aware)
+      // Build taint introspection line for system prompt injection.
+      // This lets the LLM see its own security state — critical for correct reasoning
+      // about what tools are available and why some may be blocked.
+      const currentTaint = graph.maxTaint;
+      const taintEmoji = currentTaint === "trusted" ? "🟢"
+        : currentTaint === "shared" ? "🟡"
+        : currentTaint === "external" ? "🟠"
+        : "🔴";
+      const currentWm = watermarkStore.getLevel(sessionKey);
+      const wmInfo = currentWm && currentWm.level !== "trusted"
+        ? ` | watermark: ${currentWm.level} (${currentWm.reason ?? "unknown"})`
+        : "";
+      const resetHint = currentTaint !== "trusted"
+        ? " | Owner can use .reset-trust to clear."
+        : "";
+      const taintIntrospection = `\n[Security] ${taintEmoji} Taint: ${currentTaint}${wmInfo}${resetHint}`;
+      const systemPromptWithTaint = (event.systemPrompt ?? "") + taintIntrospection;
+
       const currentTools: Array<{ name: string }> = event.tools ?? [];
       const currentToolNames = currentTools.map((t: any) => t.name);
       const agentId = sessionAgentMap.get(sessionKey);
@@ -835,7 +854,7 @@ export function registerSecurityHooks(
         logger.info(
           `[provenance:${sk}]   Taint: ${graph.maxTaint} | Mode: allow | Tools: ${currentToolNames.length}`,
         );
-        return undefined;
+        return { systemPrompt: systemPromptWithTaint };
       }
 
       if (result.block) {
@@ -898,12 +917,12 @@ export function registerSecurityHooks(
         for (const toolName of result.toolRemovals) {
           graph.recordBlockedTool(toolName, "policy", event.iteration ?? 0);
         }
-        return { tools: allowedTools };
+        return { tools: allowedTools, systemPrompt: systemPromptWithTaint };
       } else {
         blockedToolsBySession.delete(sessionKey);
       }
 
-      return undefined;
+      return { systemPrompt: systemPromptWithTaint };
     }),
   );
 
