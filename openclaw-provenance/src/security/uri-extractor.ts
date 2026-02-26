@@ -48,11 +48,38 @@ export const DEFAULT_COMPOSITE_URI_EXTRACTORS: Record<
   UriExtractorConfig
 > = {
   "browser.navigate": { params: ["targetUrl", "url"] },
+  "browser.open": { params: ["targetUrl", "url"] },
   "browser.snapshot": { params: ["targetUrl"] },
   "browser.screenshot": { params: ["targetUrl"] },
   "browser.console": { params: ["targetUrl"] },
   "browser.pdf": { params: ["targetUrl"] },
 };
+
+// ── Browser tab URL tracking ────────────────────────────────────────────────
+
+/**
+ * Track browser tab URLs from browser.tabs responses so that subsequent
+ * calls using targetId (without targetUrl) can still resolve to a URI
+ * for trust classification.
+ *
+ * This is session-scoped and populated by after_llm_call when it sees
+ * browser.tabs tool calls with tab data in responses.
+ */
+const tabUrlMap = new Map<string, string>(); // targetId → URL
+
+/** Record tab URLs from a browser.tabs response */
+export function recordTabUrls(tabs: Array<{ targetId?: string; url?: string }>): void {
+  for (const tab of tabs) {
+    if (tab.targetId && tab.url) {
+      tabUrlMap.set(tab.targetId, tab.url);
+    }
+  }
+}
+
+/** Resolve a targetId to a URL if known from prior browser.tabs calls */
+export function resolveTabUrl(targetId: string): string | undefined {
+  return tabUrlMap.get(targetId);
+}
 
 // ── Custom composite extractors (message tool) ─────────────────────────────
 
@@ -171,7 +198,13 @@ export function extractToolSourceUris(
 
   // 2. Config-driven composite extractor
   if (extractors[toolKey]) {
-    return extractFromConfig(params, extractors[toolKey]);
+    const uris = extractFromConfig(params, extractors[toolKey]);
+    // Fallback: if no URI extracted but targetId is present, resolve from tab URL map
+    if (uris.length === 0 && typeof params.targetId === "string" && toolKey.startsWith("browser.")) {
+      const tabUrl = resolveTabUrl(params.targetId);
+      if (tabUrl) return [tabUrl];
+    }
+    return uris;
   }
 
   // 3. Config-driven bare tool extractor

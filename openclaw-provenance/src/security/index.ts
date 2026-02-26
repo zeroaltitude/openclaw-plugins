@@ -43,6 +43,7 @@ import {
 import {
   extractToolSourceUris,
   buildUriExtractorMap,
+  recordTabUrls,
   type UriExtractorConfig,
 } from "./uri-extractor.js";
 import {
@@ -492,6 +493,23 @@ export function registerSecurityHooks(
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       turnStartTimes.set(sessionKey, performance.now());
+
+      // Scan conversation messages for browser.tabs responses to populate tab URL map.
+      // This enables URI trust classification for browser.snapshot/screenshot calls
+      // that use targetId instead of targetUrl.
+      const ctxMessages = event.messages ?? [];
+      for (const msg of ctxMessages) {
+        if (msg.role === "tool" && typeof msg.content === "string") {
+          try {
+            const parsed = JSON.parse(msg.content);
+            if (parsed?.tabs && Array.isArray(parsed.tabs)) {
+              recordTabUrls(parsed.tabs);
+            }
+          } catch {
+            // Not JSON or no tabs — skip
+          }
+        }
+      }
 
       // Probabilistic pruning: ~1% of turns, remove watermarks older than 24h.
       // Prevents unbounded growth from ephemeral subagent sessions.
