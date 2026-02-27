@@ -66,6 +66,13 @@ interface HookApi {
     handler: (...args: any[]) => any,
     opts?: Record<string, unknown>,
   ): void;
+  registerCommand?(opts: {
+    name: string;
+    description: string;
+    acceptsArgs?: boolean;
+    requireAuth?: boolean;
+    handler: (ctx: any) => { text: string } | Promise<{ text: string }>;
+  }): void;
 }
 
 interface AgentContext {
@@ -467,7 +474,7 @@ export function registerSecurityHooks(
   );
 
   // --- /provenance slash command ---
-  api.registerCommand({
+  api.registerCommand?.({
     name: "provenance",
     description: "Show current taint/provenance state for all active sessions",
     handler: () => {
