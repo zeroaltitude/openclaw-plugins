@@ -466,6 +466,29 @@ export function registerSecurityHooks(
     `[provenance]   URI trust patterns: ${defaultUriTrustConfig.patterns.length} (${config?.uriTrust ? Object.keys(config.uriTrust).length + " user + " : ""}built-in defaults)`,
   );
 
+  // --- /provenance slash command ---
+  api.registerCommand({
+    name: "provenance",
+    description: "Show current taint/provenance state for all active sessions",
+    handler: () => {
+      const watermarks = watermarkStore.listAll();
+      const entries = Object.entries(watermarks);
+      if (entries.length === 0) {
+        return { text: "🟢 No active taint watermarks. All sessions trusted." };
+      }
+      const taintEmoji = (level: string) =>
+        level === "trusted" ? "🟢"
+          : level === "shared" ? "🟡"
+            : level === "external" ? "🟠"
+              : "🔴";
+      const lines = entries.map(([key, entry]) => {
+        const short = key.length > 20 ? "…" + key.slice(-16) : key;
+        return `${taintEmoji(entry.level)} \`${short}\`: ${entry.level} (${entry.reason})`;
+      });
+      return { text: `**Provenance Status**\n${lines.join("\n")}` };
+    },
+  });
+
   // Per-session state
   const lastLlmNodeBySession = new Map<string, string>();
   const blockedToolsBySession = new Map<string, Set<string>>();
