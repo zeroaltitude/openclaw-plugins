@@ -124,6 +124,27 @@ export interface SecurityPluginConfig {
   missingIdentityTrust?: TrustLevel;
 }
 
+/**
+ * Browser composite keys that read page content and should defer taint
+ * classification until after execution when the source URL is unknown.
+ *
+ * These tools operate on existing browser tabs/pages. The actual URL isn't
+ * always known at call time (e.g., when called without targetId, or when
+ * targetId can't be resolved via the tab URL map). Applying the default
+ * "external" output taint prematurely would cause self-blocking: the tool
+ * escalates taint in after_llm_call, then before_tool_call blocks it.
+ *
+ * Instead, taint is deferred to the current graph level. after_tool_call
+ * classifies the actual URL from the tool result and escalates if needed.
+ */
+const BROWSER_DEFERRED_TOOLS = new Set([
+  "browser.snapshot",
+  "browser.screenshot",
+  "browser.console",
+  "browser.pdf",
+  "browser.navigate",
+]);
+
 /** Get a short session key for log prefixes */
 function shortKey(sessionKey: string): string {
   const parts = sessionKey.split(":");
@@ -1317,14 +1338,12 @@ export function registerSecurityHooks(
           }
         }
 
-        // Defer taint for browser tools with unresolvable targetId.
-        // The URL isn't known until after execution — don't escalate prematurely.
-        // after_tool_call will classify the actual URL from the tool result.
-        if (
-          sourceUris.length === 0 &&
-          toolKey.startsWith("browser.") &&
-          typeof params.targetId === "string"
-        ) {
+        // Defer taint for browser content tools with unresolvable URIs.
+        // When the URL isn't known at call time (no targetUrl param, and
+        // targetId absent or can't be resolved via tab URL map), defer to
+        // the current graph taint. after_tool_call will classify the actual
+        // URL from the tool result and escalate if needed.
+        if (sourceUris.length === 0 && BROWSER_DEFERRED_TOOLS.has(toolKey)) {
           effectiveTrust = graph.maxTaint;
         }
 
@@ -1638,6 +1657,30 @@ export function registerSecurityHooks(
               logger.info(
                 `[provenance:${sk}]   BROWSER_URI_RESOLVED: ${toolKey} on ${truncate(url, 60)} → trust ${effectiveTrust} (graph at ${graph.maxTaint})`,
               );
+            }
+          }
+        } else if (BROWSER_DEFERRED_TOOLS.has(toolKey)) {
+          // Safety net: a deferred browser content tool completed but the
+          // result didn't include a resolvable URL. Apply the tool's default
+          // output taint so external content doesn't silently enter context
+          // at the deferred (optimistic) trust level.
+          const sessionKey = _ctx.sessionKey ?? lastToolCallSessionKey;
+          const graph = store.getActive(sessionKey);
+          if (graph) {
+            const agentId = sessionAgentMap.get(sessionKey);
+            const effectiveToolTaints = getResolvedToolTaints(agentId);
+            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+            const currentMaxIdx = TRUST_ORDER.indexOf(graph.maxTaint);
+            const toolTrustIdx = TRUST_ORDER.indexOf(toolTrust);
+            if (toolTrustIdx > currentMaxIdx) {
+              const sk = shortKey(sessionKey);
+              logger.warn(
+                `[provenance:${sk}]   BROWSER_DEFERRED_FALLBACK: ${toolKey} completed but URL unresolvable from result — applying default tool taint ${toolTrust}`,
+              );
+              graph.recordToolCall(toolKey, 0, undefined, effectiveToolTaints, {
+                sourceUris: [],
+                effectiveTrust: toolTrust,
+              });
             }
           }
         }

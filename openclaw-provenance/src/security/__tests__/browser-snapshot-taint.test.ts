@@ -1,0 +1,284 @@
+/**
+ * Browser Snapshot Taint Deferral — Test Suite
+ *
+ * Validates that browser content tools (snapshot, screenshot, etc.) defer
+ * taint classification until after execution when the source URL is unknown.
+ *
+ * Bug: browser.snapshot without a resolvable URL would apply "external" taint
+ * in after_llm_call (before execution), causing self-blocking in before_tool_call.
+ * Fix: defer taint to graph.maxTaint; after_tool_call classifies the actual URL.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  registerSecurityHooks,
+  type SecurityPluginConfig,
+} from "../index.js";
+
+// ── Helpers ──────────────────────────────────────────────────
+
+function makeLogger() {
+  const logs: string[] = [];
+  return {
+    info: (...args: any[]) => logs.push(args.join(" ")),
+    warn: (...args: any[]) => logs.push("WARN: " + args.join(" ")),
+    error: (...args: any[]) => logs.push("ERROR: " + args.join(" ")),
+    logs,
+  };
+}
+
+interface HookHandler {
+  (...args: any[]): any;
+}
+
+function makeApi() {
+  const hooks = new Map<string, HookHandler[]>();
+  return {
+    on(name: string, handler: HookHandler) {
+      if (!hooks.has(name)) hooks.set(name, []);
+      hooks.get(name)!.push(handler);
+    },
+    fire(name: string, event: any, ctx: any): any {
+      const handlers = hooks.get(name) ?? [];
+      let result: any;
+      for (const h of handlers) {
+        result = h(event, ctx);
+      }
+      return result;
+    },
+    hooks,
+  };
+}
+
+const ownerCtx = {
+  agentId: "main",
+  sessionKey: "agent:main:discord:dm:owner",
+  messageProvider: "discord",
+  senderId: "owner-123",
+  senderIsOwner: true,
+};
+
+// ── Tests ────────────────────────────────────────────────────
+
+describe("Browser snapshot taint deferral", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "provenance-browser-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function setup(config?: Partial<SecurityPluginConfig>) {
+    const logger = makeLogger();
+    const api = makeApi();
+    const { store } = registerSecurityHooks(api, logger, {
+      workspaceDir: tmpDir,
+      verbose: true,
+      ...config,
+    });
+    return { api, logger, store };
+  }
+
+  /** Run context_assembled + before_llm_call + after_llm_call for a browser tool call */
+  function simulateBrowserToolCall(
+    api: ReturnType<typeof makeApi>,
+    ctx: typeof ownerCtx,
+    toolAction: string,
+    toolParams: Record<string, unknown>,
+  ) {
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "take a snapshot" }],
+      messageCount: 1,
+    }, ctx);
+
+    api.fire("before_llm_call", {
+      iteration: 1,
+      messages: [{ role: "user", content: "take a snapshot" }],
+      messageCount: 1,
+      tools: [{ name: "browser" }],
+    }, ctx);
+
+    api.fire("after_llm_call", {
+      iteration: 1,
+      toolCalls: [{
+        name: "browser",
+        arguments: { action: toolAction, ...toolParams },
+      }],
+    }, ctx);
+  }
+
+  it("browser.snapshot without targetId defers taint (stays trusted)", () => {
+    const { api, logger, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph).toBeDefined();
+    expect(graph!.maxTaint).toBe("trusted");
+
+    // Should NOT log a taint escalation
+    const escalationLine = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
+    expect(escalationLine).toBeUndefined();
+  });
+
+  it("browser.screenshot without targetId defers taint (stays trusted)", () => {
+    const { api, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "screenshot", {});
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+
+  it("browser.snapshot with unresolvable targetId defers taint (stays trusted)", () => {
+    const { api, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {
+      targetId: "unknown-tab-id-123",
+    });
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+
+  it("after_tool_call with trusted URL does not escalate", () => {
+    const { api, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {
+      targetId: "tab-abc",
+    });
+
+    // Simulate tool result with a trusted URL (openclaw.ai)
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: { action: "snapshot", targetId: "tab-abc" },
+      result: {
+        content: [{ type: "text", text: "page content" }],
+        details: { targetId: "tab-abc", url: "https://openclaw.ai/dashboard" },
+      },
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+
+  it("after_tool_call with untrusted URL escalates taint", () => {
+    const { api, logger, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {
+      targetId: "tab-xyz",
+    });
+
+    // Taint should still be trusted after deferral
+    expect(store.getActive(ownerCtx.sessionKey)!.maxTaint).toBe("trusted");
+
+    // Simulate tool result with an untrusted URL
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: { action: "snapshot", targetId: "tab-xyz" },
+      result: {
+        content: [{ type: "text", text: "page content" }],
+        details: { targetId: "tab-xyz", url: "https://evil-site.example.com/malware" },
+      },
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("untrusted");
+
+    const reclassLine = logger.logs.find(l => l.includes("BROWSER_URL_RECLASSIFICATION"));
+    expect(reclassLine).toBeDefined();
+  });
+
+  it("after_tool_call fallback applies default tool taint when URL is missing from result", () => {
+    const { api, logger, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
+
+    // Taint deferred to trusted
+    expect(store.getActive(ownerCtx.sessionKey)!.maxTaint).toBe("trusted");
+
+    // Simulate tool result WITHOUT details.url
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: { action: "snapshot" },
+      result: {
+        content: [{ type: "text", text: "page content" }],
+        // No details.url — can't resolve
+      },
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    // Fallback should apply browser.snapshot's default output taint ("external")
+    expect(graph!.maxTaint).toBe("external");
+
+    const fallbackLine = logger.logs.find(l => l.includes("BROWSER_DEFERRED_FALLBACK"));
+    expect(fallbackLine).toBeDefined();
+  });
+
+  it("browser.tabs does NOT defer (remains trusted)", () => {
+    const { api, store } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "list tabs" }],
+      messageCount: 1,
+    }, ownerCtx);
+
+    api.fire("before_llm_call", {
+      iteration: 1,
+      messages: [{ role: "user", content: "list tabs" }],
+      messageCount: 1,
+      tools: [{ name: "browser" }],
+    }, ownerCtx);
+
+    api.fire("after_llm_call", {
+      iteration: 1,
+      toolCalls: [{
+        name: "browser",
+        arguments: { action: "tabs" },
+      }],
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    // browser.tabs has default output taint "trusted"
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+
+  it("browser.open is NOT deferred (control action with trusted output taint)", () => {
+    const { api, store } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "open browser" }],
+      messageCount: 1,
+    }, ownerCtx);
+
+    api.fire("before_llm_call", {
+      iteration: 1,
+      messages: [{ role: "user", content: "open browser" }],
+      messageCount: 1,
+      tools: [{ name: "browser" }],
+    }, ownerCtx);
+
+    // browser.open without a URL — not in BROWSER_DEFERRED_TOOLS,
+    // and output taint is "trusted" so no escalation
+    api.fire("after_llm_call", {
+      iteration: 1,
+      toolCalls: [{
+        name: "browser",
+        arguments: { action: "open" },
+      }],
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    // browser.open has default output taint "trusted"
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+});
