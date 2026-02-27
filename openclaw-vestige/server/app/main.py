@@ -273,8 +273,12 @@ async def session_context(
         "include_predictions": req.include_predictions,
     }
     if req.context:
-        args["context"] = req.context.model_dump(exclude_none=True)
-    args.update(_agent_context(x_agent_id))
+        ctx = req.context.model_dump(exclude_none=True)
+        if x_agent_id:
+            ctx.setdefault("topics", []).insert(0, f"agent:{x_agent_id}")
+        args["context"] = ctx
+    elif x_agent_id:
+        args["context"] = {"topics": [f"agent:{x_agent_id}"]}
     return await _tool("session_context", args)
 
 
