@@ -258,6 +258,12 @@ export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
   vestige_search: { "*": "allow" },
   vestige_promote: { "*": "allow" },
   vestige_demote: { "*": "allow" },
+  vestige_dream: { "*": "allow" },
+  vestige_consolidate: { "*": "allow" },
+  vestige_importance_score: { "*": "allow" },
+  vestige_explore_connections: { "*": "allow" },
+  vestige_predict: { "*": "allow" },
+  vestige_session_context: { "*": "allow" },
 };
 
 /**
@@ -280,6 +286,8 @@ export const DEFAULT_TAINT_DEFAULT_TOOLS: Record<string, ToolOverride> = {
   sessions_spawn: {},
   vestige_ingest: {},
   vestige_smart_ingest: {},
+  vestige_dream: {},
+  vestige_consolidate: {},
   gog: {},
 };
 

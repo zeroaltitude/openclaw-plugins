@@ -164,6 +164,12 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   vestige_ingest: "trusted", // write-only, output is confirmation
   vestige_promote: "trusted", // write-only, output is confirmation
   vestige_demote: "trusted", // write-only, output is confirmation
+  vestige_dream: "trusted", // local memory consolidation; output is insights
+  vestige_consolidate: "trusted", // FSRS-6 maintenance cycle; output is stats
+  vestige_importance_score: "trusted", // scoring helper; no external data
+  vestige_explore_connections: "trusted", // graph traversal of local memory
+  vestige_predict: "trusted", // prediction from local memory state
+  vestige_session_context: "trusted", // combined session init from local memory
 
   // ── External sources ──────────────────────────────────────────────
   message: "external", // channel messages contain external content
