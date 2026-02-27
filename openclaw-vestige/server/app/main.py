@@ -17,13 +17,19 @@ from .auth import BearerAuthMiddleware
 from .mcp_client import MCPClient, MCPError, MCPToolError
 from .models import (
     CodebaseRequest,
+    ConsolidateRequest,
     DemoteRequest,
+    DreamRequest,
+    ExploreConnectionsRequest,
     HealthResponse,
+    ImportanceScoreRequest,
     IngestRequest,
     IntentionRequest,
     MemoryRequest,
+    PredictRequest,
     PromoteRequest,
     SearchRequest,
+    SessionContextRequest,
     SmartIngestRequest,
     VestigeResponse,
 )
@@ -71,7 +77,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OpenClaw Vestige Bridge",
     description="HTTP bridge to the Vestige cognitive memory MCP server",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 app.add_middleware(BearerAuthMiddleware)
@@ -183,9 +189,10 @@ async def promote(
     req: PromoteRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
-    args: dict[str, Any] = {"memory_id": req.memory_id}
+    # v2.0: promote_memory deprecated → use memory tool with action='promote'
+    args: dict[str, Any] = {"action": "promote", "memory_id": req.memory_id}
     args.update(_agent_context(x_agent_id))
-    return await _tool("promote_memory", args)
+    return await _tool("memory", args)
 
 
 @app.post("/demote", response_model=VestigeResponse)
@@ -193,9 +200,10 @@ async def demote(
     req: DemoteRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
-    args: dict[str, Any] = {"memory_id": req.memory_id}
+    # v2.0: demote_memory deprecated → use memory tool with action='demote'
+    args: dict[str, Any] = {"action": "demote", "memory_id": req.memory_id}
     args.update(_agent_context(x_agent_id))
-    return await _tool("demote_memory", args)
+    return await _tool("memory", args)
 
 
 @app.post("/memory", response_model=VestigeResponse)
@@ -238,3 +246,85 @@ async def intention(
         args["trigger"] = req.trigger
     args.update(_agent_context(x_agent_id))
     return await _tool("intention", args)
+
+
+# ── v2.0 Endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/dream", response_model=VestigeResponse)
+async def dream(
+    req: DreamRequest,
+    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
+):
+    args: dict[str, Any] = {"memory_count": req.memory_count}
+    args.update(_agent_context(x_agent_id))
+    return await _tool("dream", args)
+
+
+@app.post("/session_context", response_model=VestigeResponse)
+async def session_context(
+    req: SessionContextRequest,
+    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
+):
+    args: dict[str, Any] = {
+        "queries": req.queries,
+        "token_budget": req.token_budget,
+        "include_status": req.include_status,
+        "include_intentions": req.include_intentions,
+        "include_predictions": req.include_predictions,
+    }
+    if req.context:
+        args["context"] = req.context.model_dump(exclude_none=True)
+    args.update(_agent_context(x_agent_id))
+    return await _tool("session_context", args)
+
+
+@app.post("/explore_connections", response_model=VestigeResponse)
+async def explore_connections(
+    req: ExploreConnectionsRequest,
+    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
+):
+    args: dict[str, Any] = {
+        "action": req.action.value,
+        "from": req.from_id,
+        "limit": req.limit,
+    }
+    if req.to_id:
+        args["to"] = req.to_id
+    args.update(_agent_context(x_agent_id))
+    return await _tool("explore_connections", args)
+
+
+@app.post("/predict", response_model=VestigeResponse)
+async def predict(
+    req: PredictRequest,
+    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
+):
+    args: dict[str, Any] = {}
+    if req.context:
+        args["context"] = req.context.model_dump(exclude_none=True)
+    args.update(_agent_context(x_agent_id))
+    return await _tool("predict", args)
+
+
+@app.post("/importance_score", response_model=VestigeResponse)
+async def importance_score(
+    req: ImportanceScoreRequest,
+    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
+):
+    args: dict[str, Any] = {"content": req.content}
+    if req.context_topics:
+        args["context_topics"] = req.context_topics
+    if req.project:
+        args["project"] = req.project
+    args.update(_agent_context(x_agent_id))
+    return await _tool("importance_score", args)
+
+
+@app.post("/consolidate", response_model=VestigeResponse)
+async def consolidate(
+    req: ConsolidateRequest,
+    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
+):
+    args: dict[str, Any] = {}
+    args.update(_agent_context(x_agent_id))
+    return await _tool("consolidate", args)
