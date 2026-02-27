@@ -190,7 +190,7 @@ async def promote(
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
     # v2.0: promote_memory deprecated → use memory tool with action='promote'
-    args: dict[str, Any] = {"action": "promote", "memory_id": req.memory_id}
+    args: dict[str, Any] = {"action": "promote", "id": req.memory_id}
     args.update(_agent_context(x_agent_id))
     return await _tool("memory", args)
 
@@ -201,7 +201,7 @@ async def demote(
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
     # v2.0: demote_memory deprecated → use memory tool with action='demote'
-    args: dict[str, Any] = {"action": "demote", "memory_id": req.memory_id}
+    args: dict[str, Any] = {"action": "demote", "id": req.memory_id}
     args.update(_agent_context(x_agent_id))
     return await _tool("memory", args)
 
