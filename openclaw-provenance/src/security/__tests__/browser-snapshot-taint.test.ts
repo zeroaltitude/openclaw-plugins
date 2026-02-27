@@ -281,4 +281,134 @@ describe("Browser snapshot taint deferral", () => {
     // browser.open has default output taint "trusted"
     expect(graph!.maxTaint).toBe("trusted");
   });
+
+  // ── URL extraction from content text (MCP standard format) ──
+
+  it("after_tool_call extracts URL from content text JSON and escalates for untrusted site", () => {
+    const { api, logger, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
+
+    expect(store.getActive(ownerCtx.sessionKey)!.maxTaint).toBe("trusted");
+
+    // MCP browser tools return URL in content[0].text JSON, not in result.details
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: { action: "snapshot" },
+      result: {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            targetId: "tab-123",
+            url: "https://evil-site.example.com/phishing",
+            snapshot: "page content here",
+          }),
+        }],
+      },
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("untrusted");
+
+    const reclassLine = logger.logs.find(l => l.includes("BROWSER_URL_RECLASSIFICATION"));
+    expect(reclassLine).toBeDefined();
+  });
+
+  it("after_tool_call extracts URL from content text JSON and stays trusted for openclaw.ai", () => {
+    const { api, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
+
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: { action: "snapshot" },
+      result: {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            targetId: "tab-456",
+            url: "https://openclaw.ai/dashboard",
+            snapshot: "page content here",
+          }),
+        }],
+      },
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+
+  it("after_tool_call handles bare 'browser' toolName when params.action is missing", () => {
+    const { api, logger, store } = setup();
+
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
+
+    expect(store.getActive(ownerCtx.sessionKey)!.maxTaint).toBe("trusted");
+
+    // Core may not pass params.action to after_tool_call — composite key
+    // resolution fails, toolKey = "browser" (bare name)
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: {}, // no action!
+      result: {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            url: "https://hackers.com/recruit",
+            snapshot: "hacker content",
+          }),
+        }],
+      },
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("untrusted");
+
+    const reclassLine = logger.logs.find(l => l.includes("BROWSER_URL_RECLASSIFICATION"));
+    expect(reclassLine).toBeDefined();
+  });
+
+  it("two snapshots: trusted site then untrusted site escalates correctly", () => {
+    const { api, store } = setup();
+
+    // Turn 1: snapshot openclaw.ai — stays trusted
+    simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
+
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: { action: "snapshot" },
+      result: {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ url: "https://openclaw.ai/home", targetId: "t1" }),
+        }],
+      },
+    }, ownerCtx);
+
+    expect(store.getActive(ownerCtx.sessionKey)!.maxTaint).toBe("trusted");
+
+    // Simulate tool completing and LLM making a second call in same turn
+    api.fire("after_llm_call", {
+      iteration: 2,
+      toolCalls: [{
+        name: "browser",
+        arguments: { action: "snapshot" },
+      }],
+    }, ownerCtx);
+
+    // Turn 1, second snapshot: untrusted site — escalates
+    api.fire("after_tool_call", {
+      toolName: "browser",
+      params: { action: "snapshot" },
+      result: {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ url: "https://hackers.com/recruit", targetId: "t2" }),
+        }],
+      },
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("untrusted");
+  });
 });

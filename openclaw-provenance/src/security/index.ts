@@ -1612,17 +1612,70 @@ export function registerSecurityHooks(
         }
       }
 
-      // browser.snapshot/screenshot/console/pdf: update tab URL from result details
-      if (toolKey.startsWith("browser.") && toolKey !== "browser.tabs") {
-        const details = (result as any).details;
-        const url = details?.url;
-        const targetId = details?.targetId ?? params.targetId;
-        if (typeof url === "string" && typeof targetId === "string") {
-          // Update the tab map with the ACTUAL current URL
-          recordTabUrls([{ targetId, url }]);
+      // browser.snapshot/screenshot/console/pdf: extract URL from result and reclassify.
+      // Handle both resolved composite keys (browser.snapshot) and bare tool name
+      // (browser — when params.action is missing from after_tool_call event).
+      const isBrowserContentResult =
+        (toolKey.startsWith("browser.") && toolKey !== "browser.tabs") ||
+        (toolName.toLowerCase() === "browser" && toolKey === toolName);
 
-          // Re-classify: if the actual URL differs from what was used at after_llm_call,
-          // we may need to escalate taint
+      if (isBrowserContentResult) {
+        // Extract URL from result — try multiple locations:
+        //   1. result.details (structured response extension)
+        //   2. content[].text JSON (MCP standard format — URL embedded in response body)
+        let url: string | undefined;
+        let resolvedTargetId: string | undefined;
+
+        const details = (result as any).details;
+        if (typeof details?.url === "string") {
+          url = details.url;
+          resolvedTargetId = details.targetId ?? params.targetId;
+        }
+
+        if (!url) {
+          const content = Array.isArray((result as any).content) ? (result as any).content : [];
+          for (const part of content) {
+            if (part?.type === "text" && typeof part.text === "string") {
+              const raw = part.text;
+              if (!raw.includes('"url"')) continue;
+              const candidates = [
+                raw,
+                raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1),
+              ];
+              for (const candidate of candidates) {
+                if (!candidate) continue;
+                try {
+                  const parsed = JSON.parse(candidate);
+                  if (typeof parsed?.url === "string") {
+                    url = parsed.url;
+                    resolvedTargetId = parsed?.targetId ?? params.targetId;
+                    break;
+                  }
+                  if (typeof parsed?.details?.url === "string") {
+                    url = parsed.details.url;
+                    resolvedTargetId = parsed?.details?.targetId ?? params.targetId;
+                    break;
+                  }
+                } catch { /* try next candidate */ }
+              }
+              if (url) break;
+            }
+          }
+        }
+
+        // Use the composite key if resolved, otherwise fall back to a
+        // representative deferred key for trust lookups
+        const effectiveKey = BROWSER_DEFERRED_TOOLS.has(toolKey) ? toolKey
+          : toolKey.startsWith("browser.") ? toolKey
+          : "browser.snapshot";
+
+        if (typeof url === "string") {
+          // Update tab map if we have both URL and targetId
+          if (typeof resolvedTargetId === "string") {
+            recordTabUrls([{ targetId: resolvedTargetId, url }]);
+          }
+
+          // Re-classify: compare actual URL trust against current graph taint
           const sessionKey = _ctx.sessionKey ?? lastToolCallSessionKey;
           const graph = store.getActive(sessionKey);
           if (graph) {
@@ -1630,7 +1683,7 @@ export function registerSecurityHooks(
             const effectiveUriTrustConfig = getUriTrustConfig(agentId);
             const uriTrust = classifyUri(url, effectiveUriTrustConfig);
             const effectiveToolTaints = getResolvedToolTaints(agentId);
-            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+            const toolTrust = getToolTrust(effectiveKey, effectiveToolTaints);
             const effectiveTrust = uriTrust ?? toolTrust;
 
             // If the actual URL yields worse trust than what was recorded,
@@ -1640,26 +1693,23 @@ export function registerSecurityHooks(
             if (actualIdx > currentMax) {
               const sk = shortKey(sessionKey);
               logger.warn(
-                `[provenance:${sk}]   BROWSER_URL_RECLASSIFICATION: tab ${shortKey(targetId)} navigated to ${truncate(url, 60)} → trust ${effectiveTrust} (was cached as trusted). Escalating taint.`,
+                `[provenance:${sk}]   BROWSER_URL_RECLASSIFICATION: ${resolvedTargetId ? `tab ${shortKey(resolvedTargetId)}` : "browser"} on ${truncate(url, 60)} → trust ${effectiveTrust}. Escalating taint.`,
               );
-              // Record a corrective tool call node with the real URL trust
               graph.recordToolCall(
-                toolKey,
+                effectiveKey,
                 0, // iteration unknown at this point
                 undefined,
                 effectiveToolTaints,
                 { sourceUris: [url], effectiveTrust },
               );
             } else if (uriTrust !== undefined) {
-              // Log resolved URI classification (deferred from after_llm_call
-              // when targetId couldn't be resolved to a URL at call time)
               const sk = shortKey(sessionKey);
               logger.info(
-                `[provenance:${sk}]   BROWSER_URI_RESOLVED: ${toolKey} on ${truncate(url, 60)} → trust ${effectiveTrust} (graph at ${graph.maxTaint})`,
+                `[provenance:${sk}]   BROWSER_URI_RESOLVED: ${effectiveKey} on ${truncate(url, 60)} → trust ${effectiveTrust} (graph at ${graph.maxTaint})`,
               );
             }
           }
-        } else if (BROWSER_DEFERRED_TOOLS.has(toolKey)) {
+        } else if (BROWSER_DEFERRED_TOOLS.has(toolKey) || toolName.toLowerCase() === "browser") {
           // Safety net: a deferred browser content tool completed but the
           // result didn't include a resolvable URL. Apply the tool's default
           // output taint so external content doesn't silently enter context
@@ -1669,15 +1719,15 @@ export function registerSecurityHooks(
           if (graph) {
             const agentId = sessionAgentMap.get(sessionKey);
             const effectiveToolTaints = getResolvedToolTaints(agentId);
-            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+            const toolTrust = getToolTrust(effectiveKey, effectiveToolTaints);
             const currentMaxIdx = TRUST_ORDER.indexOf(graph.maxTaint);
             const toolTrustIdx = TRUST_ORDER.indexOf(toolTrust);
             if (toolTrustIdx > currentMaxIdx) {
               const sk = shortKey(sessionKey);
               logger.warn(
-                `[provenance:${sk}]   BROWSER_DEFERRED_FALLBACK: ${toolKey} completed but URL unresolvable from result — applying default tool taint ${toolTrust}`,
+                `[provenance:${sk}]   BROWSER_DEFERRED_FALLBACK: ${effectiveKey} completed but URL unresolvable from result — applying default tool taint ${toolTrust}`,
               );
-              graph.recordToolCall(toolKey, 0, undefined, effectiveToolTaints, {
+              graph.recordToolCall(effectiveKey, 0, undefined, effectiveToolTaints, {
                 sourceUris: [],
                 effectiveTrust: toolTrust,
               });
