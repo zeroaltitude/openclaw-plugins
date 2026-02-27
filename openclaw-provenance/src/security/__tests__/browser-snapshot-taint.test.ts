@@ -368,6 +368,94 @@ describe("Browser snapshot taint deferral", () => {
     expect(reclassLine).toBeDefined();
   });
 
+  // ── URI pattern matching: /** matches bare domain (no trailing path) ──
+
+  it("browser.navigate to https://openclaw.ai (no path) stays trusted", () => {
+    const { api, store } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "navigate to openclaw" }],
+      messageCount: 1,
+    }, ownerCtx);
+
+    api.fire("before_llm_call", {
+      iteration: 1,
+      messages: [{ role: "user", content: "navigate to openclaw" }],
+      messageCount: 1,
+      tools: [{ name: "browser" }],
+    }, ownerCtx);
+
+    // browser.navigate extracts URL from targetUrl param — URI trust should
+    // match "https://openclaw.ai/**" even without a trailing path
+    api.fire("after_llm_call", {
+      iteration: 1,
+      toolCalls: [{
+        name: "browser",
+        arguments: { action: "navigate", targetUrl: "https://openclaw.ai" },
+      }],
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+
+  it("browser.navigate to https://openclaw.ai/dashboard stays trusted", () => {
+    const { api, store } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "navigate" }],
+      messageCount: 1,
+    }, ownerCtx);
+
+    api.fire("before_llm_call", {
+      iteration: 1,
+      messages: [{ role: "user", content: "navigate" }],
+      messageCount: 1,
+      tools: [{ name: "browser" }],
+    }, ownerCtx);
+
+    api.fire("after_llm_call", {
+      iteration: 1,
+      toolCalls: [{
+        name: "browser",
+        arguments: { action: "navigate", targetUrl: "https://openclaw.ai/dashboard" },
+      }],
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("trusted");
+  });
+
+  it("browser.navigate to untrusted site escalates taint", () => {
+    const { api, store } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "navigate" }],
+      messageCount: 1,
+    }, ownerCtx);
+
+    api.fire("before_llm_call", {
+      iteration: 1,
+      messages: [{ role: "user", content: "navigate" }],
+      messageCount: 1,
+      tools: [{ name: "browser" }],
+    }, ownerCtx);
+
+    api.fire("after_llm_call", {
+      iteration: 1,
+      toolCalls: [{
+        name: "browser",
+        arguments: { action: "navigate", targetUrl: "https://hackers.com" },
+      }],
+    }, ownerCtx);
+
+    const graph = store.getActive(ownerCtx.sessionKey);
+    expect(graph!.maxTaint).toBe("untrusted");
+  });
+
   it("two snapshots: trusted site then untrusted site escalates correctly", () => {
     const { api, store } = setup();
 

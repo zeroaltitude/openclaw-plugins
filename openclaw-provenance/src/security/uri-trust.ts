@@ -165,6 +165,14 @@ function compilePattern(pattern: string): RegExp {
   const domainRegex = compileSegment(domainPart, "[^./]*");
   const pathRegex = compileSegment(pathPart, "[^/]*");
 
+  // When path is exactly "/**", ** should match zero or more segments —
+  // including no path at all. Make the leading "/" optional so that
+  // "https://openclaw.ai/**" matches both "https://openclaw.ai" and
+  // "https://openclaw.ai/anything".
+  if (pathPart === "/**") {
+    return new RegExp(`^${domainRegex}(/.*)?$`, "i");
+  }
+
   return new RegExp(`^${domainRegex}${pathRegex}$`, "i");
 }
 
