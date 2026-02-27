@@ -1080,7 +1080,7 @@ export function registerSecurityHooks(
               : level === "external" ? "🟠"
                 : "🔴";
 
-        const footer = `-# ${taintEmoji(startLevel)} start: ${startLevel} (${truncate(startReason, 80)}) → ${taintEmoji(taintLevel)} end: ${taintLevel} (${truncate(taintReason, 80)}) | last impacted: ${lastImpacted}`;
+        const footer = `\`${taintEmoji(startLevel)} ${startLevel} (${truncate(startReason, 60)}) → ${taintEmoji(taintLevel)} ${taintLevel} (${truncate(taintReason, 60)}) | impacted: ${lastImpacted}\``;
         return {
           params: { ...event.params, message: event.params.message + "\n" + footer },
         };
@@ -1512,7 +1512,7 @@ export function registerSecurityHooks(
             .map((r) => `${r.tool}(${truncate(r.uri, 40)})`)
             .slice(0, 3);
           const uriPart = uriSummary.length > 0 ? ` | sources: ${uriSummary.join(", ")}` : "";
-          const footer = `-# ${taintEmoji(startLevel)} start: ${startLevel} (${truncate(startReason, 80)}) → ${taintEmoji(taintLevel)} end: ${taintLevel} (${truncate(taintReason, 80)}) | last impacted: ${lastImpacted}${uriPart}`;
+          const footer = `\`${taintEmoji(startLevel)} ${startLevel} (${truncate(startReason, 60)}) → ${taintEmoji(taintLevel)} ${taintLevel} (${truncate(taintReason, 60)}) | impacted: ${lastImpacted}${uriPart}\``;
           return { content: event.content + "\n" + footer };
         }
       },
