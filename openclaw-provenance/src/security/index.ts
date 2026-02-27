@@ -1458,6 +1458,15 @@ export function registerSecurityHooks(
         const graph = store.getActive(sessionKey);
         if (!graph) return;
 
+        // Don't append footer to silent/heartbeat messages — it breaks
+        // the downstream regex detection that swallows NO_REPLY / HEARTBEAT_OK
+        const content = event.content;
+        if (typeof content === "string") {
+          const trimmed = content.trim();
+          if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return;
+          if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return;
+        }
+
         graph.recordOutput(event.content?.length ?? 0);
 
         const taintLevel = graph.maxTaint;
