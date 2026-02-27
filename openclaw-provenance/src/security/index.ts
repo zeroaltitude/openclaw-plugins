@@ -1080,9 +1080,9 @@ export function registerSecurityHooks(
               : level === "external" ? "🟠"
                 : "🔴";
 
-        const header = `> ${taintEmoji(startLevel)} start: ${startLevel} (${truncate(startReason, 80)}) → ${taintEmoji(taintLevel)} end: ${taintLevel} (${truncate(taintReason, 80)}) | last impacted: ${lastImpacted}`;
+        const header = `\`${taintEmoji(startLevel)} ${startLevel} (${truncate(startReason, 40)}) → ${taintEmoji(taintLevel)} ${taintLevel} | impacted: ${lastImpacted}\``;
         return {
-          params: { ...event.params, message: header + "\n\n" + event.params.message },
+          params: { ...event.params, message: header + "\n" + event.params.message },
         };
       }
 
