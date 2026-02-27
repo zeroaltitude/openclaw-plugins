@@ -40,7 +40,9 @@ export const DEFAULT_URI_EXTRACTORS: Record<string, UriExtractorConfig> = {
   // coming IN. Extracting a URI from the content param would cause the
   // vestige://** URI trust pattern ("shared") to override the tool output
   // taint ("trusted"), incorrectly tainting write-only operations.
-  memory_search: { params: ["query"], scheme: "memory" },
+  // memory_search intentionally omitted — local workspace memory files,
+  // trusted by default. Same rationale as vestige_search: the memory://
+  // URI pattern ("shared") would incorrectly taint a trusted local tool.
   memory_get: { params: ["path"], scheme: "file" },
 };
 

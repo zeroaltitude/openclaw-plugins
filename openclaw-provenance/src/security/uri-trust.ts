@@ -45,7 +45,7 @@ export const DEFAULT_URI_TRUST_PATTERNS: Record<string, TrustLevel> = {
 
   // Cross-agent memory
   "vestige://**": "shared",
-  "memory://**": "shared",
+  "memory://**": "trusted",
 
   // Google Workspace
   "google://**": "external",
