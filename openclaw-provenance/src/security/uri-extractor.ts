@@ -33,8 +33,10 @@ export const DEFAULT_URI_EXTRACTORS: Record<string, UriExtractorConfig> = {
   Edit: { params: ["file_path", "path"], scheme: "file" },
   image: { params: ["image", "images"], scheme: "file" },
   gog: { params: ["query"], scheme: "google" },
-  vestige_search: { params: ["query"], scheme: "vestige" },
-  // vestige write ops intentionally omitted — content is going OUT, not
+  // vestige_search intentionally omitted — local cognitive memory, trusted
+  // by default. The vestige:// URI pattern ("shared") would override the
+  // tool output taint ("trusted"), same issue as vestige write ops.
+  // vestige write ops also intentionally omitted — content is going OUT, not
   // coming IN. Extracting a URI from the content param would cause the
   // vestige://** URI trust pattern ("shared") to override the tool output
   // taint ("trusted"), incorrectly tainting write-only operations.

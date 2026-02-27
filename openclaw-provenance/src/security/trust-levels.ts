@@ -159,7 +159,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   memory_get: "trusted",
 
   // ── Shared (cross-agent memory) ───────────────────────────────────
-  vestige_search: "shared", // reads may contain content from other agents
+  vestige_search: "trusted", // local cognitive memory; default trusted (override if shared)
   vestige_smart_ingest: "trusted", // write-only, output is confirmation
   vestige_ingest: "trusted", // write-only, output is confirmation
   vestige_promote: "trusted", // write-only, output is confirmation
