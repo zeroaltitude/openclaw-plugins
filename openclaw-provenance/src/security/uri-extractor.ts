@@ -148,6 +148,10 @@ export function normalizeUri(value: string, defaultScheme?: string): string {
   return value;
 }
 
+// ── Exec command URI extraction ─────────────────────────────────────────────
+
+import { extractExecUris, type ExecCommandRule } from "./exec-command-taint.js";
+
 // ── Extraction ──────────────────────────────────────────────────────────────
 
 /**
@@ -198,7 +202,13 @@ export function extractToolSourceUris(
   bareName: string,
   params: Record<string, unknown>,
   extractors: Record<string, UriExtractorConfig>,
+  execCommandRules?: ExecCommandRule[],
 ): string[] {
+  // 0. Exec command pattern-based URI extraction
+  if (bareName === "exec" && toolKey.startsWith("exec.")) {
+    return extractExecUris(params, execCommandRules);
+  }
+
   // 1. Custom composite extractor (message tool)
   if (MESSAGE_READ_ACTIONS.has(toolKey)) {
     const action = toolKey.split(".")[1];

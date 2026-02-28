@@ -47,6 +47,11 @@ import {
   type UriExtractorConfig,
 } from "./uri-extractor.js";
 import {
+  buildExecCommandRules,
+  type ExecCommandRule,
+  type ExecCommandRuleConfig,
+} from "./exec-command-taint.js";
+import {
   buildUriTrustConfig,
   classifyUri,
   classifyUris,
@@ -122,6 +127,8 @@ export interface SecurityPluginConfig {
   uriTrust?: Record<string, TrustLevel>;
   /** Trust level for messages with no senderId (default: "shared") */
   missingIdentityTrust?: TrustLevel;
+  /** Additional exec command taint rules (prepended to built-in defaults) */
+  execCommandRules?: ExecCommandRuleConfig[];
 }
 
 /**
@@ -337,6 +344,7 @@ export function registerSecurityHooks(
   // Build composite tools, URI extractors, and URI trust config
   const compositeTools = buildCompositeToolMap(config?.compositeTools);
   const uriExtractors = buildUriExtractorMap(config?.uriExtractors);
+  const execCommandRules = buildExecCommandRules(config?.execCommandRules);
   const workspaceDir = config?.workspaceDir ?? process.cwd();
   const defaultUriTrustConfig = buildUriTrustConfig(config?.uriTrust, workspaceDir);
   const trustedSenderIds = new Set(config?.trustedSenderIds ?? []);
@@ -489,6 +497,9 @@ export function registerSecurityHooks(
   }
   logger.info(
     `[provenance]   Composite tools: ${Object.keys(compositeTools).join(", ")}`,
+  );
+  logger.info(
+    `[provenance]   Exec command rules: ${execCommandRules.length} patterns`,
   );
   logger.info(
     `[provenance]   URI trust patterns: ${defaultUriTrustConfig.patterns.length} (${config?.uriTrust ? Object.keys(config.uriTrust).length + " user + " : ""}built-in defaults)`,
@@ -1192,7 +1203,7 @@ export function registerSecurityHooks(
 
       // Resolve composite key for policy checks
       const params = event.params ?? {};
-      const toolKey = resolveToolKey(toolName, params, compositeTools);
+      const toolKey = resolveToolKey(toolName, params, compositeTools, execCommandRules);
       const toolKeyLower = toolKey.toLowerCase();
 
       // Message tool: owner DM exception
@@ -1308,7 +1319,7 @@ export function registerSecurityHooks(
       for (const tc of toolCalls) {
         const params = tc.params ?? {};
         // Resolve composite key (e.g., message.send, browser.navigate)
-        const toolKey = resolveToolKey(tc.name, params, compositeTools);
+        const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
 
         // Extract source URIs
         const sourceUris = extractToolSourceUris(
@@ -1316,6 +1327,7 @@ export function registerSecurityHooks(
           tc.name,
           params,
           uriExtractors,
+          execCommandRules,
         );
 
         // Compute tool trust using composite key
@@ -1364,9 +1376,9 @@ export function registerSecurityHooks(
       const sk = shortKey(sessionKey);
       const toolDescriptions = toolCalls.map((tc: any) => {
         const params = tc.params ?? {};
-        const toolKey = resolveToolKey(tc.name, params, compositeTools);
+        const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
         const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
-        const sourceUris = extractToolSourceUris(toolKey, tc.name, params, uriExtractors);
+        const sourceUris = extractToolSourceUris(toolKey, tc.name, params, uriExtractors, execCommandRules);
         if (sourceUris.length > 0) {
           const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
           const effective = uriTrust ?? toolTrust;
@@ -1389,7 +1401,7 @@ export function registerSecurityHooks(
         const escalatingTools = toolCalls
           .map((tc: any) => {
             const params = tc.params ?? {};
-            const toolKey = resolveToolKey(tc.name, params, compositeTools);
+            const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
             const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
             return { toolKey, toolTrust };
           })
@@ -1590,7 +1602,7 @@ export function registerSecurityHooks(
 
       if (!result || typeof result !== "object") return;
 
-      const toolKey = resolveToolKey(toolName, params, compositeTools);
+      const toolKey = resolveToolKey(toolName, params, compositeTools, execCommandRules);
 
       // browser.tabs: seed tab URL map from response
       if (toolKey === "browser.tabs") {
