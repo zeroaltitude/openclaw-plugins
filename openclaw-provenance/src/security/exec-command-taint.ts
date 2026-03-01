@@ -55,7 +55,7 @@ export const DEFAULT_EXEC_COMMAND_RULES: ExecCommandRule[] = [
   {
     pattern: /\bagent-browser\s+screenshot\b/,
     key: "agent-browser-screenshot",
-    outputTaint: "external",
+    outputTaint: "trusted",
     uriExtraction: "url-args",
   },
   {

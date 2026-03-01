@@ -187,6 +187,7 @@ describe("buildExecOutputTaints", () => {
     expect(taints["exec.curl"]).toBe("external");
     expect(taints["exec.wget"]).toBe("external");
     expect(taints["exec.agent-browser-snapshot"]).toBe("external");
+    expect(taints["exec.agent-browser-screenshot"]).toBe("trusted");
     expect(taints["exec.agent-browser-open"]).toBe("trusted");
     expect(taints["exec.agent-browser-action"]).toBe("trusted");
     expect(taints["exec.ssh"]).toBe("shared");

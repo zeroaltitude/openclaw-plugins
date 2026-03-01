@@ -88,7 +88,7 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // URI trust config can override these per-domain (e.g., docs.openclaw.ai → trusted)
   "browser.navigate": "external",
   "browser.snapshot": "external",
-  "browser.screenshot": "external",
+  "browser.screenshot": "trusted",
   "browser.console": "external",
   "browser.pdf": "external",
 
