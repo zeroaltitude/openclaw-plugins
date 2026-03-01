@@ -134,28 +134,6 @@ export const DEFAULT_EXEC_COMMAND_RULES: ExecCommandRule[] = [
     uriExtraction: "url-args",
   },
 
-  // ── Python HTTP (common agent patterns) ──
-  {
-    pattern: /\bpython3?\s.*\b(requests|urllib|httpx|aiohttp)\b/,
-    key: "python-http",
-    outputTaint: "external",
-    uriExtraction: "url-args",
-  },
-  {
-    pattern: /\bpython3?\s.*\b(scrapy|beautifulsoup|bs4|selenium|playwright)\b/,
-    key: "python-scraper",
-    outputTaint: "external",
-    uriExtraction: "url-args",
-  },
-
-  // ── Node.js HTTP ──
-  {
-    pattern: /\bnode\b.*\b(fetch|axios|got|node-fetch|undici)\b/,
-    key: "node-http",
-    outputTaint: "external",
-    uriExtraction: "url-args",
-  },
-
   // ── DNS / network recon (output reveals external infrastructure) ──
   {
     pattern: /\bdig\s/,

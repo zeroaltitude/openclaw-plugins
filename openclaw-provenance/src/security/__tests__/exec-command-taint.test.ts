@@ -44,10 +44,9 @@ describe("matchExecCommand", () => {
     expect(rule?.outputTaint).toBe("shared");
   });
 
-  it("matches python requests", () => {
-    const rule = matchExecCommand("python3 -c 'import requests; requests.get(\"https://api.example.com\")'");
-    expect(rule?.key).toBe("python-http");
-    expect(rule?.outputTaint).toBe("external");
+  it("does not match python scripts (wrong layer)", () => {
+    expect(matchExecCommand("python3 -c 'import requests; requests.get(\"https://api.example.com\")'")).toBeUndefined();
+    expect(matchExecCommand("node -e 'fetch(\"https://example.com\")'")).toBeUndefined();
   });
 
   it("matches httpie", () => {
