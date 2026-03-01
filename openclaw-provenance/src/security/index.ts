@@ -152,6 +152,28 @@ const BROWSER_DEFERRED_TOOLS = new Set([
   "browser.navigate",
 ]);
 
+/** Thread/topic session markers used by OpenClaw channel plugins */
+const THREAD_SESSION_MARKERS = [":thread:", ":topic:"];
+
+/**
+ * Resolve the parent session key from a thread-bound session key.
+ * E.g., "agent:tank:slack:channel:abc:thread:123" → "agent:tank:slack:channel:abc"
+ * Returns null if the session key is not a thread session.
+ */
+function resolveThreadParentSessionKey(sessionKey: string): string | null {
+  const normalized = sessionKey.toLowerCase();
+  let idx = -1;
+  for (const marker of THREAD_SESSION_MARKERS) {
+    const candidate = normalized.lastIndexOf(marker);
+    if (candidate > idx) {
+      idx = candidate;
+    }
+  }
+  if (idx <= 0) return null;
+  const parent = sessionKey.slice(0, idx).trim();
+  return parent || null;
+}
+
 /** Get a short session key for log prefixes */
 function shortKey(sessionKey: string): string {
   const parts = sessionKey.split(":");
@@ -739,6 +761,24 @@ export function registerSecurityHooks(
           blockedToolsBySession.delete(sessionKey);
           approvalStore.clearAll(sessionKey);
           watermarkStore.clear(sessionKey);
+
+          // Cascade: if this is a thread session, also clear the parent
+          // channel session's watermark. Taint often escalates on the base
+          // channel key, but .reset-trust fires in the thread — leaving a
+          // stale watermark on the parent that re-taints new threads.
+          const parentKey = resolveThreadParentSessionKey(sessionKey);
+          if (parentKey) {
+            const parentWm = watermarkStore.getLevel(parentKey);
+            if (parentWm) {
+              watermarkStore.clear(parentKey);
+              blockedToolsBySession.delete(parentKey);
+              approvalStore.clearAll(parentKey);
+              logger.info(
+                `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET cascade: also cleared parent ${shortKey(parentKey)} (was ${parentWm.level})`,
+              );
+            }
+          }
+
           watermarkStore.flush();
           const sk = shortKey(sessionKey);
           logger.info(
