@@ -70,19 +70,6 @@ export const DEFAULT_EXEC_COMMAND_RULES: ExecCommandRule[] = [
     outputTaint: "trusted",
     uriExtraction: "none",
   },
-  {
-    pattern: /\bplaywright\b/,
-    key: "playwright",
-    outputTaint: "external",
-    uriExtraction: "url-args",
-  },
-  {
-    pattern: /\bpuppeteer\b/,
-    key: "puppeteer",
-    outputTaint: "external",
-    uriExtraction: "url-args",
-  },
-
   // ── HTTP clients ──
   {
     pattern: /\bcurl\s/,
