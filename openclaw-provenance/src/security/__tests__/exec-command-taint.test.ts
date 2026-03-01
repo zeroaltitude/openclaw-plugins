@@ -59,20 +59,10 @@ describe("matchExecCommand", () => {
     expect(rule?.key).toBe("lynx");
   });
 
-  it("matches npm install", () => {
-    const rule = matchExecCommand("npm install evil-package");
-    expect(rule?.key).toBe("npm-install");
-    expect(rule?.outputTaint).toBe("external");
-  });
-
-  it("matches npx", () => {
-    const rule = matchExecCommand("npx some-package");
-    expect(rule?.key).toBe("npm-install");
-  });
-
-  it("matches pip install", () => {
-    const rule = matchExecCommand("pip install malicious-lib");
-    expect(rule?.key).toBe("pip-install");
+  it("does not match package managers (install logs, not injectable)", () => {
+    expect(matchExecCommand("npm install some-package")).toBeUndefined();
+    expect(matchExecCommand("npx some-package")).toBeUndefined();
+    expect(matchExecCommand("pip install some-lib")).toBeUndefined();
   });
 
   it("returns undefined for safe commands (fail-working)", () => {

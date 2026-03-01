@@ -134,20 +134,6 @@ export const DEFAULT_EXEC_COMMAND_RULES: ExecCommandRule[] = [
     uriExtraction: "url-args",
   },
 
-  // ── Package managers (download external code) ──
-  {
-    pattern: /\bnpm\s+install\b|\bnpx\s/,
-    key: "npm-install",
-    outputTaint: "external",
-    uriExtraction: "none",
-  },
-  {
-    pattern: /\bpip\s+install\b/,
-    key: "pip-install",
-    outputTaint: "external",
-    uriExtraction: "none",
-  },
-
   // ── SSH / remote execution (output is from an external host) ──
   {
     pattern: /\bssh\s/,
