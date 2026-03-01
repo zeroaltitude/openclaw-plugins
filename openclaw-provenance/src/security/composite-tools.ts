@@ -11,6 +11,12 @@
 
 import type { TrustLevel } from "./trust-levels.js";
 import type { PolicyMode, ToolOverride } from "./policy-engine.js";
+import {
+  type ExecCommandRule,
+  resolveExecToolKey,
+  buildExecOutputTaints,
+  DEFAULT_EXEC_COMMAND_RULES,
+} from "./exec-command-taint.js";
 
 // ── Composite tool config ───────────────────────────────────────────────────
 
@@ -82,7 +88,7 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // URI trust config can override these per-domain (e.g., docs.openclaw.ai → trusted)
   "browser.navigate": "external",
   "browser.snapshot": "external",
-  "browser.screenshot": "external",
+  "browser.screenshot": "trusted",
   "browser.console": "external",
   "browser.pdf": "external",
 
@@ -90,6 +96,9 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "browser.status": "trusted",
   "browser.tabs": "trusted",
   "browser.profiles": "trusted",
+
+  // ── exec: command-pattern-based taints (generated from exec command rules) ──
+  ...buildExecOutputTaints(),
 };
 
 // ── Composite execution policy defaults ─────────────────────────────────────
@@ -116,20 +125,29 @@ export const DEFAULT_COMPOSITE_TOOL_OVERRIDES: Record<string, ToolOverride> = {
 /**
  * Resolve a tool call to its composite key.
  *
- * Looks up the tool name in the composite tools config, extracts the
- * action parameter, and returns `toolName.action`. Falls back to bare
- * tool name if no composite config or no action param found.
+ * Resolution order:
+ *   1. Composite tools (action parameter) — e.g., browser.navigate, message.send
+ *   2. Exec command pattern matching — e.g., exec.curl, exec.agent-browser-snapshot
+ *   3. Fall through to bare tool name
  */
 export function resolveToolKey(
   toolName: string,
   params: Record<string, unknown>,
   compositeTools: Record<string, CompositeToolConfig>,
+  execCommandRules?: ExecCommandRule[],
 ): string {
+  // 1. Standard composite tool resolution (action param)
   const config = compositeTools[toolName];
   if (config) {
     const action = params[config.actionParam];
     if (typeof action === "string") return `${toolName}.${action}`;
   }
+
+  // 2. Exec command pattern matching
+  if (toolName === "exec") {
+    return resolveExecToolKey(params, execCommandRules);
+  }
+
   return toolName;
 }
 
