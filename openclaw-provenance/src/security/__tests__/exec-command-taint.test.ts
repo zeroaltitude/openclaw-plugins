@@ -93,11 +93,10 @@ describe("matchExecCommand", () => {
     expect(rule?.key).toBe("curl");
   });
 
-  it("matches dig", () => {
-    const rule = matchExecCommand("dig example.com MX");
-    expect(rule?.key).toBe("dig");
-    expect(rule?.outputTaint).toBe("external");
-    expect(rule?.uriExtraction).toBe("none");
+  it("does not match DNS tools (structured output, low injection risk)", () => {
+    expect(matchExecCommand("dig example.com MX")).toBeUndefined();
+    expect(matchExecCommand("nslookup example.com")).toBeUndefined();
+    expect(matchExecCommand("whois example.com")).toBeUndefined();
   });
 });
 

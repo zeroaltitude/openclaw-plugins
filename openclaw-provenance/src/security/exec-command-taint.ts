@@ -134,26 +134,6 @@ export const DEFAULT_EXEC_COMMAND_RULES: ExecCommandRule[] = [
     uriExtraction: "url-args",
   },
 
-  // ── DNS / network recon (output reveals external infrastructure) ──
-  {
-    pattern: /\bdig\s/,
-    key: "dig",
-    outputTaint: "external",
-    uriExtraction: "none",
-  },
-  {
-    pattern: /\bnslookup\s/,
-    key: "nslookup",
-    outputTaint: "external",
-    uriExtraction: "none",
-  },
-  {
-    pattern: /\bwhois\s/,
-    key: "whois",
-    outputTaint: "external",
-    uriExtraction: "none",
-  },
-
   // ── Package managers (download external code) ──
   {
     pattern: /\bnpm\s+install\b|\bnpx\s/,
