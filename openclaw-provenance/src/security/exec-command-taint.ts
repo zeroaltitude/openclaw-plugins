@@ -89,13 +89,6 @@ export const DEFAULT_EXEC_COMMAND_RULES: ExecCommandRule[] = [
     outputTaint: "external",
     uriExtraction: "url-args",
   },
-  {
-    pattern: /\bfetch\s/,
-    key: "fetch",
-    outputTaint: "external",
-    uriExtraction: "url-args",
-  },
-
   // ── Web scrapers / content renderers ──
   {
     pattern: /\blynx\s/,

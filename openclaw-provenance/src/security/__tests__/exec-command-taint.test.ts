@@ -68,6 +68,8 @@ describe("matchExecCommand", () => {
   it("returns undefined for safe commands (fail-working)", () => {
     expect(matchExecCommand("ls -la")).toBeUndefined();
     expect(matchExecCommand("git status")).toBeUndefined();
+    expect(matchExecCommand("git fetch origin")).toBeUndefined();
+    expect(matchExecCommand("git fetch origin --prune")).toBeUndefined();
     expect(matchExecCommand("cat /etc/hostname")).toBeUndefined();
     expect(matchExecCommand("grep -r 'pattern' .")).toBeUndefined();
     expect(matchExecCommand("echo hello")).toBeUndefined();
