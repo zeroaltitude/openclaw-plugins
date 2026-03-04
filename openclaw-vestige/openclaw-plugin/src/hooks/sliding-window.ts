@@ -18,8 +18,14 @@ export interface WindowEntry {
 /** In-memory window store, keyed by sessionKey. */
 const windows = new Map<string, WindowEntry[]>();
 
+/** Last access time per session, for TTL-based cleanup. */
+const lastAccess = new Map<string, number>();
+
 const DEFAULT_WINDOW_SIZE = 10;
 const MAX_ENTRY_CHARS = 500;
+
+/** Max idle time before a session window is evicted (1 hour). */
+const TTL_MS = 60 * 60 * 1000;
 
 /**
  * Add a message to the session's sliding window.
@@ -44,6 +50,12 @@ export function addToWindow(
   } else {
     windows.set(key, window);
   }
+
+  lastAccess.set(key, Date.now());
+
+  // Opportunistic TTL sweep: on every write, evict stale sessions.
+  // Lightweight — just iterates the map and deletes old entries.
+  sweepStale();
 }
 
 /**
@@ -72,7 +84,23 @@ export function getLastUserMessage(sessionKey: string): string | null {
  * Clear a session's window (e.g., on session end).
  */
 export function clearWindow(sessionKey: string): void {
-  windows.delete(sessionKey || "__default__");
+  const key = sessionKey || "__default__";
+  windows.delete(key);
+  lastAccess.delete(key);
+}
+
+/**
+ * Sweep stale sessions that haven't been accessed within TTL_MS.
+ * Called opportunistically on every addToWindow call.
+ */
+function sweepStale(): void {
+  const now = Date.now();
+  for (const [key, ts] of lastAccess) {
+    if (now - ts > TTL_MS) {
+      windows.delete(key);
+      lastAccess.delete(key);
+    }
+  }
 }
 
 /**
@@ -80,4 +108,11 @@ export function clearWindow(sessionKey: string): void {
  */
 export function windowSize(sessionKey: string): number {
   return (windows.get(sessionKey || "__default__") ?? []).length;
+}
+
+/**
+ * Get total number of active session windows (for monitoring).
+ */
+export function activeWindowCount(): number {
+  return windows.size;
 }

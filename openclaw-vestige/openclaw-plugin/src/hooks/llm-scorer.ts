@@ -6,7 +6,7 @@
  * Used by both before_llm_call (retrieval gating) and after_llm_call (ingestion gating).
  */
 
-import https from "https";
+// Uses global fetch (Node 18+) for consistency with vestige API calls.
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -75,62 +75,48 @@ Respond with ONLY valid JSON:
 
 // ── LLM Call ───────────────────────────────────────────────────────────
 
-function callLlm(
+async function callLlm(
   apiKey: string,
   model: string,
   systemPrompt: string,
   userContent: string,
   timeoutMs: number,
 ): Promise<SaliencyScore> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("LLM scorer timed out")), timeoutMs);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    const body = JSON.stringify({
-      model,
-      max_tokens: 200,
-      messages: [{ role: "user", content: userContent }],
-      system: systemPrompt,
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 200,
+        messages: [{ role: "user", content: userContent }],
+        system: systemPrompt,
+      }),
+      signal: controller.signal,
     });
 
-    const req = https.request(
-      {
-        hostname: "api.anthropic.com",
-        path: "/v1/messages",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (chunk: Buffer) => (data += chunk));
-        res.on("end", () => {
-          clearTimeout(timer);
-          try {
-            const parsed = JSON.parse(data);
-            const text = parsed?.content?.[0]?.text || "";
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              const result = JSON.parse(jsonMatch[0]) as SaliencyScore;
-              resolve(result);
-            } else {
-              reject(new Error("No JSON in scorer response: " + text.slice(0, 100)));
-            }
-          } catch (e) {
-            reject(e);
-          }
-        });
-      },
-    );
-    req.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-    req.write(body);
-    req.end();
-  });
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => resp.statusText);
+      throw new Error(`Scorer LLM returned ${resp.status}: ${detail.slice(0, 100)}`);
+    }
+
+    const parsed = await resp.json();
+    const text = parsed?.content?.[0]?.text || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]) as SaliencyScore;
+    }
+    throw new Error("No JSON in scorer response: " + text.slice(0, 100));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── Public API ─────────────────────────────────────────────────────────

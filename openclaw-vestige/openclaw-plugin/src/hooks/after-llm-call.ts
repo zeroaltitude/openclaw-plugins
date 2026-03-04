@@ -62,8 +62,6 @@ interface AfterLlmCallConfig {
   scorer: ScorerConfig;
   vestigeServerUrl: string;
   vestigeAuthToken?: string;
-  /** Only run on first iteration (default: true) — skip intermediate tool-call responses */
-  firstIterationOnly?: boolean;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -118,11 +116,9 @@ export function createAfterLlmCallHandler(config: AfterLlmCallConfig) {
     event: AfterLlmCallEvent,
     ctx: AgentContext,
   ): Promise<AfterLlmCallResult | void> => {
-    // Only run on first iteration by default
-    if ((config.firstIterationOnly ?? true) && event.iteration > 0) return;
-
     // Skip if the response has tool calls — this is a mid-loop iteration,
-    // not a final response. We'll catch the final one.
+    // not a final response. We score the final response regardless of
+    // which iteration it lands on (could be iteration 0 or iteration 5).
     if (event.toolCalls && event.toolCalls.length > 0) return;
 
     const responseText = extractResponseText(event.response);

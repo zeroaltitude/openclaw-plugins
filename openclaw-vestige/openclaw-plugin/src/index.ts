@@ -222,7 +222,6 @@ export function register(api: PluginApi) {
           scorer: scorerConfig,
           vestigeServerUrl: serverUrl,
           vestigeAuthToken: token || undefined,
-          firstIterationOnly: true,
         }),
         { priority: 90 },
       );
