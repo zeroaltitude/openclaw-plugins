@@ -56,6 +56,16 @@
         "type": "number",
         "description": "Token budget for injected memories",
         "default": 1000
+      },
+      "gateLowValueThreshold": {
+        "type": "number",
+        "description": "Max cosine distance from low-value centroid to skip scoring (0-2, lower = stricter)",
+        "default": 0.3
+      },
+      "gateHighValueThreshold": {
+        "type": "number",
+        "description": "Max cosine distance from high-value centroid to auto-score (0-2, lower = stricter)",
+        "default": 0.4
       }
     }
   },

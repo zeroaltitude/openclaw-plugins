@@ -201,6 +201,11 @@ export function register(api: PluginApi) {
     // On mainline OpenClaw (pre-hook support), api.on() may throw or the hooks
     // may not exist. In that case, fall back to tool-only mode silently.
     try {
+      const gateConfig = {
+        lowValueThreshold: (cfg.gateLowValueThreshold as number) ?? 0.3,
+        highValueThreshold: (cfg.gateHighValueThreshold as number) ?? 0.4,
+      };
+
       // Inbound: retrieve relevant memories before LLM call
       api.on(
         "before_llm_call",
@@ -211,6 +216,7 @@ export function register(api: PluginApi) {
           maxMemories: (cfg.maxMemories as number) ?? 5,
           maxMemoryTokens: (cfg.maxMemoryTokens as number) ?? 1000,
           firstIterationOnly: true,
+          gate: gateConfig,
         }),
         { priority: 10 },
       );

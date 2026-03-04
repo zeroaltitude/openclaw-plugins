@@ -19,6 +19,7 @@
 import type { ScorerConfig } from "./llm-scorer.js";
 import { scoreOutbound } from "./llm-scorer.js";
 import { addToWindow, getLastUserMessage } from "./sliding-window.js";
+import { scoreGate } from "./saliency-gate.js";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -134,7 +135,17 @@ export function createAfterLlmCallHandler(config: AfterLlmCallConfig) {
     const userMessage = getLastUserMessage(sessionKey);
     if (!userMessage) return;
 
-    // Score the exchange
+    // Stage 1: Bi-encoder gate on the user message — skip trivial exchanges
+    try {
+      const gateResult = await scoreGate(userMessage);
+      if (!gateResult.passToScorer) {
+        return; // Low-value exchange — not worth scoring for storage
+      }
+    } catch {
+      // Gate failed — fall through to LLM scorer
+    }
+
+    // Stage 2: LLM scorer for nuanced importance evaluation
     const score = await scoreOutbound(config.scorer, userMessage, responseText);
 
     if (!score.store || score.score < (config.scorer.storeThreshold ?? 0.5)) {

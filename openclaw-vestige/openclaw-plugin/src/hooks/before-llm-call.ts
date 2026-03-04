@@ -20,6 +20,7 @@
 import type { ScorerConfig } from "./llm-scorer.js";
 import { scoreInbound } from "./llm-scorer.js";
 import { addToWindow, getRecentContext } from "./sliding-window.js";
+import { scoreGate, ensureInitialized, type GateConfig } from "./saliency-gate.js";
 
 // ── Types (matching OpenClaw plugin hook signatures) ───────────────────
 
@@ -71,6 +72,8 @@ interface BeforeLlmCallConfig {
   maxMemoryTokens?: number;
   /** Only run on first iteration (default: true) — skip tool-call loops */
   firstIterationOnly?: boolean;
+  /** Bi-encoder gate config (thresholds for dual-centroid scoring) */
+  gate?: GateConfig;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -161,7 +164,19 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
     // Add to sliding window
     addToWindow(sessionKey, { role: "user", content: userMessage, agentId });
 
-    // Score saliency with context
+    // Stage 1: Bi-encoder gate (~5-10ms) — skip obvious noise before paying LLM cost
+    try {
+      const gateResult = await scoreGate(userMessage, config.gate);
+      if (!gateResult.passToScorer) {
+        return; // Low-value message — skip entirely
+      }
+      // If high-value, we still run the LLM scorer to get keywords for search
+    } catch {
+      // Gate failed (model not loaded, etc.) — fall through to LLM scorer
+      // This is the graceful degradation path
+    }
+
+    // Stage 2: LLM scorer (~200-400ms) — nuanced saliency + keyword extraction
     const recentContext = getRecentContext(sessionKey);
     const score = await scoreInbound(config.scorer, userMessage, recentContext);
 
