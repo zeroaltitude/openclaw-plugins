@@ -84,6 +84,12 @@ export const DEFAULT_EXEC_COMMAND_RULES: ExecCommandRule[] = [
     uriExtraction: "url-args",
   },
   {
+    pattern: /(?:^|&&|\|\||;|\|)\s*fetch\s/,
+    key: "fetch",
+    outputTaint: "external",
+    uriExtraction: "url-args",
+  },
+  {
     pattern: /\bhttpie\b|\bhttp\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/,
     key: "httpie",
     outputTaint: "external",
