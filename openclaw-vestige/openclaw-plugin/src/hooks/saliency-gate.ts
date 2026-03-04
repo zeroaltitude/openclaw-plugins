@@ -91,8 +91,9 @@ const HIGH_VALUE_SEEDS = [
   "never do this again",
   "my anniversary is",
   "my birthday is",
-  "the password is",
-  "the API key is",
+  // NOTE: intentionally excluding secret-pattern seeds ("the password is",
+  // "the API key is") — the gate should NOT trigger storage of credentials.
+  // Follow-up: add a secret-pattern filter in the ingestion path.
   "save this for later",
   "remember my name is",
   "I prefer it when you",
