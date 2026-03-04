@@ -17,11 +17,56 @@
       "authToken": {
         "type": "string",
         "description": "Bearer token for Vestige API authentication"
+      },
+      "hooksEnabled": {
+        "type": "boolean",
+        "description": "Enable hook-based automatic memory retrieval and ingestion",
+        "default": false
+      },
+      "scorerApiKey": {
+        "type": "string",
+        "description": "API key for the saliency scorer LLM (e.g., Anthropic key for Haiku)"
+      },
+      "scorerModel": {
+        "type": "string",
+        "description": "Model for saliency scoring (cheap/fast model recommended)",
+        "default": "claude-haiku-4-5-20250620"
+      },
+      "scorerTimeoutMs": {
+        "type": "number",
+        "description": "Timeout for scorer LLM calls in ms",
+        "default": 5000
+      },
+      "retrieveThreshold": {
+        "type": "number",
+        "description": "Minimum saliency score to trigger memory retrieval (0-1)",
+        "default": 0.3
+      },
+      "storeThreshold": {
+        "type": "number",
+        "description": "Minimum importance score to trigger memory storage (0-1)",
+        "default": 0.5
+      },
+      "maxMemories": {
+        "type": "number",
+        "description": "Maximum memories to inject per turn",
+        "default": 5
+      },
+      "maxMemoryTokens": {
+        "type": "number",
+        "description": "Token budget for injected memories",
+        "default": 1000
       }
     }
   },
   "uiHints": {
     "serverUrl": { "label": "Server URL", "placeholder": "https://vestige.bighatbio.me/api" },
-    "authToken": { "label": "Auth Token", "sensitive": true }
+    "authToken": { "label": "Auth Token", "sensitive": true },
+    "hooksEnabled": { "label": "Enable Saliency Hooks" },
+    "scorerApiKey": { "label": "Scorer API Key", "sensitive": true },
+    "scorerModel": { "label": "Scorer Model", "placeholder": "claude-haiku-4-5-20250620" },
+    "retrieveThreshold": { "label": "Retrieval Threshold (0-1)" },
+    "storeThreshold": { "label": "Storage Threshold (0-1)" },
+    "maxMemories": { "label": "Max Memories Per Turn" }
   }
 }

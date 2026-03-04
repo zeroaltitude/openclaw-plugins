@@ -3,9 +3,14 @@
  *
  * Registers cognitive memory tools backed by the Vestige HTTP bridge server.
  * Each tool maps to a FastAPI endpoint which in turn calls vestige-mcp over stdio.
+ *
+ * Also registers before_llm_call and after_llm_call hooks for automatic
+ * memory retrieval and ingestion via a lightweight LLM saliency scorer.
  */
 
 import { Type } from "@sinclair/typebox";
+import { createBeforeLlmCallHandler } from "./hooks/before-llm-call.js";
+import { createAfterLlmCallHandler } from "./hooks/after-llm-call.js";
 
 // The OpenClaw plugin API type (provided at runtime)
 interface PluginApi {
@@ -35,7 +40,8 @@ async function vestigeCall(
   serverUrl = serverUrl.replace(/\/+$/, "");
 
   const token = (cfg.authToken as string) ?? "";
-  const agentId = "tabitha";
+  // agentId is set per-request via hook ctx; default for tool calls
+  const agentId = (cfg.agentId as string) ?? "default";
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -91,6 +97,12 @@ function textResult(text: string) {
 
 // ── Plugin entry point ───────────────────────────────────────────────────────
 export function register(api: PluginApi) {
+  // Extract config once at registration time
+  const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
+  let serverUrl = (cfg.serverUrl as string) ?? "http://vestige.internal:8000";
+  serverUrl = serverUrl.replace(/\/+$/, "");
+  const token = (cfg.authToken as string) ?? "";
+
   api.registerTool({
     name: "vestige_search",
     description:
@@ -162,4 +174,67 @@ export function register(api: PluginApi) {
       return textResult(await vestigeCall(api, "/demote", params));
     },
   });
+
+  // ── Hook-based saliency (automatic memory retrieval + ingestion) ─────
+  //
+  // These hooks remove the LLM from the memory decision loop:
+  // - before_llm_call: scores inbound messages, retrieves relevant memories
+  // - after_llm_call: scores outbound exchanges, auto-ingests important ones
+  //
+  // Requires a cheap LLM API key (Haiku) for saliency scoring.
+  // Disabled if no API key is configured.
+
+  const scorerApiKey = (cfg.scorerApiKey as string) ?? "";
+  const scorerModel = (cfg.scorerModel as string) ?? "claude-haiku-4-5-20250620";
+  const hooksEnabled = (cfg.hooksEnabled as boolean) ?? false;
+
+  if (hooksEnabled && scorerApiKey) {
+    const scorerConfig = {
+      apiKey: scorerApiKey,
+      model: scorerModel,
+      timeoutMs: (cfg.scorerTimeoutMs as number) ?? 5000,
+      retrieveThreshold: (cfg.retrieveThreshold as number) ?? 0.3,
+      storeThreshold: (cfg.storeThreshold as number) ?? 0.5,
+    };
+
+    // Feature-detect: gracefully degrade if the host doesn't support these hooks.
+    // On mainline OpenClaw (pre-hook support), api.on() may throw or the hooks
+    // may not exist. In that case, fall back to tool-only mode silently.
+    try {
+      // Inbound: retrieve relevant memories before LLM call
+      api.on(
+        "before_llm_call",
+        createBeforeLlmCallHandler({
+          scorer: scorerConfig,
+          vestigeServerUrl: serverUrl,
+          vestigeAuthToken: token || undefined,
+          maxMemories: (cfg.maxMemories as number) ?? 5,
+          maxMemoryTokens: (cfg.maxMemoryTokens as number) ?? 1000,
+          firstIterationOnly: true,
+        }),
+        { priority: 10 },
+      );
+
+      // Outbound: auto-ingest important exchanges after LLM call
+      api.on(
+        "after_llm_call",
+        createAfterLlmCallHandler({
+          scorer: scorerConfig,
+          vestigeServerUrl: serverUrl,
+          vestigeAuthToken: token || undefined,
+          firstIterationOnly: true,
+        }),
+        { priority: 90 },
+      );
+
+      api.logger.info("[vestige] Ambient memory hooks registered (model: %s)", scorerModel);
+    } catch (err) {
+      // Host doesn't support these hooks — fall back to tool-only mode
+      api.logger.info(
+        "[vestige] Host lacks before_llm_call/after_llm_call hooks — falling back to tool-only mode",
+      );
+    }
+  } else if (hooksEnabled && !scorerApiKey) {
+    api.logger.warn("[vestige] hooksEnabled=true but no scorerApiKey configured — hooks disabled");
+  }
 }
