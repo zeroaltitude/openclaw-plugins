@@ -88,6 +88,13 @@ export async function scoreConcepts(
   text: string,
   labels?: string[],
 ): Promise<ConceptScore[]> {
+  // Skip very short messages — the model over-scores them
+  const trimmed = text.trim();
+  if (trimmed.length < 25) {
+    const conceptLabels = labels ?? DEFAULT_CONCEPT_LABELS;
+    return conceptLabels.map(label => ({ label, score: 0.0 }));
+  }
+
   await ensureInitialized();
 
   const conceptLabels = labels ?? DEFAULT_CONCEPT_LABELS;

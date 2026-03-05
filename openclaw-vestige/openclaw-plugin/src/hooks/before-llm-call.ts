@@ -138,6 +138,35 @@ function stripMemoryBlocks(messages: AgentMessage[]): AgentMessage[] {
   });
 }
 
+async function demoteMemory(
+  serverUrl: string,
+  authToken: string | undefined,
+  memoryId: string,
+  agentId: string,
+): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+
+  try {
+    const resp = await fetch(`${serverUrl.replace(/\/+$/, "")}/demote`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        "X-Agent-Id": agentId,
+      },
+      body: JSON.stringify({ memory_id: memoryId }),
+      signal: controller.signal,
+    });
+
+    return resp.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function searchVestige(
   serverUrl: string,
   authToken: string | undefined,
@@ -194,8 +223,62 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
     event: BeforeLlmCallEvent,
     ctx: AgentContext,
   ): Promise<BeforeLlmCallResult | void> => {
+    // Handle .forget command before stripping
+    const rawMessages = [...event.messages];
+    const agentId = ctx.agentId ?? "unknown";
+
+    // Check for .forget command in the latest user message
+    for (let i = rawMessages.length - 1; i >= 0; i--) {
+      if (rawMessages[i].role === "user") {
+        const content = rawMessages[i].content;
+        const text = typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? content.filter((p) => p.type === "text" && p.text).map((p) => p.text!).join("\n")
+            : null;
+
+        if (text && text.trim().toLowerCase().startsWith(".forget ")) {
+          const query = text.trim().slice(".forget ".length).trim();
+          if (query.length > 0) {
+            // Search for matching memories
+            const results = await searchVestige(
+              config.vestigeServerUrl,
+              config.vestigeAuthToken,
+              query,
+              agentId,
+              3,
+            );
+
+            // Demote top 3 results
+            for (const result of results.slice(0, 3)) {
+              await demoteMemory(
+                config.vestigeServerUrl,
+                config.vestigeAuthToken,
+                result.id,
+                agentId,
+              );
+            }
+
+            // Replace user message content
+            const replacement = `I asked to forget memories about: ${query}` +
+              (results.length > 0
+                ? ` (demoted ${results.length} matching ${results.length === 1 ? "memory" : "memories"})`
+                : " (no matching memories found)");
+
+            if (typeof rawMessages[i].content === "string") {
+              rawMessages[i] = { ...rawMessages[i], content: replacement };
+            } else if (Array.isArray(rawMessages[i].content)) {
+              rawMessages[i] = { ...rawMessages[i], content: replacement };
+            }
+          }
+          break;
+        }
+        break; // Only check the last user message
+      }
+    }
+
     // Always strip old memory blocks first (context hygiene)
-    const messages = stripMemoryBlocks([...event.messages]);
+    const messages = stripMemoryBlocks(rawMessages);
 
     // Only run on first iteration by default (skip tool-call loop iterations)
     if ((config.firstIterationOnly ?? true) && event.iteration > 0) {
@@ -209,7 +292,6 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
     }
 
     const sessionKey = ctx.sessionKey ?? "__unknown__";
-    const agentId = ctx.agentId ?? "unknown";
 
     // Add to sliding window
     addToWindow(sessionKey, { role: "user", content: userMessage, agentId });
