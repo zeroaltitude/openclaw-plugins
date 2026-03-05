@@ -3,9 +3,14 @@
  *
  * Registers cognitive memory tools backed by the Vestige HTTP bridge server.
  * Each tool maps to a FastAPI endpoint which in turn calls vestige-mcp over stdio.
+ *
+ * Also registers before_llm_call and after_llm_call hooks for automatic
+ * memory retrieval and ingestion via a local DeBERTa NLI zero-shot classifier.
  */
 
 import { Type } from "@sinclair/typebox";
+import { createBeforeLlmCallHandler } from "./hooks/before-llm-call.js";
+import { createAfterLlmCallHandler } from "./hooks/after-llm-call.js";
 
 // The OpenClaw plugin API type (provided at runtime)
 interface PluginApi {
@@ -35,7 +40,8 @@ async function vestigeCall(
   serverUrl = serverUrl.replace(/\/+$/, "");
 
   const token = (cfg.authToken as string) ?? "";
-  const agentId = "tabitha";
+  // agentId is set per-request via hook ctx; default for tool calls
+  const agentId = (cfg.agentId as string) ?? "default";
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -91,6 +97,12 @@ function textResult(text: string) {
 
 // ── Plugin entry point ───────────────────────────────────────────────────────
 export function register(api: PluginApi) {
+  // Extract config once at registration time
+  const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
+  let serverUrl = (cfg.serverUrl as string) ?? "http://vestige.internal:8000";
+  serverUrl = serverUrl.replace(/\/+$/, "");
+  const token = (cfg.authToken as string) ?? "";
+
   api.registerTool({
     name: "vestige_search",
     description:
@@ -162,4 +174,56 @@ export function register(api: PluginApi) {
       return textResult(await vestigeCall(api, "/demote", params));
     },
   });
+
+  // ── Hook-based saliency (automatic memory retrieval + ingestion) ─────
+  //
+  // These hooks remove the LLM from the memory decision loop:
+  // - before_llm_call: scores inbound messages, retrieves relevant memories
+  // - after_llm_call: scores outbound exchanges, auto-ingests important ones
+  //
+  // Uses local DeBERTa-v3-xsmall NLI zero-shot classifier — no external
+  // API keys needed. Model downloaded lazily on first use (~22MB quantized).
+
+  const hooksEnabled = (cfg.hooksEnabled as boolean) ?? false;
+  const conceptLabels = (cfg.conceptLabels as string[] | undefined) ?? undefined;
+  const saliencyThreshold = (cfg.saliencyThreshold as number | undefined) ?? undefined;
+
+  if (hooksEnabled) {
+    // Feature-detect: gracefully degrade if the host doesn't support these hooks.
+    try {
+      // Inbound: retrieve relevant memories before LLM call
+      api.on(
+        "before_llm_call",
+        createBeforeLlmCallHandler({
+          vestigeServerUrl: serverUrl,
+          vestigeAuthToken: token || undefined,
+          conceptLabels,
+          saliencyThreshold,
+          maxMemories: (cfg.maxMemories as number) ?? 5,
+          maxMemoryTokens: (cfg.maxMemoryTokens as number) ?? 1000,
+          firstIterationOnly: true,
+        }),
+        { priority: 10 },
+      );
+
+      // Outbound: auto-ingest important exchanges after LLM call
+      api.on(
+        "after_llm_call",
+        createAfterLlmCallHandler({
+          vestigeServerUrl: serverUrl,
+          vestigeAuthToken: token || undefined,
+          conceptLabels,
+          saliencyThreshold,
+        }),
+        { priority: 90 },
+      );
+
+      api.logger.info("[vestige] Ambient memory hooks registered (model: DeBERTa-v3-xsmall NLI, local)");
+    } catch (err) {
+      // Host doesn't support these hooks — fall back to tool-only mode
+      api.logger.info(
+        "[vestige] Host lacks before_llm_call/after_llm_call hooks — falling back to tool-only mode",
+      );
+    }
+  }
 }
