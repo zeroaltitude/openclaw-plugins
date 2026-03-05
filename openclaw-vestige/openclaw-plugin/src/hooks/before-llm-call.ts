@@ -1,26 +1,29 @@
 /**
  * before_llm_call hook handler — Memory Retrieval
  *
- * Scores inbound user messages for saliency. If above threshold,
- * searches Vestige for relevant memories and injects them into
- * the message array before the LLM sees them.
+ * Scores inbound user messages for saliency using local DeBERTa NLI classifier.
+ * If salient concepts detected, searches Vestige for relevant memories and
+ * injects them into the message array before the LLM sees them.
  *
  * Architecture:
- *   1. Extract latest user message
- *   2. Score saliency via cheap LLM (Haiku)
- *   3. If above threshold → search Vestige → cross-reference results
- *   4. Inject top-k memories as a synthetic system message
- *      positioned just before the latest user message
+ *   1. Strip any previously injected vestige memory blocks (context hygiene)
+ *   2. Extract latest user message
+ *   3. Score concepts via local NLI zero-shot classifier (~50-200ms)
+ *   4. If salient → search Vestige → inject memories
  *   5. Return modified messages array
  *
  * Latency budget: This hook blocks time-to-first-token.
- * Target: <500ms total (LLM scoring ~200ms + Vestige search ~100ms).
+ * Target: <500ms total (NLI scoring ~100ms + Vestige search ~100ms).
  */
 
-import type { ScorerConfig } from "./llm-scorer.js";
-import { scoreInbound } from "./llm-scorer.js";
-import { addToWindow, getRecentContext } from "./sliding-window.js";
-import { scoreGate, ensureInitialized, type GateConfig } from "./saliency-gate.js";
+import {
+  scoreConcepts,
+  hasSalientConcepts,
+  getSalientLabels,
+  DEFAULT_CONCEPT_LABELS,
+  type ConceptScore,
+} from "./nli-scorer.js";
+import { addToWindow } from "./sliding-window.js";
 
 // ── Types (matching OpenClaw plugin hook signatures) ───────────────────
 
@@ -63,23 +66,29 @@ interface AgentContext {
 // ── Config ─────────────────────────────────────────────────────────────
 
 interface BeforeLlmCallConfig {
-  scorer: ScorerConfig;
   vestigeServerUrl: string;
   vestigeAuthToken?: string;
+  /** Concept labels for NLI scoring (defaults provided) */
+  conceptLabels?: string[];
+  /** Minimum NLI score to consider a concept salient (default: 0.5) */
+  saliencyThreshold?: number;
   /** Max memories to inject (default: 5) */
   maxMemories?: number;
   /** Max tokens to spend on injected memories (default: 1000) */
   maxMemoryTokens?: number;
   /** Only run on first iteration (default: true) — skip tool-call loops */
   firstIterationOnly?: boolean;
-  /** Bi-encoder gate config (thresholds for dual-centroid scoring) */
-  gate?: GateConfig;
 }
+
+// ── Constants ──────────────────────────────────────────────────────────
+
+const MEMORY_BLOCK_START = "<!-- vestige:recalled-memories -->";
+const MEMORY_BLOCK_END = "<!-- /vestige:recalled-memories -->";
+const MEMORY_BLOCK_REGEX = /<!-- vestige:recalled-memories -->[\s\S]*?<!-- \/vestige:recalled-memories -->/g;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function extractUserMessage(messages: AgentMessage[]): string | null {
-  // Walk backwards to find the last user message
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "user") {
       const content = messages[i].content;
@@ -96,6 +105,37 @@ function extractUserMessage(messages: AgentMessage[]): string | null {
 /** Rough token estimate: ~4 chars per token */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+/**
+ * Strip previously injected vestige memory blocks from all messages.
+ * This ensures we don't accumulate stale memories across turns.
+ */
+function stripMemoryBlocks(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map((msg) => {
+    if (typeof msg.content === "string" && msg.content.includes(MEMORY_BLOCK_START)) {
+      const stripped = msg.content.replace(MEMORY_BLOCK_REGEX, "").trim();
+      // If the message is now empty after stripping, keep an empty string
+      return { ...msg, content: stripped };
+    }
+    if (Array.isArray(msg.content)) {
+      const newContent = msg.content.map((part) => {
+        if (part.type === "text" && part.text && part.text.includes(MEMORY_BLOCK_START)) {
+          return { ...part, text: part.text.replace(MEMORY_BLOCK_REGEX, "").trim() };
+        }
+        return part;
+      });
+      return { ...msg, content: newContent };
+    }
+    return msg;
+  }).filter((msg) => {
+    // Remove messages that are now completely empty after stripping
+    if (typeof msg.content === "string") return msg.content.length > 0;
+    if (Array.isArray(msg.content)) {
+      return msg.content.some((p) => p.type !== "text" || (p.text && p.text.length > 0));
+    }
+    return true;
+  });
 }
 
 async function searchVestige(
@@ -124,7 +164,6 @@ async function searchVestige(
 
     const json = await resp.json();
     if (json.success && json.data?.content) {
-      // Parse the MCP-style response
       const texts = json.data.content
         .filter((c: any) => c.type === "text" && c.text)
         .map((c: any) => c.text);
@@ -148,15 +187,26 @@ async function searchVestige(
 // ── Handler ────────────────────────────────────────────────────────────
 
 export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
+  const conceptLabels = config.conceptLabels ?? DEFAULT_CONCEPT_LABELS;
+  const threshold = config.saliencyThreshold ?? 0.5;
+
   return async (
     event: BeforeLlmCallEvent,
     ctx: AgentContext,
   ): Promise<BeforeLlmCallResult | void> => {
-    // Only run on first iteration by default (skip tool-call loop iterations)
-    if ((config.firstIterationOnly ?? true) && event.iteration > 0) return;
+    // Always strip old memory blocks first (context hygiene)
+    const messages = stripMemoryBlocks([...event.messages]);
 
-    const userMessage = extractUserMessage(event.messages);
-    if (!userMessage || userMessage.length < 5) return;
+    // Only run on first iteration by default (skip tool-call loop iterations)
+    if ((config.firstIterationOnly ?? true) && event.iteration > 0) {
+      // Still return stripped messages even if we skip scoring
+      return { messages };
+    }
+
+    const userMessage = extractUserMessage(messages);
+    if (!userMessage || userMessage.length < 5) {
+      return { messages };
+    }
 
     const sessionKey = ctx.sessionKey ?? "__unknown__";
     const agentId = ctx.agentId ?? "unknown";
@@ -164,28 +214,24 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
     // Add to sliding window
     addToWindow(sessionKey, { role: "user", content: userMessage, agentId });
 
-    // Stage 1: Bi-encoder gate (~5-10ms) — skip obvious noise before paying LLM cost
+    // Score concepts via local NLI classifier
+    let scores: ConceptScore[];
     try {
-      const gateResult = await scoreGate(userMessage, config.gate);
-      if (!gateResult.passToScorer) {
-        return; // Low-value message — skip entirely
-      }
-      // If high-value, we still run the LLM scorer to get keywords for search
+      scores = await scoreConcepts(userMessage, conceptLabels);
     } catch {
-      // Gate failed (model not loaded, etc.) — fall through to LLM scorer
-      // This is the graceful degradation path
+      // NLI scorer failed — return stripped messages, skip retrieval
+      return { messages };
     }
 
-    // Stage 2: LLM scorer (~200-400ms) — nuanced saliency + keyword extraction
-    const recentContext = getRecentContext(sessionKey);
-    const score = await scoreInbound(config.scorer, userMessage, recentContext);
-
-    if (!score.retrieve || score.score < (config.scorer.retrieveThreshold ?? 0.3)) {
-      return; // Not worth searching memory
+    // Check if any salient concepts detected
+    if (!hasSalientConcepts(scores, threshold)) {
+      return { messages };
     }
 
-    // Search Vestige using the scorer's keywords
-    const query = score.keywords.length > 0 ? score.keywords.join(" ") : userMessage.slice(0, 200);
+    // Build search query: user message + salient concept labels for context
+    const salientLabels = getSalientLabels(scores, threshold);
+    const query = `${userMessage.slice(0, 200)} ${salientLabels.join(" ")}`.trim();
+
     const maxMemories = config.maxMemories ?? 5;
     const results = await searchVestige(
       config.vestigeServerUrl,
@@ -195,30 +241,42 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
       maxMemories,
     );
 
-    if (results.length === 0) return;
+    if (results.length === 0) {
+      return { messages };
+    }
 
     // Build memory injection, respecting token budget
     const maxTokens = config.maxMemoryTokens ?? 1000;
-    const memories: string[] = [];
+    const memoryLines: string[] = [];
     let tokenCount = 0;
+
+    // Use the top salient label for each memory line
+    const topLabel = salientLabels[0] ?? "memory";
 
     for (const result of results) {
       const tokens = estimateTokens(result.content);
       if (tokenCount + tokens > maxTokens) break;
-      memories.push(`• ${result.content}`);
+      memoryLines.push(`• [${topLabel}] ${result.content}`);
       tokenCount += tokens;
     }
 
-    if (memories.length === 0) return;
+    if (memoryLines.length === 0) {
+      return { messages };
+    }
+
+    // Build structured memory block
+    const memoryBlock = [
+      MEMORY_BLOCK_START,
+      ...memoryLines,
+      MEMORY_BLOCK_END,
+    ].join("\n");
 
     // Inject as a synthetic system message just before the last user message
     const memoryMessage: AgentMessage = {
       role: "system",
-      content: `## Recalled Memories (auto-retrieved)\n${memories.join("\n")}`,
+      content: memoryBlock,
     };
 
-    // Find insertion point: just before the last user message
-    const messages = [...event.messages];
     let insertIdx = messages.length - 1;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "user") {

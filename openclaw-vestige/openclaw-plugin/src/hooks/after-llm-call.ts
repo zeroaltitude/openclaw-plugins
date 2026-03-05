@@ -2,24 +2,26 @@
  * after_llm_call hook handler — Memory Ingestion
  *
  * Scores outbound exchanges (user message + assistant response) for
- * novelty/importance. If above threshold, auto-ingests to Vestige
- * via the smart_ingest endpoint (which handles dedup).
+ * saliency using local DeBERTa NLI classifier. If salient concepts
+ * detected, auto-ingests to Vestige via smart_ingest (which handles dedup).
  *
  * Architecture:
  *   1. Extract assistant response text
  *   2. Get the user message from the sliding window
- *   3. Score the exchange via cheap LLM (Haiku)
- *   4. If above threshold → extract key fact → vestige_smart_ingest
+ *   3. Score the exchange via local NLI classifier (~50-200ms)
+ *   4. If salient → vestige_smart_ingest (fire-and-forget)
  *
- * Latency: This hook runs sequentially but ingestion is fire-and-forget.
- * The LLM scoring adds ~200-400ms but doesn't block response delivery
- * since after_llm_call fires after the response is already captured.
+ * Latency: This hook runs after the response is captured, so NLI scoring
+ * doesn't block response delivery. Ingestion is fire-and-forget.
  */
 
-import type { ScorerConfig } from "./llm-scorer.js";
-import { scoreOutbound } from "./llm-scorer.js";
+import {
+  scoreConcepts,
+  hasSalientConcepts,
+  getSalientLabels,
+  DEFAULT_CONCEPT_LABELS,
+} from "./nli-scorer.js";
 import { addToWindow, getLastUserMessage } from "./sliding-window.js";
-import { scoreGate } from "./saliency-gate.js";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -60,9 +62,12 @@ interface AgentContext {
 // ── Config ─────────────────────────────────────────────────────────────
 
 interface AfterLlmCallConfig {
-  scorer: ScorerConfig;
   vestigeServerUrl: string;
   vestigeAuthToken?: string;
+  /** Concept labels for NLI scoring (defaults provided) */
+  conceptLabels?: string[];
+  /** Minimum NLI score to consider a concept salient for storage (default: 0.5) */
+  saliencyThreshold?: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -98,7 +103,7 @@ async function smartIngest(
       body: JSON.stringify({
         content,
         node_type: "fact",
-        tags: ["auto-ingested", "hook-saliency", ...tags],
+        tags: ["auto-ingested", "hook-nli", ...tags],
         context: `Auto-ingested by after_llm_call hook for agent ${agentId}`,
       }),
       signal: controller.signal,
@@ -113,13 +118,15 @@ async function smartIngest(
 // ── Handler ────────────────────────────────────────────────────────────
 
 export function createAfterLlmCallHandler(config: AfterLlmCallConfig) {
+  const conceptLabels = config.conceptLabels ?? DEFAULT_CONCEPT_LABELS;
+  const threshold = config.saliencyThreshold ?? 0.5;
+
   return async (
     event: AfterLlmCallEvent,
     ctx: AgentContext,
   ): Promise<AfterLlmCallResult | void> => {
     // Skip if the response has tool calls — this is a mid-loop iteration,
-    // not a final response. We score the final response regardless of
-    // which iteration it lands on (could be iteration 0 or iteration 5).
+    // not a final response.
     if (event.toolCalls && event.toolCalls.length > 0) return;
 
     const responseText = extractResponseText(event.response);
@@ -135,31 +142,35 @@ export function createAfterLlmCallHandler(config: AfterLlmCallConfig) {
     const userMessage = getLastUserMessage(sessionKey);
     if (!userMessage) return;
 
-    // Stage 1: Bi-encoder gate on the user message — skip trivial exchanges
+    // Score the combined exchange via local NLI classifier
+    const exchange = `User: ${userMessage}\nAssistant: ${responseText.slice(0, 300)}`;
+
+    let scores;
     try {
-      const gateResult = await scoreGate(userMessage);
-      if (!gateResult.passToScorer) {
-        return; // Low-value exchange — not worth scoring for storage
-      }
+      scores = await scoreConcepts(exchange, conceptLabels);
     } catch {
-      // Gate failed — fall through to LLM scorer
+      // NLI scorer failed — skip ingestion
+      return;
     }
 
-    // Stage 2: LLM scorer for nuanced importance evaluation
-    const score = await scoreOutbound(config.scorer, userMessage, responseText);
-
-    if (!score.store || score.score < (config.scorer.storeThreshold ?? 0.5)) {
+    if (!hasSalientConcepts(scores, threshold)) {
       return; // Not worth storing
     }
 
-    // Ingest the scorer's summary (not raw conversation — keep vestige clean)
-    const summary = score.summary || `${userMessage.slice(0, 100)} → ${responseText.slice(0, 200)}`;
-    const tags = score.keywords.length > 0 ? score.keywords : [];
+    // Get salient labels for tags
+    const salientLabels = getSalientLabels(scores, threshold);
+
+    // Build a summary: user question + truncated response
+    const summary = `${userMessage.slice(0, 100)} → ${responseText.slice(0, 200)}`;
 
     // Fire and forget — don't block on ingest
-    smartIngest(config.vestigeServerUrl, config.vestigeAuthToken, agentId, summary, tags).catch(
-      () => {}, // swallow errors silently
-    );
+    smartIngest(
+      config.vestigeServerUrl,
+      config.vestigeAuthToken,
+      agentId,
+      summary,
+      salientLabels,
+    ).catch(() => {}); // swallow errors silently
 
     // Don't modify tool calls or block — memory ingestion is purely observational
     return;
