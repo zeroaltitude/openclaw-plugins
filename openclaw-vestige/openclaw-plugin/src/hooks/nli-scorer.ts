@@ -28,18 +28,48 @@ export interface ConceptScore {
 // ── Default labels ─────────────────────────────────────────────────────
 
 export const DEFAULT_CONCEPT_LABELS = [
+  // Identity & relationships
   "personal fact",
+  "information about a person",
+  "referencing someone by name",
+
+  // Preferences & opinions
   "preference",
+  "opinion or belief",
+
+  // Decisions & plans
   "decision",
-  "task instruction",
-  "technical concept",
   "commitment or promise",
+  "planning or scheduling",
+
+  // Memory recall triggers
+  "recalling a past event",
+  "asking about something previously discussed",
+  "referencing a prior conversation",
+  "asking for a reminder",
+
+  // Projects & technical work
+  "technical concept",
+  "referencing a project or codebase",
+  "describing a bug or error",
+  "architecture or design discussion",
+
+  // Tasks & instructions
+  "task instruction",
+  "asking for help with something specific",
+
+  // Emotional / contextual
+  "expressing frustration or urgency",
+  "sharing news or an update",
+
+  // Non-salient (filtered out)
   "casual greeting",
   "acknowledgment",
+  "small talk",
 ];
 
 /** Labels that indicate non-salient content (excluded from saliency check) */
-export const NON_SALIENT_LABELS = new Set(["casual greeting", "acknowledgment"]);
+export const NON_SALIENT_LABELS = new Set(["casual greeting", "acknowledgment", "small talk"]);
 
 // ── Singleton state ────────────────────────────────────────────────────
 

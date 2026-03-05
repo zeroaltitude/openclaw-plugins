@@ -118,8 +118,11 @@ async function smartIngest(
 // ── Handler ────────────────────────────────────────────────────────────
 
 export function createAfterLlmCallHandler(config: AfterLlmCallConfig) {
-  const conceptLabels = config.conceptLabels ?? DEFAULT_CONCEPT_LABELS;
-  const threshold = config.saliencyThreshold ?? 0.5;
+  // Merge user-provided labels with defaults (additive, deduplicated)
+  const conceptLabels = config.conceptLabels
+    ? [...new Set([...DEFAULT_CONCEPT_LABELS, ...config.conceptLabels])]
+    : DEFAULT_CONCEPT_LABELS;
+  const threshold = config.saliencyThreshold ?? 0.3;
 
   return async (
     event: AfterLlmCallEvent,

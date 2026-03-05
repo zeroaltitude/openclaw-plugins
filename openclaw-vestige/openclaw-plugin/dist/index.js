@@ -165,6 +165,7 @@ function register(api) {
                 maxMemories: cfg.maxMemories ?? 5,
                 maxMemoryTokens: cfg.maxMemoryTokens ?? 1000,
                 firstIterationOnly: true,
+                logger: api.logger,
             }), { priority: 10 });
             // Outbound: auto-ingest important exchanges after LLM call
             api.on("after_llm_call", (0, after_llm_call_js_1.createAfterLlmCallHandler)({

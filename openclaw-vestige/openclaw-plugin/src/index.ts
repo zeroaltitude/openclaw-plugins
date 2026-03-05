@@ -202,6 +202,7 @@ export function register(api: PluginApi) {
           maxMemories: (cfg.maxMemories as number) ?? 5,
           maxMemoryTokens: (cfg.maxMemoryTokens as number) ?? 1000,
           firstIterationOnly: true,
+          logger: api.logger,
         }),
         { priority: 10 },
       );

@@ -65,6 +65,14 @@ interface AgentContext {
 
 // ── Config ─────────────────────────────────────────────────────────────
 
+interface Logger {
+  info(...args: any[]): void;
+  warn(...args: any[]): void;
+  error(...args: any[]): void;
+}
+
+const noopLogger: Logger = { info() {}, warn() {}, error() {} };
+
 interface BeforeLlmCallConfig {
   vestigeServerUrl: string;
   vestigeAuthToken?: string;
@@ -78,6 +86,8 @@ interface BeforeLlmCallConfig {
   maxMemoryTokens?: number;
   /** Only run on first iteration (default: true) — skip tool-call loops */
   firstIterationOnly?: boolean;
+  /** Logger for debug output */
+  logger?: Logger;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -216,13 +226,20 @@ async function searchVestige(
 // ── Handler ────────────────────────────────────────────────────────────
 
 export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
-  const conceptLabels = config.conceptLabels ?? DEFAULT_CONCEPT_LABELS;
-  const threshold = config.saliencyThreshold ?? 0.5;
+  // Merge user-provided labels with defaults (additive, deduplicated)
+  const conceptLabels = config.conceptLabels
+    ? [...new Set([...DEFAULT_CONCEPT_LABELS, ...config.conceptLabels])]
+    : DEFAULT_CONCEPT_LABELS;
+  const threshold = config.saliencyThreshold ?? 0.3;
+  const log = config.logger ?? noopLogger;
 
   return async (
     event: BeforeLlmCallEvent,
     ctx: AgentContext,
   ): Promise<BeforeLlmCallResult | void> => {
+    const t0 = Date.now();
+    log.info(`[vestige] before_llm_call fired — iteration=${event.iteration}, msgCount=${event.messages.length}`);
+
     // Handle .forget command before stripping
     const rawMessages = [...event.messages];
     const agentId = ctx.agentId ?? "unknown";
@@ -281,15 +298,18 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
     const messages = stripMemoryBlocks(rawMessages);
 
     // Only run on first iteration by default (skip tool-call loop iterations)
-    if ((config.firstIterationOnly ?? true) && event.iteration > 0) {
-      // Still return stripped messages even if we skip scoring
+    // OpenClaw may use 1-based iteration numbering, so check > 1
+    if ((config.firstIterationOnly ?? true) && event.iteration > 1) {
+      log.info(`[vestige] skipping — iteration ${event.iteration} > 1`);
       return { messages };
     }
 
     const userMessage = extractUserMessage(messages);
     if (!userMessage || userMessage.length < 5) {
+      log.info(`[vestige] skipping — userMessage too short or missing (len=${userMessage?.length ?? 0})`);
       return { messages };
     }
+    log.info(`[vestige] userMessage (${userMessage.length} chars): "${userMessage.slice(0, 80)}..."`);
 
     const sessionKey = ctx.sessionKey ?? "__unknown__";
 
@@ -299,22 +319,27 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
     // Score concepts via local NLI classifier
     let scores: ConceptScore[];
     try {
+      const nliT0 = Date.now();
       scores = await scoreConcepts(userMessage, conceptLabels);
-    } catch {
-      // NLI scorer failed — return stripped messages, skip retrieval
+      log.info(`[vestige] NLI scored in ${Date.now() - nliT0}ms — top: ${scores.slice(0, 3).map(s => `${s.label}=${s.score.toFixed(3)}`).join(", ")}`);
+    } catch (err) {
+      log.error(`[vestige] NLI scorer failed:`, err);
       return { messages };
     }
 
     // Check if any salient concepts detected
     if (!hasSalientConcepts(scores, threshold)) {
+      log.info(`[vestige] no salient concepts above threshold=${threshold} — skipping retrieval`);
       return { messages };
     }
 
     // Build search query: user message + salient concept labels for context
     const salientLabels = getSalientLabels(scores, threshold);
+    log.info(`[vestige] salient labels: ${salientLabels.join(", ")}`);
     const query = `${userMessage.slice(0, 200)} ${salientLabels.join(" ")}`.trim();
 
     const maxMemories = config.maxMemories ?? 5;
+    const searchT0 = Date.now();
     const results = await searchVestige(
       config.vestigeServerUrl,
       config.vestigeAuthToken,
@@ -322,8 +347,10 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
       agentId,
       maxMemories,
     );
+    log.info(`[vestige] search returned ${results.length} results in ${Date.now() - searchT0}ms`);
 
     if (results.length === 0) {
+      log.info(`[vestige] no memories found — skipping injection`);
       return { messages };
     }
 
@@ -369,6 +396,7 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
 
     messages.splice(insertIdx, 0, memoryMessage);
 
+    log.info(`[vestige] ⏱ before_llm_call total: ${Date.now() - t0}ms — injected ${memoryLines.length} memories (${tokenCount} est tokens)`);
     return { messages };
   };
 }
