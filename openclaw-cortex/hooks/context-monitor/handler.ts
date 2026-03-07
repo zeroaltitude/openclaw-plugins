@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { existsSync } from "fs";
 import { join } from "path";
+import { ensureDir, loadJson, saveJson } from "../../lib/utils";
 
 // ── Paths ──────────────────────────────────────────────────────────────
 const WORKSPACE =
@@ -33,31 +34,41 @@ interface ContextEntry {
   content: string;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────
-function ensureDir() {
-  if (!existsSync(MEMORY_DIR)) mkdirSync(MEMORY_DIR, { recursive: true });
-}
+// ── State TTL Pruning ──────────────────────────────────────────────────
+const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-function loadJson<T>(path: string, fallback: T): T {
-  try {
-    return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
-    return fallback;
+function pruneStaleThreads(state: StateFile): StateFile {
+  const cutoff = Date.now() - STATE_TTL_MS;
+  const pruned: StateFile = {};
+  for (const [id, thread] of Object.entries(state)) {
+    const lastActivity = thread.lastAlertTs
+      ? new Date(thread.lastAlertTs).getTime()
+      : new Date(thread.firstMessageTs).getTime();
+    if (lastActivity >= cutoff) {
+      pruned[id] = thread;
+    }
   }
-}
-
-function saveJson(path: string, data: unknown) {
-  ensureDir();
-  writeFileSync(path, JSON.stringify(data, null, 2));
+  return pruned;
 }
 
 // ── Thread ID Resolution ───────────────────────────────────────────────
 function resolveThreadId(context: Record<string, unknown>): string {
   const metadata = context.metadata as Record<string, unknown> | undefined;
-  if (metadata?.topic_id) return String(metadata.topic_id);
-  if (context.threadId) return String(context.threadId);
-  if (metadata?.chat_id) return String(metadata.chat_id);
-  if (context.chatId) return String(context.chatId);
+
+  // Determine the chat-level prefix
+  const chatId = context.chatId || metadata?.chat_id;
+  const chatPrefix = chatId ? String(chatId) : null;
+
+  // Determine the thread/topic-level suffix
+  const threadOrTopic = metadata?.topic_id || context.threadId;
+  const suffix = threadOrTopic ? String(threadOrTopic) : null;
+
+  // Build composite key
+  if (chatPrefix && suffix) return `${chatPrefix}:${suffix}`;
+  if (chatPrefix) return chatPrefix;
+  if (suffix) return suffix;
+
+  console.warn("[cortex/context-monitor] No chat/thread/topic ID found — falling back to 'default'");
   return "default";
 }
 
@@ -112,9 +123,10 @@ const handler = async (event: {
   if (event.type !== "message" || event.action !== "received") return;
 
   try {
+    ensureDir(MEMORY_DIR);
     const threadId = resolveThreadId(event.context);
     const now = Date.now();
-    const state = loadJson<StateFile>(STATE_PATH, {});
+    const state = pruneStaleThreads(loadJson<StateFile>(STATE_PATH, {}));
 
     // Initialize or increment thread state
     if (!state[threadId]) {
@@ -146,9 +158,13 @@ const handler = async (event: {
     }
 
     // Build alert with summary from reflection hook's context window
-    const contextWindow = loadJson<ContextEntry[]>(CONTEXT_PATH, []);
+    const hasContextFile = existsSync(CONTEXT_PATH);
+    const contextWindow = hasContextFile ? loadJson<ContextEntry[]>(CONTEXT_PATH, []) : [];
     const recentMessages = contextWindow.slice(-5);
-    const summaryPrompt = buildSummaryPrompt(recentMessages);
+    let summaryPrompt = buildSummaryPrompt(recentMessages);
+    if (!hasContextFile || contextWindow.length === 0) {
+      summaryPrompt += "\n\nNote: Install the cortex reflection hook for richer context summaries.";
+    }
 
     const alertMessage = [
       `🧠 This thread has ${thread.messageCount} messages. Consider starting a new one. Here's a prompt to carry context forward:`,
