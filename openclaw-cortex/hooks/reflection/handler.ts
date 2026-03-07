@@ -1,7 +1,9 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync } from "fs";
 import { join } from "path";
+import http from "http";
 import https from "https";
 import { URL } from "url";
+import { ensureDir, loadJson, saveJson, appendToArray } from "../../lib/utils";
 
 // ── Paths ──────────────────────────────────────────────────────────────
 const WORKSPACE = process.env.OPENCLAW_WORKSPACE || join(process.env.HOME || "~", ".openclaw/workspace");
@@ -11,7 +13,8 @@ const FEEDBACK_PATH = join(MEMORY_DIR, "feedback.json");
 const BOUNDARIES_PATH = join(WORKSPACE, "boundaries.json");
 const REFLECTION_LOG_PATH = join(MEMORY_DIR, "reflection-log.json");
 const CONTEXT_PATH = join(MEMORY_DIR, "cortex-context.json");
-const AUTH_PROFILES_PATH = join(process.env.HOME || "~", ".openclaw/agents/main/agent/auth-profiles.json");
+const AGENT_DIR = process.env.OPENCLAW_AGENT_DIR || join(process.env.HOME || "~", ".openclaw/agents/main/agent");
+const AUTH_PROFILES_PATH = join(AGENT_DIR, "auth-profiles.json");
 const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "~", ".openclaw/openclaw.json");
 
 const ANISHA_ID = "U06T3449W9H";
@@ -40,25 +43,6 @@ interface VestigeConfig {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
-function ensureDir() {
-  if (!existsSync(MEMORY_DIR)) mkdirSync(MEMORY_DIR, { recursive: true });
-}
-
-function loadJson<T>(path: string, fallback: T): T {
-  try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return fallback; }
-}
-
-function saveJson(path: string, data: unknown) {
-  ensureDir();
-  writeFileSync(path, JSON.stringify(data, null, 2));
-}
-
-function appendToArray(path: string, entry: unknown, maxEntries = 500) {
-  const arr = loadJson<unknown[]>(path, []);
-  arr.push(entry);
-  saveJson(path, arr.length > maxEntries ? arr.slice(-maxEntries) : arr);
-}
-
 function getApiKey(): string | null {
   try {
     const profiles = JSON.parse(readFileSync(AUTH_PROFILES_PATH, "utf-8"));
@@ -95,7 +79,7 @@ function vestigeSmartIngest(
 ): Promise<boolean> {
   return new Promise((resolve) => {
     try {
-      const url = new URL(`${vestigeConfig.serverUrl}/smart_ingest`);
+      const url = new URL("/smart_ingest", vestigeConfig.serverUrl);
 
       const body = JSON.stringify({
         content: `${classification.summary}\n\nContext: ${messagePreview}`,
@@ -104,7 +88,8 @@ function vestigeSmartIngest(
         context: messagePreview,
       });
 
-      const req = https.request({
+      const transport = url.protocol === "https:" ? https : http;
+      const req = transport.request({
         hostname: url.hostname,
         port: url.port || (url.protocol === "https:" ? 443 : 80),
         path: url.pathname,
@@ -112,7 +97,7 @@ function vestigeSmartIngest(
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${vestigeConfig.authToken}`,
-          "X-Agent-Id": "telemachus",
+          "X-Agent-Id": process.env.OPENCLAW_AGENT_ID || "unknown",
         },
       }, (res) => {
         let data = "";
@@ -313,6 +298,8 @@ const handler = async (event: {
 }) => {
   if (event.type !== "message" || event.action !== "received") return;
 
+  ensureDir(MEMORY_DIR);
+
   const from = event.context.from as string | undefined;
   const senderId = (event.context.metadata as any)?.senderId as string | undefined;
   if (!matchesAnisha(from) && !matchesAnisha(senderId)) return;
@@ -384,23 +371,15 @@ const handler = async (event: {
     statusMsg = `🧠 cortex → ⚠️ action failed: ${err instanceof Error ? err.message : String(err)}`;
   }
 
-  // ── Vestige auto-ingest (fire-and-forget) ────────────────────────────
+  // ── Vestige auto-ingest ───────────────────────────────────────────────
   let vestigeIngested = false;
   if (classification.vestige_worthy) {
     const vestigeConfig = getVestigeConfig();
     if (vestigeConfig) {
-      // Fire-and-forget: don't await, but track the result via .then()
-      vestigeSmartIngest(vestigeConfig, classification, content.slice(0, 300))
-        .then((success) => {
-          if (success) {
-            console.log(`[cortex] Vestige ingested: ${classification.summary.slice(0, 80)}`);
-          }
-        })
-        .catch((err) => {
-          console.error("[cortex] Vestige ingest promise error:", err);
-        });
-      // Optimistically mark as ingested since we fired the request
-      vestigeIngested = true;
+      vestigeIngested = await vestigeSmartIngest(vestigeConfig, classification, content.slice(0, 300));
+      if (vestigeIngested) {
+        console.log(`[cortex] Vestige ingested: ${classification.summary.slice(0, 80)}`);
+      }
     } else {
       console.error("[cortex] Vestige config not found — skipping auto-ingest");
     }
