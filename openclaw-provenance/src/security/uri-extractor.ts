@@ -121,7 +121,8 @@ const MESSAGE_READ_ACTIONS = new Set([
   "message.list-pins",
   "message.reactions",
   "message.event-list",
-  "message.channel-list",
+  // channel-list is a target-less listing operation — no resource URI to extract.
+  // Its tool trust ("shared" by default) stands without URI override.
   "message.channel-info",
   "message.member-info",
   "message.role-info",
