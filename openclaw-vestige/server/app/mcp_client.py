@@ -158,10 +158,14 @@ class MCPClient:
         try:
             resp = await self._send("tools/call", {"name": name, "arguments": arguments})
         except MCPError as exc:
-            # Detect stale session ID errors and retry with a fresh connection
+            # Detect stale/invalid session or uninitialized server and retry
             err_msg = str(exc).lower()
-            if "session" in err_msg and ("invalid" in err_msg or "not found" in err_msg or "no valid" in err_msg):
-                logger.warning("Stale MCP session detected — reconnecting and retrying")
+            needs_reconnect = (
+                ("session" in err_msg and ("invalid" in err_msg or "not found" in err_msg or "no valid" in err_msg))
+                or "not initialized" in err_msg
+            )
+            if needs_reconnect:
+                logger.warning("Stale or uninitialized MCP session — reconnecting and retrying: %s", exc)
                 self._connected = False
                 self._session_id = None
                 await self.connect()
