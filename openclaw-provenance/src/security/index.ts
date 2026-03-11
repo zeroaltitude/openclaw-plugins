@@ -545,6 +545,10 @@ export function registerSecurityHooks(
   const lastImpactedToolBySession = new Map<string, string>();
   const lastProcessedMessageCount = new Map<string, number>();
   const sessionAgentMap = new Map<string, string>();
+  /** Set in context_assembled when .reset-trust fires; consumed in before_llm_call
+   *  to inject a "wait for user" instruction and prevent the agent from
+   *  re-running the command that originally tainted the context. */
+  const trustResetPendingBySession = new Map<string, true>();
   /** Cached owner-DM status per session, set in context_assembled for use in after_tool_call
    *  (which lacks the senderIsOwner/groupId/spawnedBy fields on its context). */
   const sessionOwnerDmMap = new Map<string, boolean>();
@@ -773,6 +777,8 @@ export function registerSecurityHooks(
           }
 
           watermarkStore.flush();
+          // Signal before_llm_call to inject "wait for user" and suppress auto-continue
+          trustResetPendingBySession.set(sessionKey, true);
           const sk = shortKey(sessionKey);
           logger.info(
             `[provenance:${sk}] 🔄 TRUST_RESET (early): → ${targetLevel} by owner command .reset-trust. Watermark cleared, approvals cleared, blocked tools cleared.`,
@@ -1051,7 +1057,24 @@ export function registerSecurityHooks(
         ? " | Owner can use .reset-trust to clear."
         : "";
       const taintIntrospection = `\n[Security] ${taintEmoji} Taint: ${currentTaint}${wmInfo}${resetHint}`;
-      const systemPromptWithTaint = (event.systemPrompt ?? "") + taintIntrospection;
+      let systemPromptWithTaint = (event.systemPrompt ?? "") + taintIntrospection;
+
+      // ── Post-reset guard ──
+      // When .reset-trust just fired, inject an instruction that prevents the
+      // agent from auto-continuing with the task that originally tainted the
+      // context. Without this, the agent re-runs the tainted command (e.g.
+      // web_search) immediately, re-poisoning the session.
+      const isPostReset = trustResetPendingBySession.get(sessionKey);
+      if (isPostReset) {
+        trustResetPendingBySession.delete(sessionKey);
+        systemPromptWithTaint += "\n[Security] Trust was just reset by the owner. " +
+          "Do NOT re-execute any pending commands or tool calls. " +
+          "Reply with exactly: Trust reset. Waiting for user. " +
+          "Then stop and wait for the user's next message.";
+        logger.info(
+          `[provenance:${sk}] 🛑 Post-reset guard: injected wait-for-user instruction`,
+        );
+      }
 
       const currentTools: Array<{ name: string }> = event.tools ?? [];
       const currentToolNames = currentTools.map((t: any) => t.name);
