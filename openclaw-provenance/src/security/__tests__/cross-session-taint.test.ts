@@ -88,10 +88,22 @@ describe("Cross-session taint inheritance", () => {
       groupId: "group-1",
     });
 
-    // Parent reads external content → taint escalates to external
+    // Parent reads external content
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
+    }, {
+      agentId: "main",
+      sessionKey: parentSession,
+      senderIsOwner: true,
+      groupId: "group-1",
+    });
+
+    // after_tool_call evaluates taint → escalates to external
+    api.fire("after_tool_call", {
+      toolName: "message",
+      params: { action: "read" },
+      result: { content: [{ type: "text", text: "message content" }] },
     }, {
       agentId: "main",
       sessionKey: parentSession,
@@ -166,6 +178,17 @@ describe("Cross-session taint inheritance", () => {
       senderIsOwner: true,
     });
 
+    // after_tool_call: exec is trusted — no escalation
+    api.fire("after_tool_call", {
+      toolName: "exec",
+      params: {},
+      result: { content: [{ type: "text", text: "ok" }] },
+    }, {
+      agentId: "main",
+      sessionKey: parentSession,
+      senderIsOwner: true,
+    });
+
     // Child's context_assembled fires
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
       agentId: "main",
@@ -222,6 +245,17 @@ describe("Cross-session taint inheritance", () => {
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
+    }, {
+      agentId: "main",
+      sessionKey: parentSession,
+      senderIsOwner: true,
+      groupId: "group-1",
+    });
+    // after_tool_call: taint evaluated post-execution
+    api.fire("after_tool_call", {
+      toolName: "message",
+      params: { action: "read" },
+      result: { content: [{ type: "text", text: "message content" }] },
     }, {
       agentId: "main",
       sessionKey: parentSession,
@@ -289,6 +323,16 @@ describe("Cross-session taint inheritance", () => {
       sessionKey: parentSession,
       senderIsOwner: true,
     });
+    // after_tool_call: web_fetch is untrusted
+    api.fire("after_tool_call", {
+      toolName: "web_fetch",
+      params: {},
+      result: { content: [{ type: "text", text: "fetched content" }] },
+    }, {
+      agentId: "main",
+      sessionKey: parentSession,
+      senderIsOwner: true,
+    });
 
     // Child starts
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
@@ -337,6 +381,16 @@ describe("Cross-session taint inheritance", () => {
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
+    }, {
+      agentId: "main",
+      sessionKey: parentSession,
+      senderIsOwner: true,
+    });
+    // after_tool_call: taint evaluated post-execution
+    api.fire("after_tool_call", {
+      toolName: "message",
+      params: { action: "read" },
+      result: { content: [{ type: "text", text: "message content" }] },
     }, {
       agentId: "main",
       sessionKey: parentSession,
@@ -411,6 +465,17 @@ describe("Owner DM exception narrowing", () => {
       senderIsOwner: true,
       groupId: "group-1",
     });
+    // after_tool_call: taint evaluated post-execution
+    api.fire("after_tool_call", {
+      toolName: "message",
+      params: { action: "read" },
+      result: { content: [{ type: "text", text: "message content" }] },
+    }, {
+      agentId: "main",
+      sessionKey: parentSession,
+      senderIsOwner: true,
+      groupId: "group-1",
+    });
 
     // Child inherits external taint from parent
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
@@ -479,6 +544,16 @@ describe("Owner DM exception narrowing", () => {
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
+    }, {
+      agentId: "main",
+      sessionKey: session,
+      senderIsOwner: true,
+    });
+    // after_tool_call: message.read in owner DM → trusted (owner DM exception)
+    api.fire("after_tool_call", {
+      toolName: "message",
+      params: { action: "read" },
+      result: { content: [{ type: "text", text: "message content" }] },
     }, {
       agentId: "main",
       sessionKey: session,

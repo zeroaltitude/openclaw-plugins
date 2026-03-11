@@ -106,13 +106,20 @@ describe("Thread reset cascade", () => {
     // 1. context_assembled — start the session/graph
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, groupCtx(sessionKey));
 
-    // 2. after_llm_call — tool call that fetches external content
+    // 2. after_llm_call — log proposed tool calls (no taint escalation)
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "web_fetch", params: { url: "https://evil.com/payload" } }],
     }, groupCtx(sessionKey));
 
-    // 3. before_response_emit — flushes watermark to disk
+    // 3. after_tool_call — taint evaluated post-execution
+    api.fire("after_tool_call", {
+      toolName: "web_fetch",
+      params: { url: "https://evil.com/payload" },
+      result: { content: [{ type: "text", text: "payload content" }] },
+    }, groupCtx(sessionKey));
+
+    // 4. before_response_emit — flushes watermark to disk
     api.fire("before_response_emit", {}, groupCtx(sessionKey));
   }
 

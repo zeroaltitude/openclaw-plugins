@@ -1,12 +1,9 @@
 /**
- * Browser Snapshot Taint Deferral — Test Suite
+ * Browser Snapshot Taint — Test Suite
  *
- * Validates that browser content tools (snapshot, screenshot, etc.) defer
- * taint classification until after execution when the source URL is unknown.
- *
- * Bug: browser.snapshot without a resolvable URL would apply "external" taint
- * in after_llm_call (before execution), causing self-blocking in before_tool_call.
- * Fix: defer taint to graph.maxTaint; after_tool_call classifies the actual URL.
+ * Validates that browser content tools (snapshot, screenshot, etc.) have
+ * taint evaluated in after_tool_call (post-execution) using observed output.
+ * after_llm_call no longer escalates taint — it only logs and gates.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -85,7 +82,8 @@ describe("Browser snapshot taint deferral", () => {
     return { api, logger, store };
   }
 
-  /** Run context_assembled + before_llm_call + after_llm_call for a browser tool call */
+  /** Run context_assembled + before_llm_call + after_llm_call for a browser tool call.
+   *  after_llm_call no longer escalates taint — call after_tool_call to evaluate. */
   function simulateBrowserToolCall(
     api: ReturnType<typeof makeApi>,
     ctx: typeof ownerCtx,
@@ -111,6 +109,21 @@ describe("Browser snapshot taint deferral", () => {
         name: "browser",
         arguments: { action: toolAction, ...toolParams },
       }],
+    }, ctx);
+  }
+
+  /** Fire after_tool_call to evaluate taint for a tool that has executed */
+  function simulateToolComplete(
+    api: ReturnType<typeof makeApi>,
+    ctx: typeof ownerCtx,
+    toolName: string,
+    params: Record<string, unknown>,
+    result?: unknown,
+  ) {
+    api.fire("after_tool_call", {
+      toolName,
+      params,
+      result: result ?? { content: [{ type: "text", text: "ok" }] },
     }, ctx);
   }
 
@@ -176,7 +189,7 @@ describe("Browser snapshot taint deferral", () => {
       targetId: "tab-xyz",
     });
 
-    // Taint should still be trusted after deferral
+    // Taint should still be trusted (after_llm_call no longer escalates)
     expect(store.getActive(ownerCtx.sessionKey)!.maxTaint).toBe("trusted");
 
     // Simulate tool result with an untrusted URL
@@ -192,16 +205,16 @@ describe("Browser snapshot taint deferral", () => {
     const graph = store.getActive(ownerCtx.sessionKey);
     expect(graph!.maxTaint).toBe("untrusted");
 
-    const reclassLine = logger.logs.find(l => l.includes("BROWSER_URL_RECLASSIFICATION"));
-    expect(reclassLine).toBeDefined();
+    const escalationLine = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
+    expect(escalationLine).toBeDefined();
   });
 
-  it("after_tool_call fallback applies default tool taint when URL is missing from result", () => {
+  it("after_tool_call applies default tool taint when URL is missing from result", () => {
     const { api, logger, store } = setup();
 
     simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
 
-    // Taint deferred to trusted
+    // Taint stays trusted (after_llm_call no longer escalates)
     expect(store.getActive(ownerCtx.sessionKey)!.maxTaint).toBe("trusted");
 
     // Simulate tool result WITHOUT details.url
@@ -210,16 +223,16 @@ describe("Browser snapshot taint deferral", () => {
       params: { action: "snapshot" },
       result: {
         content: [{ type: "text", text: "page content" }],
-        // No details.url — can't resolve
+        // No details.url — universal taint evaluation uses default tool taint
       },
     }, ownerCtx);
 
     const graph = store.getActive(ownerCtx.sessionKey);
-    // Fallback should apply browser.snapshot's default output taint ("external")
+    // Universal evaluation applies browser.snapshot's default output taint ("external")
     expect(graph!.maxTaint).toBe("external");
 
-    const fallbackLine = logger.logs.find(l => l.includes("BROWSER_DEFERRED_FALLBACK"));
-    expect(fallbackLine).toBeDefined();
+    const escalationLine = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
+    expect(escalationLine).toBeDefined();
   });
 
   it("browser.tabs does NOT defer (remains trusted)", () => {
@@ -267,8 +280,7 @@ describe("Browser snapshot taint deferral", () => {
       tools: [{ name: "browser" }],
     }, ownerCtx);
 
-    // browser.open without a URL — not in BROWSER_DEFERRED_TOOLS,
-    // and output taint is "trusted" so no escalation
+    // browser.open without a URL — output taint is "trusted" so no escalation
     api.fire("after_llm_call", {
       iteration: 1,
       toolCalls: [{
@@ -310,8 +322,8 @@ describe("Browser snapshot taint deferral", () => {
     const graph = store.getActive(ownerCtx.sessionKey);
     expect(graph!.maxTaint).toBe("untrusted");
 
-    const reclassLine = logger.logs.find(l => l.includes("BROWSER_URL_RECLASSIFICATION"));
-    expect(reclassLine).toBeDefined();
+    const escalationLine = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
+    expect(escalationLine).toBeDefined();
   });
 
   it("after_tool_call extracts URL from content text JSON and stays trusted for openclaw.ai", () => {
@@ -364,8 +376,8 @@ describe("Browser snapshot taint deferral", () => {
     const graph = store.getActive(ownerCtx.sessionKey);
     expect(graph!.maxTaint).toBe("untrusted");
 
-    const reclassLine = logger.logs.find(l => l.includes("BROWSER_URL_RECLASSIFICATION"));
-    expect(reclassLine).toBeDefined();
+    const escalationLine = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
+    expect(escalationLine).toBeDefined();
   });
 
   // ── URI pattern matching: /** matches bare domain (no trailing path) ──
@@ -386,8 +398,6 @@ describe("Browser snapshot taint deferral", () => {
       tools: [{ name: "browser" }],
     }, ownerCtx);
 
-    // browser.navigate extracts URL from targetUrl param — URI trust should
-    // match "https://openclaw.ai/**" even without a trailing path
     api.fire("after_llm_call", {
       iteration: 1,
       toolCalls: [{
@@ -395,6 +405,9 @@ describe("Browser snapshot taint deferral", () => {
         arguments: { action: "navigate", targetUrl: "https://openclaw.ai" },
       }],
     }, ownerCtx);
+
+    // Taint evaluated in after_tool_call — navigate with trusted URL
+    simulateToolComplete(api, ownerCtx, "browser", { action: "navigate", targetUrl: "https://openclaw.ai" });
 
     const graph = store.getActive(ownerCtx.sessionKey);
     expect(graph!.maxTaint).toBe("trusted");
@@ -424,6 +437,9 @@ describe("Browser snapshot taint deferral", () => {
       }],
     }, ownerCtx);
 
+    // Taint evaluated in after_tool_call
+    simulateToolComplete(api, ownerCtx, "browser", { action: "navigate", targetUrl: "https://openclaw.ai/dashboard" });
+
     const graph = store.getActive(ownerCtx.sessionKey);
     expect(graph!.maxTaint).toBe("trusted");
   });
@@ -451,6 +467,9 @@ describe("Browser snapshot taint deferral", () => {
         arguments: { action: "navigate", targetUrl: "https://hackers.com" },
       }],
     }, ownerCtx);
+
+    // Taint evaluated in after_tool_call
+    simulateToolComplete(api, ownerCtx, "browser", { action: "navigate", targetUrl: "https://hackers.com" });
 
     const graph = store.getActive(ownerCtx.sessionKey);
     expect(graph!.maxTaint).toBe("untrusted");

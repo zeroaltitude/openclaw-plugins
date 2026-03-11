@@ -83,7 +83,7 @@ describe("Per-agent policy overrides", () => {
       senderIsOwner: true,
     });
 
-    // Simulate after_llm_call with web_search
+    // after_llm_call logs proposed tools (no escalation)
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "web_search" }],
@@ -92,8 +92,18 @@ describe("Per-agent policy overrides", () => {
       sessionKey: "agent:main:test1",
     });
 
+    // after_tool_call: taint evaluated post-execution
+    api.fire("after_tool_call", {
+      toolName: "web_search",
+      params: {},
+      result: { content: [{ type: "text", text: "search results" }] },
+    }, {
+      agentId: "main",
+      sessionKey: "agent:main:test1",
+    });
+
     // Check that taint was escalated (web_search = untrusted by default)
-    const taintLog = logger.logs.find(l => l.includes("Taint after:"));
+    const taintLog = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
     expect(taintLog).toBeDefined();
     // Default: web_search taints to "untrusted"
     expect(taintLog).toContain("untrusted");
@@ -128,7 +138,7 @@ describe("Per-agent policy overrides", () => {
       senderIsOwner: true,
     });
 
-    // Simulate after_llm_call with web_search
+    // after_llm_call logs proposed tools (no escalation)
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "web_search" }],
@@ -137,11 +147,24 @@ describe("Per-agent policy overrides", () => {
       sessionKey: "agent:tank:test1",
     });
 
-    // Check that taint stayed trusted for Tank
-    const taintLogs = logger.logs.filter(l => l.includes("Taint after:"));
-    expect(taintLogs.length).toBeGreaterThan(0);
-    const lastTaintLog = taintLogs[taintLogs.length - 1];
-    expect(lastTaintLog).toContain("trusted");
+    // after_tool_call: taint evaluated with Tank's overrides (web_search = trusted)
+    api.fire("after_tool_call", {
+      toolName: "web_search",
+      params: {},
+      result: { content: [{ type: "text", text: "search results" }] },
+    }, {
+      agentId: "tank",
+      sessionKey: "agent:tank:test1",
+    });
+
+    // Check that taint stayed trusted for Tank (no escalation log)
+    const escalationLog = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
+    expect(escalationLog).toBeUndefined();
+
+    // Graph taint should still be trusted
+    const taintLog = logger.logs.find(l => l.includes("Established taint:"));
+    expect(taintLog).toBeDefined();
+    expect(taintLog).toContain("trusted");
   });
 
   it("agent with taintPolicy override allows exec at external taint", () => {
@@ -176,10 +199,20 @@ describe("Per-agent policy overrides", () => {
       senderIsOwner: true,
     });
 
-    // Tank uses web_search → taint goes to external
+    // Tank uses web_search
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "web_search" }],
+    }, {
+      agentId: "tank",
+      sessionKey: "agent:tank:test2",
+    });
+
+    // after_tool_call: taint evaluated → external
+    api.fire("after_tool_call", {
+      toolName: "web_search",
+      params: {},
+      result: { content: [{ type: "text", text: "search results" }] },
     }, {
       agentId: "tank",
       sessionKey: "agent:tank:test2",
@@ -233,10 +266,20 @@ describe("Per-agent policy overrides", () => {
       senderIsOwner: true,
     });
 
-    // Main uses web_search → taint goes to external
+    // Main uses web_search
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "web_search" }],
+    }, {
+      agentId: "main",
+      sessionKey: "agent:main:test2",
+    });
+
+    // after_tool_call: taint evaluated → external
+    api.fire("after_tool_call", {
+      toolName: "web_search",
+      params: {},
+      result: { content: [{ type: "text", text: "search results" }] },
     }, {
       agentId: "main",
       sessionKey: "agent:main:test2",

@@ -131,25 +131,14 @@ export interface SecurityPluginConfig {
   execCommandRules?: ExecCommandRuleConfig[];
 }
 
-/**
- * Browser composite keys that read page content and should defer taint
- * classification until after execution when the source URL is unknown.
- *
- * These tools operate on existing browser tabs/pages. The actual URL isn't
- * always known at call time (e.g., when called without targetId, or when
- * targetId can't be resolved via the tab URL map). Applying the default
- * "external" output taint prematurely would cause self-blocking: the tool
- * escalates taint in after_llm_call, then before_tool_call blocks it.
- *
- * Instead, taint is deferred to the current graph level. after_tool_call
- * classifies the actual URL from the tool result and escalates if needed.
- */
-const BROWSER_DEFERRED_TOOLS = new Set([
+/** Browser composite keys whose results may contain URL metadata for tab tracking. */
+const BROWSER_CONTENT_TOOLS = new Set([
   "browser.snapshot",
   "browser.screenshot",
   "browser.console",
   "browser.pdf",
   "browser.navigate",
+  "browser.open",
 ]);
 
 /** Thread/topic session markers used by OpenClaw channel plugins */
@@ -556,6 +545,9 @@ export function registerSecurityHooks(
   const lastImpactedToolBySession = new Map<string, string>();
   const lastProcessedMessageCount = new Map<string, number>();
   const sessionAgentMap = new Map<string, string>();
+  /** Cached owner-DM status per session, set in context_assembled for use in after_tool_call
+   *  (which lacks the senderIsOwner/groupId/spawnedBy fields on its context). */
+  const sessionOwnerDmMap = new Map<string, boolean>();
 
   /** Shorthand: failOpen with profiling enabled when verbose is on */
   const profiled = <T extends (...args: any[]) => any>(
@@ -583,6 +575,7 @@ export function registerSecurityHooks(
     profiled("context_assembled", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
+      sessionOwnerDmMap.set(sessionKey, isOwnerDm(ctx));
       turnStartTimes.set(sessionKey, performance.now());
 
       // Scan conversation messages for browser.tabs responses to populate tab URL map.
@@ -1270,9 +1263,10 @@ export function registerSecurityHooks(
       }
 
       // Real-time policy re-evaluation against current graph taint.
-      // This catches tools that were allowed at before_llm_call time but
-      // should be blocked now (e.g., parallel tool calls where an earlier
-      // tool in the same batch escalated taint via after_llm_call).
+      // Taint is escalated in after_tool_call (post-execution). Within a
+      // parallel batch, after_tool_call is fire-and-forget so some tools
+      // may execute before taint escalates. Across batches, this re-eval
+      // catches the escalation deterministically.
       if (graph) {
         const agentId = sessionAgentMap.get(sessionKey);
         const effectivePolicyConfig = getPolicyConfig(agentId);
@@ -1333,6 +1327,12 @@ export function registerSecurityHooks(
   );
 
   // --- after_llm_call ---
+  // IMPORTANT: This hook fires BEFORE tools execute. It does NOT escalate taint.
+  // Taint evaluation happens in after_tool_call (post-execution, observed).
+  // This hook's responsibilities:
+  //   1. Log proposed tool calls with predicted trust (diagnostics only)
+  //   2. Use the gate to pre-filter tool calls that are blocked at the
+  //      current ESTABLISHED taint level (from before_llm_call / watermark)
   api.on(
     "after_llm_call",
     profiled("after_llm_call", (event: any, ctx: AgentContext) => {
@@ -1340,81 +1340,29 @@ export function registerSecurityHooks(
       const graph = store.getActive(sessionKey);
       if (!graph) return;
 
-      const llmNodeId = lastLlmNodeBySession.get(sessionKey);
-      // Core sends tool calls with `arguments` (from LLM response); normalize to `params` for internal use
-      const rawToolCalls: Array<{ name: string; params?: Record<string, unknown>; arguments?: Record<string, unknown> }> =
-        event.toolCalls ?? [];
-      const toolCalls = rawToolCalls.map(tc => ({
+      // Core sends tool calls with `id`, `name`, `arguments`; normalize for internal use
+      const rawToolCalls: Array<{
+        id?: string;
+        name: string;
+        params?: Record<string, unknown>;
+        arguments?: Record<string, unknown>;
+      }> = event.toolCalls ?? [];
+      const toolCalls = rawToolCalls.map((tc) => ({
+        id: tc.id,
         name: tc.name,
         params: tc.params ?? tc.arguments ?? {},
       }));
 
+      if (toolCalls.length === 0) return;
+
+      const sk = shortKey(sessionKey);
       const agentId = sessionAgentMap.get(sessionKey);
       const effectiveToolTaints = getResolvedToolTaints(agentId);
       const effectiveUriTrustConfig = getUriTrustConfig(agentId);
+      const effectivePolicyConfig = getPolicyConfig(agentId);
 
-      // Owner DM detection for message trust exception
-      const ownerDm = isOwnerDm(ctx);
-
-      for (const tc of toolCalls) {
-        const params = tc.params ?? {};
-        // Resolve composite key (e.g., message.send, browser.navigate)
-        const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
-
-        // Extract source URIs
-        const sourceUris = extractToolSourceUris(
-          toolKey,
-          tc.name,
-          params,
-          uriExtractors,
-          execCommandRules,
-        );
-
-        // Compute tool trust using composite key
-        const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
-
-        // Diagnostic: log agent ID resolution for debugging multi-agent taint issues
-        if (developerMode) {
-          const sk = shortKey(sessionKey);
-          logger.info(
-            `[provenance:${sk}] 🔍 Tool trust resolution: agentId=${agentId ?? "NONE"} tool=${toolKey} toolTrust=${toolTrust} hasAgentOverride=${agentId ? agentToolTaints.has(agentId) : false}`,
-          );
-        }
-
-        // Compute URI trust (overrides tool trust if matched)
-        let effectiveTrust = toolTrust;
-        if (sourceUris.length > 0) {
-          const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
-          if (uriTrust !== undefined) {
-            effectiveTrust = uriTrust;
-          }
-        }
-
-        // Defer taint for browser content tools with unresolvable URIs.
-        // When the URL isn't known at call time (no targetUrl param, and
-        // targetId absent or can't be resolved via tab URL map), defer to
-        // the current graph taint. after_tool_call will classify the actual
-        // URL from the tool result and escalate if needed.
-        if (sourceUris.length === 0 && BROWSER_DEFERRED_TOOLS.has(toolKey)) {
-          effectiveTrust = graph.maxTaint;
-        }
-
-        // Owner DM exception: message read actions from owner are trusted
-        if (ownerDm && toolKey.startsWith("message.") && effectiveTrust !== "trusted") {
-          effectiveTrust = "trusted";
-        }
-
-        graph.recordToolCall(
-          toolKey, // Use composite key as the tool name in the graph
-          event.iteration ?? 0,
-          llmNodeId,
-          effectiveToolTaints,
-          { sourceUris, effectiveTrust },
-        );
-      }
-
-      const sk = shortKey(sessionKey);
-      const toolDescriptions = toolCalls.map((tc: any) => {
+      // Log proposed tool calls with their predicted trust (diagnostic only — no graph mutation)
+      const toolDescriptions = toolCalls.map((tc) => {
         const params = tc.params ?? {};
         const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
         const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
@@ -1422,40 +1370,83 @@ export function registerSecurityHooks(
         if (sourceUris.length > 0) {
           const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
           const effective = uriTrust ?? toolTrust;
-          return `${toolKey}(${effective}${uriTrust ? ` uri:${sourceUris[0]}` : ""})`;
+          return `${toolKey}(predicted:${effective}${uriTrust ? ` uri:${sourceUris[0]}` : ""})`;
         }
-        return `${toolKey}(${toolTrust})`;
+        return `${toolKey}(predicted:${toolTrust})`;
       });
-      const previousTaintForLog = (graph as any).__lastLoggedTaint ?? graph.maxTaint;
-      // Track taint before tool processing to detect escalation
-      const taintBefore = toolCalls.length > 0 ? previousTaintForLog : graph.maxTaint;
 
       logger.info(
         `[provenance:${sk}] ── LLM Response (iteration ${event.iteration ?? 0}) ──`,
       );
       logger.info(
-        `[provenance:${sk}]   Tool calls: ${toolDescriptions.length > 0 ? toolDescriptions.join(", ") : "(none)"}`,
+        `[provenance:${sk}]   Proposed tool calls: ${toolDescriptions.join(", ")}`,
       );
-      if (graph.maxTaint !== taintBefore && toolCalls.length > 0) {
-        // Identify which tool(s) caused the escalation
-        const escalatingTools = toolCalls
-          .map((tc: any) => {
-            const params = tc.params ?? {};
-            const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
-            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
-            return { toolKey, toolTrust };
-          })
-          .filter(({ toolTrust }) => TRUST_ORDER.indexOf(toolTrust) > TRUST_ORDER.indexOf(taintBefore));
-        const escalators = escalatingTools.map(t => `${t.toolKey}(${t.toolTrust})`).join(", ");
-        logger.info(
-          `[provenance:${sk}]   TOOL_TAINT_ESCALATION: ${taintBefore} → ${graph.maxTaint} caused by: ${escalators || "(indirect)"}`,
-        );
-      } else {
-        logger.info(
-          `[provenance:${sk}]   Taint after: ${graph.maxTaint}`,
-        );
+      logger.info(
+        `[provenance:${sk}]   Established taint: ${graph.maxTaint} (taint evaluation deferred to after_tool_call)`,
+      );
+
+      // Gate: pre-filter tool calls that are blocked at the current established taint.
+      // This is a batch-level optimization — rather than letting each tool hit
+      // before_tool_call and fail individually, we filter the batch up front.
+      // The gate returns { toolCalls: allowed } so the core only executes allowed tools.
+      const currentTaint = graph.maxTaint;
+      const allowed: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
+      const blocked: string[] = [];
+
+      for (const tc of toolCalls) {
+        const params = tc.params ?? {};
+        const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
+        const toolKeyLower = toolKey.toLowerCase();
+
+        // Owner DM exception: message tools always pass in owner DMs
+        if (sessionOwnerDmMap.get(sessionKey) && tc.name.toLowerCase() === "message") {
+          if (tc.id) {
+            allowed.push({ id: tc.id, name: tc.name, arguments: params as Record<string, unknown> });
+          }
+          continue;
+        }
+
+        // Composite key override check (e.g., message.send always allowed)
+        if (toolKey !== tc.name) {
+          const compositeOverride = effectivePolicyConfig.toolOverrides[toolKeyLower];
+          if (compositeOverride) {
+            const mode = compositeOverride[currentTaint] ?? compositeOverride["*"];
+            if (mode === "allow") {
+              if (tc.id) {
+                allowed.push({ id: tc.id, name: tc.name, arguments: params as Record<string, unknown> });
+              }
+              continue;
+            }
+          }
+        }
+
+        // Policy check at current established taint
+        const mode = getToolMode(toolKeyLower, currentTaint, effectivePolicyConfig);
+        if (mode === "restrict") {
+          blocked.push(toolKey);
+          continue;
+        }
+        if (mode === "confirm" && !approvalStore.isApproved(sessionKey, toolKeyLower)) {
+          blocked.push(toolKey);
+          continue;
+        }
+
+        // Tool passes gate
+        if (tc.id) {
+          allowed.push({ id: tc.id, name: tc.name, arguments: params as Record<string, unknown> });
+        }
       }
-      (graph as any).__lastLoggedTaint = graph.maxTaint;
+
+      if (blocked.length > 0) {
+        logger.warn(
+          `[provenance:${sk}]   GATE_FILTERED: ${blocked.join(", ")} blocked at established taint ${currentTaint}`,
+        );
+        // Return gate result: only allowed tool calls proceed to execution
+        return { toolCalls: allowed };
+      }
+
+      // All tools pass — no gate filtering needed
+      return undefined;
     }),
   );
 
@@ -1630,29 +1621,35 @@ export function registerSecurityHooks(
   );
 
   // --- after_tool_call ---
-  // Update browser tab URL map from actual tool results.
-  // This ensures URI trust classification uses the CURRENT page URL,
-  // not stale data from a prior browser.tabs call.
+  // PRIMARY taint evaluation site: evaluates trust AFTER tool execution,
+  // using observed output rather than predictions. This is fire-and-forget
+  // (tools execute in parallel), so taint escalation is best-effort within
+  // a batch — but deterministic across batches since before_tool_call in the
+  // next batch reads the updated graph.maxTaint.
   api.on(
     "after_tool_call",
     profiled("after_tool_call", (event: any, _ctx: any) => {
       const toolName = event.toolName;
       const params = event.params ?? {};
       const result = event.result;
-
-      if (!result || typeof result !== "object") return;
+      const sessionKey = _ctx.sessionKey ?? lastToolCallSessionKey;
+      const graph = store.getActive(sessionKey);
+      if (!graph) return;
 
       const toolKey = resolveToolKey(toolName, params, compositeTools, execCommandRules);
+      const agentId = sessionAgentMap.get(sessionKey);
+      const effectiveToolTaints = getResolvedToolTaints(agentId);
+      const effectiveUriTrustConfig = getUriTrustConfig(agentId);
+      const sk = shortKey(sessionKey);
+      const llmNodeId = lastLlmNodeBySession.get(sessionKey);
 
-      // browser.tabs: seed tab URL map from response
-      if (toolKey === "browser.tabs") {
+      // --- Browser tab URL seeding (browser.tabs) ---
+      if (toolKey === "browser.tabs" && result && typeof result === "object") {
         const content = Array.isArray((result as any).content) ? (result as any).content : [];
         for (const part of content) {
           if (part?.type === "text" && typeof part.text === "string") {
             const raw = part.text;
             if (!raw.includes('"tabs"')) continue;
-            // Content may be wrapped in EXTERNAL_UNTRUSTED_CONTENT markers —
-            // try raw first, then extract the JSON object between first { and last }
             const candidates = [
               raw,
               raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1),
@@ -1673,27 +1670,26 @@ export function registerSecurityHooks(
         }
       }
 
-      // browser.snapshot/screenshot/console/pdf: extract URL from result and reclassify.
-      // Handle both resolved composite keys (browser.snapshot) and bare tool name
-      // (browser — when params.action is missing from after_tool_call event).
-      const isBrowserContentResult =
+      // --- Browser URL extraction from results ---
+      // For browser content tools, extract the actual URL from the result
+      // to enable precise URI trust classification.
+      let browserUrl: string | undefined;
+      let resolvedTargetId: string | undefined;
+      const isBrowserContent =
+        BROWSER_CONTENT_TOOLS.has(toolKey) ||
         (toolKey.startsWith("browser.") && toolKey !== "browser.tabs") ||
         (toolName.toLowerCase() === "browser" && toolKey === toolName);
 
-      if (isBrowserContentResult) {
-        // Extract URL from result — try multiple locations:
-        //   1. result.details (structured response extension)
-        //   2. content[].text JSON (MCP standard format — URL embedded in response body)
-        let url: string | undefined;
-        let resolvedTargetId: string | undefined;
-
+      if (isBrowserContent && result && typeof result === "object") {
+        // Try result.details first (structured response extension)
         const details = (result as any).details;
         if (typeof details?.url === "string") {
-          url = details.url;
+          browserUrl = details.url;
           resolvedTargetId = details.targetId ?? params.targetId;
         }
 
-        if (!url) {
+        // Try content[].text JSON (MCP standard format)
+        if (!browserUrl) {
           const content = Array.isArray((result as any).content) ? (result as any).content : [];
           for (const part of content) {
             if (part?.type === "text" && typeof part.text === "string") {
@@ -1708,93 +1704,88 @@ export function registerSecurityHooks(
                 try {
                   const parsed = JSON.parse(candidate);
                   if (typeof parsed?.url === "string") {
-                    url = parsed.url;
+                    browserUrl = parsed.url;
                     resolvedTargetId = parsed?.targetId ?? params.targetId;
                     break;
                   }
                   if (typeof parsed?.details?.url === "string") {
-                    url = parsed.details.url;
+                    browserUrl = parsed.details.url;
                     resolvedTargetId = parsed?.details?.targetId ?? params.targetId;
                     break;
                   }
                 } catch { /* try next candidate */ }
               }
-              if (url) break;
+              if (browserUrl) break;
             }
           }
         }
 
-        // Use the composite key if resolved, otherwise fall back to a
-        // representative deferred key for trust lookups
-        const effectiveKey = BROWSER_DEFERRED_TOOLS.has(toolKey) ? toolKey
-          : toolKey.startsWith("browser.") ? toolKey
-          : "browser.snapshot";
-
-        if (typeof url === "string") {
-          // Update tab map if we have both URL and targetId
-          if (typeof resolvedTargetId === "string") {
-            recordTabUrls([{ targetId: resolvedTargetId, url }]);
-          }
-
-          // Re-classify: compare actual URL trust against current graph taint
-          const sessionKey = _ctx.sessionKey ?? lastToolCallSessionKey;
-          const graph = store.getActive(sessionKey);
-          if (graph) {
-            const agentId = sessionAgentMap.get(sessionKey);
-            const effectiveUriTrustConfig = getUriTrustConfig(agentId);
-            const uriTrust = classifyUri(url, effectiveUriTrustConfig);
-            const effectiveToolTaints = getResolvedToolTaints(agentId);
-            const toolTrust = getToolTrust(effectiveKey, effectiveToolTaints);
-            const effectiveTrust = uriTrust ?? toolTrust;
-
-            // If the actual URL yields worse trust than what was recorded,
-            // escalate the graph to reflect reality
-            const currentMax = TRUST_ORDER.indexOf(graph.maxTaint);
-            const actualIdx = TRUST_ORDER.indexOf(effectiveTrust);
-            if (actualIdx > currentMax) {
-              const sk = shortKey(sessionKey);
-              logger.warn(
-                `[provenance:${sk}]   BROWSER_URL_RECLASSIFICATION: ${resolvedTargetId ? `tab ${shortKey(resolvedTargetId)}` : "browser"} on ${truncate(url, 60)} → trust ${effectiveTrust}. Escalating taint.`,
-              );
-              graph.recordToolCall(
-                effectiveKey,
-                0, // iteration unknown at this point
-                undefined,
-                effectiveToolTaints,
-                { sourceUris: [url], effectiveTrust },
-              );
-            } else if (uriTrust !== undefined) {
-              const sk = shortKey(sessionKey);
-              logger.info(
-                `[provenance:${sk}]   BROWSER_URI_RESOLVED: ${effectiveKey} on ${truncate(url, 60)} → trust ${effectiveTrust} (graph at ${graph.maxTaint})`,
-              );
-            }
-          }
-        } else if (BROWSER_DEFERRED_TOOLS.has(toolKey) || toolName.toLowerCase() === "browser") {
-          // Safety net: a deferred browser content tool completed but the
-          // result didn't include a resolvable URL. Apply the tool's default
-          // output taint so external content doesn't silently enter context
-          // at the deferred (optimistic) trust level.
-          const sessionKey = _ctx.sessionKey ?? lastToolCallSessionKey;
-          const graph = store.getActive(sessionKey);
-          if (graph) {
-            const agentId = sessionAgentMap.get(sessionKey);
-            const effectiveToolTaints = getResolvedToolTaints(agentId);
-            const toolTrust = getToolTrust(effectiveKey, effectiveToolTaints);
-            const currentMaxIdx = TRUST_ORDER.indexOf(graph.maxTaint);
-            const toolTrustIdx = TRUST_ORDER.indexOf(toolTrust);
-            if (toolTrustIdx > currentMaxIdx) {
-              const sk = shortKey(sessionKey);
-              logger.warn(
-                `[provenance:${sk}]   BROWSER_DEFERRED_FALLBACK: ${effectiveKey} completed but URL unresolvable from result — applying default tool taint ${toolTrust}`,
-              );
-              graph.recordToolCall(effectiveKey, 0, undefined, effectiveToolTaints, {
-                sourceUris: [],
-                effectiveTrust: toolTrust,
-              });
-            }
-          }
+        // Update tab URL map if we resolved both URL and targetId
+        if (typeof browserUrl === "string" && typeof resolvedTargetId === "string") {
+          recordTabUrls([{ targetId: resolvedTargetId, url: browserUrl }]);
         }
+      }
+
+      // --- Universal taint evaluation ---
+      // Compute effective trust from tool output taint + URI classification.
+      // This is the ONLY place where graph.recordToolCall() is called for
+      // tool execution taint (after_llm_call no longer escalates).
+
+      // Extract source URIs from params (pre-execution knowledge)
+      const sourceUris = extractToolSourceUris(
+        toolKey,
+        toolName,
+        params,
+        uriExtractors,
+        execCommandRules,
+      );
+
+      // For browser content tools, the actual URL from the result takes priority
+      // over any URIs extracted from params (which may be stale/missing).
+      if (isBrowserContent && typeof browserUrl === "string") {
+        // Replace or augment source URIs with the observed URL
+        if (!sourceUris.includes(browserUrl)) {
+          sourceUris.push(browserUrl);
+        }
+      }
+
+      // Compute tool trust using composite key
+      const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+
+      // Compute URI trust (overrides tool trust if matched)
+      let effectiveTrust = toolTrust;
+      if (sourceUris.length > 0) {
+        const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
+        if (uriTrust !== undefined) {
+          effectiveTrust = uriTrust;
+        }
+      }
+
+      // Owner DM exception: message tools from owner are trusted
+      const ownerDm = sessionOwnerDmMap.get(sessionKey) ?? false;
+      if (ownerDm && toolKey.startsWith("message.") && effectiveTrust !== "trusted") {
+        effectiveTrust = "trusted";
+      }
+
+      // Record in provenance graph — this is where taint escalation happens
+      const taintBefore = graph.maxTaint;
+      graph.recordToolCall(
+        toolKey,
+        0, // iteration not reliably available in after_tool_call
+        llmNodeId,
+        effectiveToolTaints,
+        { sourceUris, effectiveTrust },
+      );
+
+      // Log taint evaluation result
+      if (graph.maxTaint !== taintBefore) {
+        logger.warn(
+          `[provenance:${sk}]   TOOL_TAINT_ESCALATION: ${taintBefore} → ${graph.maxTaint} caused by: ${toolKey}(${effectiveTrust}${sourceUris.length > 0 ? ` uri:${truncate(sourceUris[0], 40)}` : ""})`,
+        );
+      } else if (developerMode) {
+        logger.info(
+          `[provenance:${sk}]   TOOL_TAINT_EVAL: ${toolKey}(${effectiveTrust}) → taint unchanged at ${graph.maxTaint}`,
+        );
       }
     }),
   );

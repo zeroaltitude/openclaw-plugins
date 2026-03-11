@@ -560,11 +560,11 @@ describe("TurnProvenanceGraph", () => {
     expect(g.maxTaint).toBe("untrusted");
   });
 
-  it("vestige tools escalate to shared", () => {
+  it("vestige tools stay trusted (local cognitive memory)", () => {
     const g = makeGraph();
     g.recordLlmCall(1, 28);
     g.recordToolCall("vestige_search", 1);
-    expect(g.maxTaint).toBe("shared");
+    expect(g.maxTaint).toBe("trusted");
   });
 
   it("message escalates to external", () => {
@@ -671,10 +671,11 @@ describe("Integration: taint → policy", () => {
     expect(result.toolRemovals.size).toBe(0);
   });
 
-  it("trusted → vestige_search (shared) → confirm mode for dangerous tools", () => {
+  it("trusted → shared taint → confirm mode for dangerous tools", () => {
     const graph = makeGraph();
     graph.recordLlmCall(1, 28);
-    graph.recordToolCall("vestige_search", 1); // vestige output is "shared"
+    // Use effectiveTrust override to simulate a tool that produces "shared" taint
+    graph.recordToolCall("some_shared_tool", 1, undefined, undefined, { effectiveTrust: "shared" });
     const result = evaluateWithApprovals(graph, ["exec", "message", "read"], config, approvalStore, "s1");
     // shared default is "confirm" — exec and message need approval
     expect(result.toolRemovals.has("exec")).toBe(true);
