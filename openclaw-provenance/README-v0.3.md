@@ -1,4 +1,6 @@
-# openclaw-provenance
+# openclaw-provenance (v0.3 — Historical)
+
+> **Superseded by [README.md](./README.md).** This document reflects the v0.3 architecture, which used predictive taint evaluation in `after_llm_call`. The current architecture evaluates taint in `after_tool_call` (observed, post-execution). See the main README for the current model.
 
 **Content provenance taint tracking and security policy enforcement for OpenClaw agents.**
 

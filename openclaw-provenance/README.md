@@ -63,10 +63,10 @@ These are orthogonal:
 | `browser` | `untrusted` | blocked when tainted | Can click, submit forms, execute JS on authenticated pages. Response is untrusted. |
 | `exec` | `trusted` | blocked when tainted | Arbitrary command execution. Response is trusted but the *action* is dangerous. |
 | `message` | `external` | blocked when tainted (except owner DMs) | Sends messages as the owner. Response is external content. Owner DMs always allowed. |
-| `vestige_search` | `shared` | always allowed | Read-only memory search. Response is shared cross-agent data. |
+| `vestige_search` | `trusted` | always allowed | Read-only local cognitive memory. Override to `shared` if using shared infrastructure. |
 | `gateway` | `trusted` | always requires approval | Can disable security plugins. Response is system-level config. |
 
-A tool's response trust determines **how it taints the context for future iterations**. A tool's call permission determines **whether it can be invoked in the current iteration**.
+A tool's response trust determines **how it taints the context after execution** (evaluated in `after_tool_call`). A tool's call permission determines **whether it can be invoked given the current established taint** (evaluated in `after_llm_call` batch gate and `before_tool_call` execution gate).
 
 ### Tool Output Taint Defaults and Configuration
 
@@ -79,8 +79,7 @@ Every tool has a built-in default output taint. Unknown tools default to `untrus
 | Trust Level | Tools |
 |-------------|-------|
 | **trusted** | `Read`, `Edit`, `Write`, `exec`, `process`, `tts`, `cron`, `sessions_spawn`, `sessions_send`, `sessions_list`, `sessions_history`, `agents_list`, `nodes`, `canvas`, `gateway`, `session_status` |
-| **trusted** *(memory)* | `vestige_smart_ingest`, `vestige_ingest`, `vestige_promote`, `vestige_demote`, `memory_search`, `memory_get` |
-| **shared** | `vestige_search` |
+| **trusted** *(memory)* | `vestige_search`, `vestige_smart_ingest`, `vestige_ingest`, `vestige_promote`, `vestige_demote`, `memory_search`, `memory_get` |
 | **external** | `message`, `gog`, `image` |
 | **untrusted** | `web_fetch`, `web_search`, `browser` |
 
@@ -113,7 +112,7 @@ This example reclassifies `web_fetch` and `web_search` output from `untrusted` t
 - **Curated search**: If `web_search` results are filtered through a trusted proxy, override to `external`
 - **Custom tools**: Any tool added by skills or plugins can be classified — unknown tools default to `untrusted`; override to set the appropriate level
 - **Stricter classification**: Override a tool *up* in taint (e.g., `exec` → `shared`) if its output comes from multi-tenant infrastructure
-- **Vestige as trusted**: If you control your own Vestige instance, override vestige tools to `trusted`
+- **Vestige as shared**: If your Vestige instance is shared across untrusted agents, override `vestige_search` to `shared`
 
 The resolved taint map is logged at startup when overrides are present:
 ```
@@ -258,7 +257,7 @@ Content is classified into four trust levels, ordered from most to least trusted
 | Level | Description | Examples |
 |-------|-------------|----------|
 | `trusted` | Content from us — system, owner, local tools | System prompt, SOUL.md, owner DMs, file reads, exec output, sub-agents, cron |
-| `shared` | Shared/cross-agent data | Vestige memories, sub-agent results from shared memory |
+| `shared` | Shared/cross-agent data | Cross-agent shared memory (vestige defaults to trusted; override to shared if using shared infrastructure) |
 | `external` | Known external sources | Email (Gmail), Slack messages, calendar events, channel messages from non-owners |
 | `untrusted` | Unknown/adversarial sources | Web pages (`web_fetch`), `browser` content, unknown webhooks |
 
@@ -269,7 +268,7 @@ The previous six-level model (system → owner → local → shared → external
 A turn's taint level can be escalated by three distinct mechanisms:
 
 1. **Initial trust classification** — determined at turn start from sender/channel metadata
-2. **Tool response trust** — determined when a tool returns results (from `DEFAULT_TOOL_OUTPUT_TAINTS`)
+2. **Tool response trust** — evaluated in `after_tool_call` when a tool returns results (from `DEFAULT_TOOL_OUTPUT_TAINTS`, overridable by URI trust)
 3. **History content** — the conversation history node inherits the initial trust classification
 
 Each of these adds nodes to the provenance graph, and each node's trust level feeds into the high-water mark. The rest of this section explains each mechanism in detail.
@@ -387,7 +386,7 @@ updateTaint(trust: TrustLevel): void {
 }
 ```
 
-When a tool is called, `recordToolCall()` looks up the tool's **response trust** from `DEFAULT_TOOL_OUTPUT_TAINTS` and adds a node with that trust level. This may escalate the turn's `maxTaint`:
+When a tool completes, `after_tool_call` invokes `recordToolCall()` which looks up the tool's **response trust** from `DEFAULT_TOOL_OUTPUT_TAINTS` (potentially overridden by URI trust classification) and adds a node with that trust level. This may escalate the turn's `maxTaint`:
 
 ```
 Turn starts:
@@ -409,13 +408,34 @@ Iteration 3:
   Tool: exec("cmd") → BLOCKED              ← policy evaluation sees maxTaint=untrusted, blocks exec
 ```
 
-**Key timing detail:** The taint escalation from a tool happens when `recordToolCall()` is invoked in the `after_llm_call` hook — i.e., after the LLM has decided to call the tool and the tool has returned results. The policy enforcement happens in `before_llm_call` on the *next* iteration, when those results are in the context. This means:
+**Parallel batch example** — what happens when tools execute concurrently:
 
-- A tool's response taints the context for **subsequent** iterations, not the current one.
-- The tool that introduces taint is always allowed to complete (it was evaluated against the *previous* taint level).
-- Policy enforcement catches the escalated taint on the next `before_llm_call`.
+```
+Iteration 1: maxTaint = trusted
+  LLM proposes: [web_fetch(url), exec("deploy.sh")]
+  → Batch gate: both pass (maxTaint=trusted)
+  → Both execute concurrently
+  → exec completes first → after_tool_call records exec(trusted) → maxTaint = trusted
+  → web_fetch completes → after_tool_call records web_fetch(untrusted) → maxTaint = untrusted
+  exec ran in a context that did NOT contain web_fetch's output — this is correct.
 
-**Consequence:** If `web_fetch` is called in iteration 1 and returns untrusted content, `exec` is blocked starting in iteration 2. The LLM cannot call both `web_fetch` and `exec` in the same iteration and have `exec` be blocked — the blocking happens one iteration later. This is currently acceptable because the LLM processes tool results sequentially (not in parallel branches).
+Iteration 2: maxTaint = untrusted
+  LLM proposes: [exec("another.sh")]
+  → Batch gate: exec BLOCKED (maxTaint=untrusted)
+  Now the tainted content IS in the context, and exec is blocked.
+```
+
+**Key timing detail:** Taint escalation happens in `after_tool_call` — after a tool has **executed** and returned its results. This is *observed* taint, not predicted taint. The policy enforcement happens in three places:
+
+1. **`after_llm_call` (batch gate):** Before tools in a batch execute, tools that are blocked at the *current established taint* are filtered out. This catches restrictions from previous batches.
+2. **`before_tool_call` (execution gate):** Each individual tool is re-checked against `graph.maxTaint` immediately before execution. This is defense-in-depth.
+3. **`before_llm_call` (next iteration):** The full tool list is filtered based on the updated taint level before the LLM sees its options.
+
+**Within a parallel batch**, tools execute concurrently. If the LLM proposes `[web_fetch, exec]` in the same batch and both pass the gate at the current taint level, they may execute in parallel. If `web_fetch` completes first and escalates the taint, `exec` may still be running — or may have already completed. This is **correct behavior**: `exec` was evaluated against a context that genuinely did not contain the untrusted `web_fetch` output. The tainted content doesn't exist in exec's context window because it hasn't been returned yet. You can't be tainted by content that doesn't exist.
+
+**Across batches**, enforcement is deterministic. After a batch completes, `after_tool_call` has escalated the taint. The next `after_llm_call` gate and `before_llm_call` filter will see the updated `maxTaint` and block restricted tools.
+
+**Consequence:** If `web_fetch` and `exec` are called in the same batch, exec may execute before taint escalates — but this is factually accurate, not a loophole. If `web_fetch` is called in batch 1 and `exec` in batch 2, exec is deterministically blocked. The plugin enforces taint based on what the LLM has actually consumed, not what it *might* consume.
 
 **Taint never decreases within a turn.** `minTrust()` is a one-way ratchet. If one tool returns untrusted content, the entire remainder of the turn is tainted, even if subsequent tools return trusted content.
 
@@ -433,7 +453,7 @@ context_assembled
   └── node: history (trust: trusted)
                                             maxTaint: trusted
 llm_call_1 (trust: trusted)
-  └── tool: web_fetch (trust: untrusted)  ← response trust escalates maxTaint
+  └── tool: web_fetch (trust: untrusted)  ← after_tool_call escalates maxTaint
                                             maxTaint: untrusted
 llm_call_2 (trust: untrusted)            ← inherits maxTaint
   └── tool: exec → BLOCKED               ← policy sees maxTaint=untrusted, blocks exec
@@ -443,17 +463,21 @@ output (trust: untrusted)
 
 Currently all DAGs are linear chains (one LLM call → one or more tool calls → next LLM call). The infrastructure supports branching for future agent fork architectures.
 
-### Two-Layer Enforcement (Defense in Depth)
+### Three-Layer Enforcement (Defense in Depth)
 
 **Layer 1: `before_llm_call` — Tool List Filtering**
 
 Before each LLM call, the plugin evaluates the current taint level against the policy and removes restricted tools from the tool list. The LLM never sees restricted tools and cannot attempt to call them.
 
-**Layer 2: `before_tool_call` — Execution Blocking**
+**Layer 2: `after_llm_call` — Batch Gate**
 
-If the LLM somehow names a restricted tool (e.g., from memory of a previous turn), the execution layer blocks the call and returns an error. This catches any bypass of Layer 1.
+After the LLM proposes tool calls but before they execute, the batch gate pre-filters tools that are blocked at the current established taint. This catches cases where taint escalated between `before_llm_call` (which set the tool list) and the LLM's response.
 
-Why both layers? Layer 1 is the primary defense (the LLM can't call what it can't see). Layer 2 is the safety net (defense in depth). In testing, we found cases where the LLM would name tools from prior context even after they were removed from the current tool list.
+**Layer 3: `before_tool_call` — Execution Blocking**
+
+Each individual tool is re-checked against `graph.maxTaint` immediately before execution. This catches any taint escalation that happened between the batch gate and the tool's actual execution (e.g., from a sibling tool in the same batch completing first via `after_tool_call`).
+
+Why three layers? Layer 1 is the primary defense (the LLM can't call what it can't see). Layer 2 catches batch-level restrictions. Layer 3 is the per-tool safety net. In testing, we found cases where the LLM would name tools from prior context even after they were removed from the current tool list.
 
 ### Fail-Open Design
 
@@ -522,10 +546,10 @@ A tool is "safe to call" when it has **no dangerous side effects** — it cannot
 | `read` | `trusted` | Read-only file access | File could contain anything |
 | `web_fetch` | `untrusted` | HTTP GET, no side effects | Web pages are adversarial |
 | `web_search` | `untrusted` | Search API query | Results are adversarial |
-| `vestige_search` | `shared` | Read-only memory query | Cross-agent data, not verified |
+| `vestige_search` | `trusted` | Read-only memory query | Local cognitive memory (override to `shared` if shared infrastructure) |
 | `image` | `external` | Analyze an image | External image content |
 
-The safe tool's response still taints the context via `recordToolCall()`. After a `web_fetch` completes, the turn's `maxTaint` escalates to `untrusted`, and subsequent iterations will restrict dangerous tools. The safe tool itself is never blocked — only tools called *after* its tainted response enters the context.
+The safe tool's response still taints the context via `recordToolCall()` in `after_tool_call`. After a `web_fetch` completes, the turn's `maxTaint` escalates to `untrusted`, and the next batch of tool calls will have dangerous tools filtered at the gate. The safe tool itself is never blocked — only tools proposed *after* its tainted response has been recorded.
 
 ### The `message` Tool: Composite Keys and Owner DM Exception
 
@@ -562,19 +586,18 @@ The owner can override this for direct use via `toolOverrides`:
 This gives a precise behavior:
 
 ```
-Iteration 1: maxTaint=trusted
-  → browser call permission: allowed (trusted override)
-  → browser called, returns page content
-  → recordToolCall("browser") adds node with trust=untrusted
+Batch 1: maxTaint=trusted
+  → browser passes gate (trusted override = allow)
+  → browser executes, returns page content
+  → after_tool_call: recordToolCall("browser") → trust=untrusted
   → maxTaint escalates: trusted → untrusted
 
-Iteration 2: maxTaint=untrusted
-  → browser call permission: confirm (untrusted override)
-  → browser BLOCKED unless approved
+Batch 2: maxTaint=untrusted
+  → browser blocked at gate (untrusted override = confirm, no approval)
   → exec, message, etc. also blocked
 ```
 
-The first browser call succeeds because it was evaluated against the pre-escalation taint (`trusted`). The second browser call is blocked because the first call's response tainted the context to `untrusted`. An injection in the first page cannot direct a second browser action without owner approval.
+The first browser call succeeds because it is evaluated against the established taint *before* its own output enters the context. After it completes, `after_tool_call` escalates the taint based on the observed response. The second browser call is blocked because the first call's response has been recorded. An injection in the first page cannot direct a second browser action without owner approval.
 
 ### Default Dangerous Tools
 
@@ -947,13 +970,14 @@ The plugin registers handlers on OpenClaw's internal agent loop hooks:
 
 | Hook | Purpose |
 |------|---------|
-| `context_assembled` | Start provenance graph, record initial context, execute `.reset-trust` atomically |
+| `context_assembled` | Start provenance graph, record initial context, load watermark, execute `.reset-trust` atomically |
 | `before_llm_call` | Evaluate policy, filter tool list, process `.approve` commands (`.reset-trust` fallback) |
-| `after_llm_call` | Record tool calls, update taint level |
+| `after_llm_call` | Log proposed tool calls (diagnostic), batch gate: pre-filter tools blocked at established taint |
 | `before_tool_call` | Execution-layer enforcement (defense in depth), memory file write blocking |
+| `after_tool_call` | **Primary taint evaluation**: record observed tool output trust, escalate graph taint post-execution |
 | `loop_iteration_start` | Logging |
 | `loop_iteration_end` | Record iteration metadata |
-| `before_response_emit` | Seal graph, clear turn-scoped approvals, log summary |
+| `before_response_emit` | Seal graph, flush watermark, clear turn-scoped approvals, log summary |
 
 All hook handlers are wrapped in fail-open try/catch — errors are logged but never block the agent.
 
@@ -981,11 +1005,13 @@ The "no write down" property is the novel contribution. Without it, an untrusted
 
 1. **Taint is conservative**: The high-water mark over-restricts. If an agent reads one untrusted web page and ten local files, the entire turn is tainted as `untrusted`. Per-branch tracking would reduce false positives but requires agent forks.
 
-2. **Tool trust classification is static without URI overrides**: Tool trust levels are hardcoded defaults. However, the [URI Trust Classification](#uri-trust-classification) system overrides tool defaults on a per-domain basis — `web_fetch` to `https://internal-api.company.com` can be classified differently from `https://random-blog.com` via `uriTrust` config patterns.
+2. **Within-batch taint is best-effort**: When the LLM proposes multiple tools in a single batch (e.g., `[web_fetch, exec]`), they execute concurrently. Taint from one tool's output cannot block a sibling tool that is already executing. This is *correct* — a tool that hasn't received tainted content can't be influenced by it — but it means enforcement granularity is per-batch, not per-tool. The plugin compensates with the batch gate (`after_llm_call`), which pre-filters tools blocked at the *established* taint before any execute.
 
-3. **Cross-turn tracking is session-scoped**: The persistent watermark store tracks taint across turns within a session, but taint is cleared on `/new` or `/reset` (fresh session start). If a user starts a new session, inherited taint from the previous session is discarded — even if the LLM's conversation history still contains tainted content from before. This is intentional: a fresh session is a fresh trust boundary.
+3. **Tool trust classification is static without URI overrides**: Tool trust levels are hardcoded defaults. However, the [URI Trust Classification](#uri-trust-classification) system overrides tool defaults on a per-domain basis — `web_fetch` to `https://internal-api.company.com` can be classified differently from `https://random-blog.com` via `uriTrust` config patterns.
 
-4. **LLM context is shared**: The fundamental limitation. Until agent frameworks support isolated execution branches (agent forks), the high-water mark is the correct model.
+4. **Cross-turn tracking is session-scoped**: The persistent watermark store tracks taint across turns within a session, but taint is cleared on `/new` or `/reset` (fresh session start). If a user starts a new session, inherited taint from the previous session is discarded — even if the LLM's conversation history still contains tainted content from before. This is intentional: a fresh session is a fresh trust boundary.
+
+5. **LLM context is shared**: The fundamental limitation. Until agent frameworks support isolated execution branches (agent forks), the high-water mark is the correct model.
 
 ## File Structure
 
