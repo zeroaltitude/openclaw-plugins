@@ -1060,20 +1060,23 @@ export function registerSecurityHooks(
       let systemPromptWithTaint = (event.systemPrompt ?? "") + taintIntrospection;
 
       // ── Post-reset guard ──
-      // When .reset-trust just fired, inject an instruction that prevents the
-      // agent from auto-continuing with the task that originally tainted the
-      // context. Without this, the agent re-runs the tainted command (e.g.
-      // web_search) immediately, re-poisoning the session.
+      // When .reset-trust just fired, HARD-STOP the agent by stripping all
+      // tools so it literally cannot make tool calls. The system prompt
+      // instruction is guidance; the empty tool list is enforcement.
+      // Without this, the agent re-runs the tainted command (e.g. web_search)
+      // immediately, re-poisoning the session.
       const isPostReset = trustResetPendingBySession.get(sessionKey);
       if (isPostReset) {
         trustResetPendingBySession.delete(sessionKey);
         systemPromptWithTaint += "\n[Security] Trust was just reset by the owner. " +
-          "Do NOT re-execute any pending commands or tool calls. " +
+          "All tools have been disabled for this turn. " +
           "Reply with exactly: Trust reset. Waiting for user. " +
           "Then stop and wait for the user's next message.";
         logger.info(
-          `[provenance:${sk}] 🛑 Post-reset guard: injected wait-for-user instruction`,
+          `[provenance:${sk}] 🛑 Post-reset guard: stripped all tools + injected wait-for-user`,
         );
+        // Hard enforcement: return empty tools list so LLM cannot call anything
+        return { systemPrompt: systemPromptWithTaint, tools: [] };
       }
 
       const currentTools: Array<{ name: string }> = event.tools ?? [];
