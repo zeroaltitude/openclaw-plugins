@@ -549,6 +549,9 @@ export function registerSecurityHooks(
    *  to inject a "wait for user" instruction and prevent the agent from
    *  re-running the command that originally tainted the context. */
   const trustResetPendingBySession = new Map<string, true>();
+  /** Tracks the runId that triggered .reset-trust to prevent redundant resets
+   *  across compaction retry attempts within the same run. */
+  const trustResetRunIdBySession = new Map<string, string>();
   /** Cached owner-DM status per session, set in context_assembled for use in after_tool_call
    *  (which lacks the senderIsOwner/groupId/spawnedBy fields on its context). */
   const sessionOwnerDmMap = new Map<string, boolean>();
@@ -746,6 +749,7 @@ export function registerSecurityHooks(
             : ""
         : "";
       let ownerIsResettingTrust = false;
+      const currentRunId = event.runId ?? "";
       if (ctx.senderIsOwner === true) {
         const resetMatch = peekContent.trim().match(
           /\.reset-trust(?:\s+(trusted|shared|external|untrusted))?(?:\s|$)/i,
@@ -753,7 +757,16 @@ export function registerSecurityHooks(
         if (resetMatch) {
           const targetLevel = (resetMatch[1]?.toLowerCase() ?? "trusted") as TrustLevel;
           ownerIsResettingTrust = true;
+
+          // Dedup: only perform the full reset on the first attempt of a run.
+          // Compaction retries re-fire context_assembled with the same runId
+          // but incremented attemptIndex. The watermark/approval clears are
+          // idempotent, but logging and flag-setting should not repeat.
+          const previousRunId = trustResetRunIdBySession.get(sessionKey);
+          const isRetryAttempt = previousRunId === currentRunId && currentRunId !== "";
+
           // Execute the reset NOW — clear watermark, approvals, blocked tools
+          // (idempotent, safe to repeat on retries)
           graph.resetTaint(targetLevel);
           blockedToolsBySession.delete(sessionKey);
           approvalStore.clearAll(sessionKey);
@@ -770,19 +783,28 @@ export function registerSecurityHooks(
               watermarkStore.clear(parentKey);
               blockedToolsBySession.delete(parentKey);
               approvalStore.clearAll(parentKey);
-              logger.info(
-                `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET cascade: also cleared parent ${shortKey(parentKey)} (was ${parentWm.level})`,
-              );
+              if (!isRetryAttempt) {
+                logger.info(
+                  `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET cascade: also cleared parent ${shortKey(parentKey)} (was ${parentWm.level})`,
+                );
+              }
             }
           }
 
           watermarkStore.flush();
           // Signal before_llm_call to inject "wait for user" and suppress auto-continue
           trustResetPendingBySession.set(sessionKey, true);
+          trustResetRunIdBySession.set(sessionKey, currentRunId);
           const sk = shortKey(sessionKey);
-          logger.info(
-            `[provenance:${sk}] 🔄 TRUST_RESET (early): → ${targetLevel} by owner command .reset-trust. Watermark cleared, approvals cleared, blocked tools cleared.`,
-          );
+          if (!isRetryAttempt) {
+            logger.info(
+              `[provenance:${sk}] 🔄 TRUST_RESET (early): → ${targetLevel} by owner command .reset-trust. Watermark cleared, approvals cleared, blocked tools cleared.`,
+            );
+          } else {
+            logger.info(
+              `[provenance:${sk}] 🔄 TRUST_RESET (retry attempt ${event.attemptIndex ?? "?"}): runId=${currentRunId} — re-applying idempotent clears`,
+            );
+          }
         }
       }
 
@@ -1065,18 +1087,30 @@ export function registerSecurityHooks(
       // instruction is guidance; the empty tool list is enforcement.
       // Without this, the agent re-runs the tainted command (e.g. web_search)
       // immediately, re-poisoning the session.
+      //
+      // IMPORTANT: We also return minimal messages to prevent compaction
+      // retries. Without this, the full session history + tools=[] triggers
+      // compaction → new attempt → context_assembled re-detects .reset-trust
+      // → re-sets pending flag → post-reset guard fires again → loop.
       const isPostReset = trustResetPendingBySession.get(sessionKey);
       if (isPostReset) {
         trustResetPendingBySession.delete(sessionKey);
-        systemPromptWithTaint += "\n[Security] Trust was just reset by the owner. " +
-          "All tools have been disabled for this turn. " +
-          "Reply with exactly: Trust reset. Waiting for user. " +
-          "Then stop and wait for the user's next message.";
+        const resetSystemPrompt =
+          "You are a security assistant. The session owner just reset the trust level. " +
+          "Reply with exactly: ✅ Trust reset. Session taint cleared to trusted. " +
+          "Say nothing else. Do not call any tools.";
         logger.info(
-          `[provenance:${sk}] 🛑 Post-reset guard: stripped all tools + injected wait-for-user`,
+          `[provenance:${sk}] 🛑 Post-reset guard: stripped all tools + minimal context to prevent compaction retries`,
         );
-        // Hard enforcement: return empty tools list so LLM cannot call anything
-        return { systemPrompt: systemPromptWithTaint, tools: [] };
+        // Hard enforcement: empty tools + minimal messages + dedicated system prompt.
+        // Minimal messages prevent the context from exceeding model limits and
+        // triggering compaction retries (which re-fire context_assembled and
+        // re-detect .reset-trust, causing a retry loop).
+        return {
+          systemPrompt: resetSystemPrompt,
+          tools: [],
+          messages: [{ role: "user", content: [{ type: "text", text: ".reset-trust" }] }] as any,
+        };
       }
 
       const currentTools: Array<{ name: string }> = event.tools ?? [];
