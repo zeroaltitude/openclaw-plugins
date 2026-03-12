@@ -29,11 +29,15 @@ interface PluginApi {
 /** Default request timeout in milliseconds (30s). */
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/** Longer timeout for expensive operations (dream, consolidate). */
+const LONG_TIMEOUT_MS = 180_000;
+
 /** POST JSON to the Vestige bridge and return parsed response data. */
 async function vestigeCall(
   api: PluginApi,
   path: string,
   body: Record<string, unknown>,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<string> {
   const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
   let serverUrl = (cfg.serverUrl as string) ?? "http://vestige.internal:8000";
@@ -44,7 +48,7 @@ async function vestigeCall(
   const agentId = (cfg.agentId as string) ?? "default";
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const resp = await fetch(`${serverUrl}${path}`, {
@@ -82,7 +86,7 @@ async function vestigeCall(
     return JSON.stringify(json);
   } catch (err: any) {
     if (err.name === "AbortError") {
-      return JSON.stringify({ error: true, detail: `Request to ${path} timed out after ${REQUEST_TIMEOUT_MS}ms` });
+      return JSON.stringify({ error: true, detail: `Request to ${path} timed out after ${timeoutMs}ms` });
     }
     throw err;
   } finally {
@@ -172,6 +176,135 @@ export function register(api: PluginApi) {
     }),
     async execute(_id, params) {
       return textResult(await vestigeCall(api, "/demote", params));
+    },
+  });
+
+  // ── v2.0 Tools ─────────────────────────────────────────────────────────
+
+  api.registerTool({
+    name: "vestige_dream",
+    description:
+      "Replay recent memories to discover connections, generate cross-domain insights, " +
+      "and strengthen/decay memories via FSRS-6 spaced repetition. " +
+      "Analogous to sleep consolidation — run nightly for best results.",
+    parameters: Type.Object({
+      memory_count: Type.Optional(
+        Type.Integer({ description: "Number of recent memories to replay (default: 50, max: 500)", minimum: 1, maximum: 500 }),
+      ),
+    }),
+    async execute(_id, params) {
+      return textResult(await vestigeCall(api, "/dream", { memory_count: params.memory_count ?? 50 }, LONG_TIMEOUT_MS));
+    },
+  });
+
+  api.registerTool({
+    name: "vestige_consolidate",
+    description:
+      "Run a full FSRS-6 memory maintenance cycle: apply retention decay, update embeddings, " +
+      "and perform garbage collection on the memory graph.",
+    parameters: Type.Object({}),
+    async execute(_id, _params) {
+      return textResult(await vestigeCall(api, "/consolidate", {}, LONG_TIMEOUT_MS));
+    },
+  });
+
+  api.registerTool({
+    name: "vestige_session_context",
+    description:
+      "One-call session initialization — retrieves relevant memories, active intentions, " +
+      "retention predictions, and system health in a single request. " +
+      "Use at session start to prime context.",
+    parameters: Type.Object({
+      queries: Type.Optional(
+        Type.Array(Type.String(), { description: "Search queries to run (default: ['user preferences'])" }),
+      ),
+      token_budget: Type.Optional(
+        Type.Integer({ description: "Max tokens for response (default: 1000)", minimum: 100, maximum: 10000 }),
+      ),
+      include_status: Type.Optional(Type.Boolean({ description: "Include system health info (default: true)" })),
+      include_intentions: Type.Optional(Type.Boolean({ description: "Include triggered intentions (default: true)" })),
+      include_predictions: Type.Optional(Type.Boolean({ description: "Include memory predictions (default: true)" })),
+    }),
+    async execute(_id, params) {
+      return textResult(await vestigeCall(api, "/session_context", {
+        queries: params.queries ?? ["user preferences"],
+        token_budget: params.token_budget ?? 1000,
+        include_status: params.include_status ?? true,
+        include_intentions: params.include_intentions ?? true,
+        include_predictions: params.include_predictions ?? true,
+      }));
+    },
+  });
+
+  api.registerTool({
+    name: "vestige_explore_connections",
+    description:
+      "Explore the memory connection graph via spreading activation. " +
+      "Supports three modes: 'chain' (shortest path between two memories), " +
+      "'associations' (memories connected to a source), " +
+      "'bridges' (memories that connect two distant clusters).",
+    parameters: Type.Object({
+      action: Type.Union(
+        [Type.Literal("chain"), Type.Literal("associations"), Type.Literal("bridges")],
+        { description: "Exploration mode" },
+      ),
+      from: Type.String({ description: "Source memory ID" }),
+      to: Type.Optional(Type.String({ description: "Target memory ID (required for chain/bridges)" })),
+      limit: Type.Optional(
+        Type.Integer({ description: "Maximum results (default: 10)", minimum: 1, maximum: 100 }),
+      ),
+    }),
+    async execute(_id, params) {
+      const body: Record<string, unknown> = {
+        action: params.action,
+        from: params.from,
+        limit: params.limit ?? 10,
+      };
+      if (params.to) body.to = params.to;
+      return textResult(await vestigeCall(api, "/explore_connections", body));
+    },
+  });
+
+  api.registerTool({
+    name: "vestige_predict",
+    description:
+      "Predict which memories are likely to be needed based on current context. " +
+      "Returns memories ranked by predicted relevance to the active task.",
+    parameters: Type.Object({
+      current_file: Type.Optional(Type.String({ description: "Current file path for context" })),
+      current_topics: Type.Optional(
+        Type.Array(Type.String(), { description: "Current topics for context" }),
+      ),
+      codebase: Type.Optional(Type.String({ description: "Current codebase name" })),
+    }),
+    async execute(_id, params) {
+      const body: Record<string, unknown> = {};
+      const context: Record<string, unknown> = {};
+      if (params.current_file) context.current_file = params.current_file;
+      if (params.current_topics) context.current_topics = params.current_topics;
+      if (params.codebase) context.codebase = params.codebase;
+      if (Object.keys(context).length > 0) body.context = context;
+      return textResult(await vestigeCall(api, "/predict", body));
+    },
+  });
+
+  api.registerTool({
+    name: "vestige_importance_score",
+    description:
+      "Score content for importance using 4-channel analysis (novelty, relevance, emotional valence, utility). " +
+      "Use to evaluate whether something is worth storing before ingesting.",
+    parameters: Type.Object({
+      content: Type.String({ description: "Content to score for importance" }),
+      context_topics: Type.Optional(
+        Type.Array(Type.String(), { description: "Topics for novelty detection" }),
+      ),
+      project: Type.Optional(Type.String({ description: "Project/codebase name for context" })),
+    }),
+    async execute(_id, params) {
+      const body: Record<string, unknown> = { content: params.content };
+      if (params.context_topics) body.context_topics = params.context_topics;
+      if (params.project) body.project = params.project;
+      return textResult(await vestigeCall(api, "/importance_score", body));
     },
   });
 
