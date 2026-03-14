@@ -545,26 +545,22 @@ export function registerSecurityHooks(
   const lastImpactedToolBySession = new Map<string, string>();
   const lastProcessedMessageCount = new Map<string, number>();
   const sessionAgentMap = new Map<string, string>();
-  /** Set in context_assembled when .reset-trust fires; consumed in before_llm_call
-   *  to inject a "wait for user" instruction and prevent the agent from
-   *  re-running the command that originally tainted the context. */
-  const trustResetPendingBySession = new Map<string, true>();
-  /** Tracks the runId that triggered .reset-trust to prevent redundant resets
-   *  across compaction retry attempts within the same run. */
-  const trustResetRunIdBySession = new Map<string, string>();
+  // trustResetPendingBySession and trustResetRunIdBySession removed —
+  // .reset-trust is now handled exclusively via /reset-trust plugin command
+  // (pre-agent-loop, deterministic). No mid-loop interception needed.
   /** Cached owner-DM status per session, set in context_assembled for use in after_tool_call
    *  (which lacks the senderIsOwner/groupId/spawnedBy fields on its context). */
   const sessionOwnerDmMap = new Map<string, boolean>();
 
-  // --- .reset-trust command (registered as plugin command — fires pre-agent-loop) ---
-  // This is the authoritative reset path. It runs BEFORE the agent event loop starts,
-  // clears all taint state atomically, then short-circuits with a deterministic response.
-  // The context_assembled / before_llm_call fallback handling remains for backward
-  // compatibility with agents that send .reset-trust as a mid-loop message.
+  // --- /reset-trust command (registered as plugin command — fires pre-agent-loop) ---
+  // Authoritative, deterministic reset path. Runs BEFORE the agent event loop,
+  // clears all taint state atomically, and returns a fixed response string.
+  // No LLM call is made. Use /reset-trust [level] where level is one of:
+  //   trusted (default) | shared | external | untrusted
   api.registerCommand?.({
     name: "reset-trust",
-    description: "Reset session taint to trusted baseline",
-    acceptsArgs: true, // accepts optional level: trusted|shared|external|untrusted
+    description: "Reset session taint to trusted baseline. Usage: /reset-trust [trusted|shared|external|untrusted]",
+    acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
       const rawArgs = (ctx.args ?? "").trim().toLowerCase();
@@ -573,8 +569,6 @@ export function registerSecurityHooks(
         ? (rawArgs as TrustLevel)
         : "trusted";
 
-      // Collect all session keys to clear: exact match on channel+from,
-      // plus any thread children, plus the parent channel session if in a thread.
       const allWatermarks = watermarkStore.listAll();
       const clearedSessions: string[] = [];
 
@@ -582,8 +576,6 @@ export function registerSecurityHooks(
         watermarkStore.clear(sessionKey);
         blockedToolsBySession.delete(sessionKey);
         approvalStore.clearAll(sessionKey);
-        trustResetPendingBySession.delete(sessionKey);
-        trustResetRunIdBySession.delete(sessionKey);
         clearedSessions.push(sessionKey);
         logger.info(
           `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (command): cleared watermark (was ${allWatermarks[sessionKey]?.level ?? "unknown"}) → ${targetLevel}`,
@@ -764,7 +756,7 @@ export function registerSecurityHooks(
       }
 
       // Watermark clearing is ONLY allowed via explicit owner commands:
-      //   - .reset-trust  (processed in before_llm_call)
+      //   - /reset-trust   (registered plugin command, fires pre-agent-loop)
       //   - /new           (creates a new session key with no watermark entry)
       // Never clear based on messageCount — it's unreliable in thread/channel
       // contexts where each turn may report messageCount=1 despite being an
@@ -778,89 +770,9 @@ export function registerSecurityHooks(
         initialTrust,
       );
 
-      // Early reset: execute .reset-trust atomically at context assembly time.
-      // This ensures the watermark is cleared BEFORE taint is reported to the
-      // user, so the reported taint level is always ground truth. Previously
-      // this was a "peek-ahead" that skipped inheritance but deferred the actual
-      // clear to before_llm_call — if execution failed there (e.g., bad regex),
-      // the reported taint was false.
-      const messages = event.messages ?? [];
-      const peekLastUserMsg = [...messages]
-        .reverse()
-        .find((m: any) => m.role === "user");
-      const peekContent = peekLastUserMsg
-        ? typeof peekLastUserMsg.content === "string"
-          ? peekLastUserMsg.content
-          : Array.isArray(peekLastUserMsg.content)
-            ? peekLastUserMsg.content
-                .filter((c: any) => c?.type === "text")
-                .map((c: any) => c.text)
-                .join("")
-            : ""
-        : "";
-      let ownerIsResettingTrust = false;
-      const currentRunId = event.runId ?? "";
-      if (ctx.senderIsOwner === true) {
-        const resetMatch = peekContent.trim().match(
-          /\.reset-trust(?:\s+(trusted|shared|external|untrusted))?(?:\s|$)/i,
-        );
-        if (resetMatch) {
-          const targetLevel = (resetMatch[1]?.toLowerCase() ?? "trusted") as TrustLevel;
-          ownerIsResettingTrust = true;
-
-          // Dedup: only perform the full reset on the first attempt of a run.
-          // Compaction retries re-fire context_assembled with the same runId
-          // but incremented attemptIndex. The watermark/approval clears are
-          // idempotent, but logging and flag-setting should not repeat.
-          const previousRunId = trustResetRunIdBySession.get(sessionKey);
-          const isRetryAttempt = previousRunId === currentRunId && currentRunId !== "";
-
-          // Execute the reset NOW — clear watermark, approvals, blocked tools
-          // (idempotent, safe to repeat on retries)
-          graph.resetTaint(targetLevel);
-          blockedToolsBySession.delete(sessionKey);
-          approvalStore.clearAll(sessionKey);
-          watermarkStore.clear(sessionKey);
-
-          // Cascade: if this is a thread session, also clear the parent
-          // channel session's watermark. Taint often escalates on the base
-          // channel key, but .reset-trust fires in the thread — leaving a
-          // stale watermark on the parent that re-taints new threads.
-          const parentKey = resolveThreadParentSessionKey(sessionKey);
-          if (parentKey) {
-            const parentWm = watermarkStore.getLevel(parentKey);
-            if (parentWm) {
-              watermarkStore.clear(parentKey);
-              blockedToolsBySession.delete(parentKey);
-              approvalStore.clearAll(parentKey);
-              if (!isRetryAttempt) {
-                logger.info(
-                  `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET cascade: also cleared parent ${shortKey(parentKey)} (was ${parentWm.level})`,
-                );
-              }
-            }
-          }
-
-          watermarkStore.flush();
-          // Signal before_llm_call to inject "wait for user" and suppress auto-continue
-          trustResetPendingBySession.set(sessionKey, true);
-          trustResetRunIdBySession.set(sessionKey, currentRunId);
-          const sk = shortKey(sessionKey);
-          if (!isRetryAttempt) {
-            logger.info(
-              `[provenance:${sk}] 🔄 TRUST_RESET (early): → ${targetLevel} by owner command .reset-trust. Watermark cleared, approvals cleared, blocked tools cleared.`,
-            );
-          } else {
-            logger.info(
-              `[provenance:${sk}] 🔄 TRUST_RESET (retry attempt ${event.attemptIndex ?? "?"}): runId=${currentRunId} — re-applying idempotent clears`,
-            );
-          }
-        }
-      }
-
       // Inherit taint watermark from previous turns (same-session)
       const watermark = watermarkStore.getLevel(sessionKey);
-      if (watermark && !ownerIsResettingTrust) {
+      if (watermark) {
         const watermarkIdx = TRUST_ORDER.indexOf(watermark.level);
         const initialIdx = TRUST_ORDER.indexOf(initialTrust);
         if (watermarkIdx > initialIdx) {
@@ -880,7 +792,7 @@ export function registerSecurityHooks(
       // Inherit taint from parent session (cross-session propagation).
       // When a tainted parent spawns a subagent, the child must inherit
       // the parent's taint to prevent taint laundering.
-      if (ctx.spawnedBy && !ownerIsResettingTrust) {
+      if (ctx.spawnedBy) {
         // Check parent's persisted watermark (completed previous turns)
         const parentWm = watermarkStore.getLevel(ctx.spawnedBy);
         // Check parent's active graph (current in-flight turn — the parent's
@@ -934,7 +846,7 @@ export function registerSecurityHooks(
       logger.info(
         `[provenance:${sk}]   CLASSIFY_INITIAL_TRUST: ${initialTrust} | sender=${ctx.senderName ?? ctx.senderId ?? "unknown"} owner=${ctx.senderIsOwner ?? "unset"} group=${ctx.groupId ?? "none"} provider=${ctx.messageProvider ?? "none"}${ctx.sourceProvider ? ` sourceProvider=${ctx.sourceProvider}` : ""} effectiveProvider=${ctx.sourceProvider ?? ctx.messageProvider ?? "none"}`,
       );
-      if (watermark && !ownerIsResettingTrust) {
+      if (watermark) {
         const wmIdx = TRUST_ORDER.indexOf(watermark.level);
         const initIdx = TRUST_ORDER.indexOf(initialTrust);
         if (wmIdx > initIdx) {
@@ -946,10 +858,6 @@ export function registerSecurityHooks(
             `[provenance:${sk}]   WATERMARK_SKIPPED: watermark ${watermark.level} ≤ initial ${initialTrust} → no inheritance needed`,
           );
         }
-      } else if (watermark && ownerIsResettingTrust) {
-        logger.info(
-          `[provenance:${sk}]   WATERMARK_RESET_PENDING: watermark ${watermark.level} present but owner is resetting trust → skipped inheritance`,
-        );
       }
       if (effectiveTaint !== initialTrust) {
         logger.info(
@@ -980,7 +888,7 @@ export function registerSecurityHooks(
 
       const sk = shortKey(sessionKey);
 
-      // Process owner commands (.approve, .reset-trust)
+      // Process owner commands (.approve)
       // Track processed message indices to prevent repeated firing from conversation history.
       const isOwner = ctx.senderIsOwner === true;
       const messages = event.messages ?? [];
@@ -1050,43 +958,12 @@ export function registerSecurityHooks(
           }
         }
 
-        // Process .reset-trust [level]
-        // NOTE: The actual reset is executed early in context_assembled for
-        // atomicity (reported taint = actual taint). This block is a safety
-        // net — if context_assembled didn't fire or missed the command, we
-        // still execute it here.
-        const resetMatch = trimmed.match(/\.reset-trust(?:\s+(trusted|shared|external|untrusted))?(?:\s|$)/i);
-        if (resetMatch) {
-          const targetLevel = (resetMatch[1]?.toLowerCase() ??
-            "trusted") as TrustLevel;
-          // Check if already handled by early reset
-          const alreadyCleared = !watermarkStore.getLevel(sessionKey);
-          if (alreadyCleared) {
-            logger.info(
-              `[provenance:${sk}] 🔄 TRUST_RESET (confirmed): already executed in context_assembled → ${targetLevel}`,
-            );
-          } else {
-            // Safety net: execute reset here if early reset missed it
-            const previousTaint = graph.maxTaint;
-            graph.resetTaint(targetLevel);
-            blockedToolsBySession.delete(sessionKey);
-            approvalStore.clearAll(sessionKey);
-            watermarkStore.clear(sessionKey);
-            watermarkStore.flush();
-            logger.warn(
-              `[provenance:${sk}] 🔄 TRUST_RESET (late fallback): ${previousTaint} → ${targetLevel} by owner command .reset-trust. Watermark cleared. This should have been handled in context_assembled.`,
-            );
-          }
-        }
       } else if (lastUserMsg && !isOwner) {
         const content =
           typeof lastUserMsg.content === "string"
             ? lastUserMsg.content
             : "";
-        if (
-          content.includes(".approve") ||
-          content.includes(".reset-trust")
-        ) {
+        if (content.includes(".approve")) {
           if (ctx.senderIsOwner === undefined) {
             logger.error(
               `[provenance:${sk}] 🚫 Security command IGNORED: senderIsOwner unavailable — extended security hooks required (senderId: ${ctx.senderId ?? "unknown"})`,
@@ -1126,42 +1003,10 @@ export function registerSecurityHooks(
         ? ` | watermark: ${currentWm.level} (${currentWm.reason ?? "unknown"})`
         : "";
       const resetHint = currentTaint !== "trusted"
-        ? " | Owner can use .reset-trust to clear."
+        ? " | Owner can use /reset-trust to clear."
         : "";
       const taintIntrospection = `\n[Security] ${taintEmoji} Taint: ${currentTaint}${wmInfo}${resetHint}`;
       let systemPromptWithTaint = (event.systemPrompt ?? "") + taintIntrospection;
-
-      // ── Post-reset guard ──
-      // When .reset-trust just fired, HARD-STOP the agent by stripping all
-      // tools so it literally cannot make tool calls. The system prompt
-      // instruction is guidance; the empty tool list is enforcement.
-      // Without this, the agent re-runs the tainted command (e.g. web_search)
-      // immediately, re-poisoning the session.
-      //
-      // IMPORTANT: We also return minimal messages to prevent compaction
-      // retries. Without this, the full session history + tools=[] triggers
-      // compaction → new attempt → context_assembled re-detects .reset-trust
-      // → re-sets pending flag → post-reset guard fires again → loop.
-      const isPostReset = trustResetPendingBySession.get(sessionKey);
-      if (isPostReset) {
-        trustResetPendingBySession.delete(sessionKey);
-        const resetSystemPrompt =
-          "You are a security assistant. The session owner just reset the trust level. " +
-          "Reply with exactly: ✅ Trust reset. Session taint cleared to trusted. " +
-          "Say nothing else. Do not call any tools.";
-        logger.info(
-          `[provenance:${sk}] 🛑 Post-reset guard: stripped all tools + minimal context to prevent compaction retries`,
-        );
-        // Hard enforcement: empty tools + minimal messages + dedicated system prompt.
-        // Minimal messages prevent the context from exceeding model limits and
-        // triggering compaction retries (which re-fire context_assembled and
-        // re-detect .reset-trust, causing a retry loop).
-        return {
-          systemPrompt: resetSystemPrompt,
-          tools: [],
-          messages: [{ role: "user", content: [{ type: "text", text: ".reset-trust" }] }] as any,
-        };
-      }
 
       const currentTools: Array<{ name: string }> = event.tools ?? [];
       const currentToolNames = currentTools.map((t: any) => t.name);
@@ -1338,7 +1183,7 @@ export function registerSecurityHooks(
               blockReason:
                 `Cannot write to memory file '${fileName}' — context contains ${currentTaint} content.\n` +
                 `The content has been saved to .provenance/blocked-writes/ for review.\n` +
-                `Use .reset-trust to clear taint and retry, or review the staged write manually.`,
+                `Use /reset-trust to clear taint and retry, or review the staged write manually.`,
             };
           }
         }
@@ -1390,7 +1235,7 @@ export function registerSecurityHooks(
             block: true,
             blockReason:
               `Tool '${toolName}' is restricted at taint level '${graph.maxTaint}'.\n` +
-              `Use .reset-trust to clear taint, or review the context.`,
+              `Use /reset-trust to clear taint, or review the context.`,
           };
         }
         if (mode === "confirm" && !approvalStore.isApproved(sessionKey, toolKeyLower)) {
@@ -1403,7 +1248,7 @@ export function registerSecurityHooks(
             blockReason:
               `Tool '${toolName}' requires approval at taint level '${graph.maxTaint}'.\n` +
               `Approve: .approve ${toolName}  (or .approve all)\n` +
-              `Or use .reset-trust to clear all restrictions.`,
+              `Or use /reset-trust to clear all restrictions.`,
           };
         }
       }
@@ -1429,7 +1274,7 @@ export function registerSecurityHooks(
             `Tool '${toolName}' is blocked by security policy. Context contains tainted content.\n` +
             `Blocked tools: ${blockedList}\n` +
             `Approve: .approve ${toolName}  (or .approve all)\n` +
-            `Or use .reset-trust to clear all restrictions.`,
+            `Or use /reset-trust to clear all restrictions.`,
         };
       }
       return undefined;

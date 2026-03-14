@@ -1,9 +1,8 @@
 /**
  * Thread Reset Cascade — Test Suite
  *
- * Validates that .reset-trust in a thread session also clears the
- * parent channel session's watermark, preventing stale taint from
- * re-infecting new threads.
+ * Validates that /reset-trust clears watermarks across sessions,
+ * preventing stale taint from re-infecting new threads.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -33,6 +32,7 @@ interface HookHandler {
 
 function makeApi() {
   const hooks = new Map<string, HookHandler[]>();
+  const commands = new Map<string, { handler: (ctx: any) => any }>();
   return {
     on(name: string, handler: HookHandler) {
       if (!hooks.has(name)) hooks.set(name, []);
@@ -46,7 +46,17 @@ function makeApi() {
       }
       return result;
     },
+    registerCommand(opts: { name: string; handler: (ctx: any) => any }) {
+      commands.set(opts.name, opts);
+    },
+    /** Invoke a registered command by name (simulates /command dispatch) */
+    invokeCommand(name: string, ctx: any = {}) {
+      const cmd = commands.get(name);
+      if (!cmd) throw new Error(`Command not registered: ${name}`);
+      return cmd.handler(ctx);
+    },
     hooks,
+    commands,
   };
 }
 
@@ -123,13 +133,9 @@ describe("Thread reset cascade", () => {
     api.fire("before_response_emit", {}, groupCtx(sessionKey));
   }
 
-  /** Simulate .reset-trust from an owner */
-  function simulateResetTrust(api: ReturnType<typeof makeApi>, sessionKey: string) {
-    api.fire("context_assembled", {
-      systemPrompt: "",
-      messageCount: 1,
-      messages: [{ role: "user", content: [{ type: "text", text: ".reset-trust" }] }],
-    }, { ...groupCtx(sessionKey), senderIsOwner: true });
+  /** Simulate /reset-trust from an owner via the registered command */
+  function simulateResetTrust(api: ReturnType<typeof makeApi>, _sessionKey: string) {
+    api.invokeCommand("reset-trust", { args: "" });
   }
 
   it("reset in thread clears parent channel watermark", () => {
@@ -175,36 +181,36 @@ describe("Thread reset cascade", () => {
     expect(watermarks[newThreadSession]).toBeUndefined();
   });
 
-  it("reset in base channel does NOT cascade to threads", () => {
+  it("/reset-trust clears all tainted sessions (global reset)", () => {
     const { api } = setup();
 
     // 1. Taint both base and thread
     simulateTaintedTurn(api, baseSession);
     simulateTaintedTurn(api, threadSession);
 
-    // 2. Reset from base channel only (not a thread, no cascade)
+    // 2. /reset-trust clears all watermarks globally
     simulateResetTrust(api, baseSession);
 
-    // 3. Base should be cleared, thread should still be tainted
+    // Both should be cleared
     const watermarks = readWatermarks(tmpDir);
     expect(watermarks[baseSession]).toBeUndefined();
-    expect(watermarks[threadSession]).toBeDefined();
+    expect(watermarks[threadSession]).toBeUndefined();
   });
 
-  it("reset in thread does not affect unrelated sessions", () => {
+  it("/reset-trust clears all sessions including unrelated ones", () => {
     const { api } = setup();
     const unrelatedSession = "agent:tank:slack:channel:other123";
 
-    // Taint both
+    // Taint all three
     simulateTaintedTurn(api, baseSession);
     simulateTaintedTurn(api, unrelatedSession);
 
-    // Reset from thread (should cascade to parent only)
+    // /reset-trust clears everything
     simulateResetTrust(api, threadSession);
 
-    // Unrelated session should still be tainted
+    // All sessions cleared
     const watermarks = readWatermarks(tmpDir);
     expect(watermarks[baseSession]).toBeUndefined();
-    expect(watermarks[unrelatedSession]).toBeDefined();
+    expect(watermarks[unrelatedSession]).toBeUndefined();
   });
 });

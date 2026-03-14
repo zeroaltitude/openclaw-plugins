@@ -36,6 +36,7 @@ interface HookHandler {
 
 function makeApi() {
   const hooks = new Map<string, HookHandler[]>();
+  const commands = new Map<string, { handler: (ctx: any) => any }>();
   return {
     on(name: string, handler: HookHandler) {
       if (!hooks.has(name)) hooks.set(name, []);
@@ -49,7 +50,16 @@ function makeApi() {
       }
       return result;
     },
+    registerCommand(opts: { name: string; handler: (ctx: any) => any }) {
+      commands.set(opts.name, opts);
+    },
+    invokeCommand(name: string, ctx: any = {}) {
+      const cmd = commands.get(name);
+      if (!cmd) throw new Error(`Command not registered: ${name}`);
+      return cmd.handler(ctx);
+    },
     hooks,
+    commands,
   };
 }
 
@@ -223,7 +233,7 @@ describe("Gateway blocked after untrusted web_fetch", () => {
     expect(execResult?.block).toBe(true);
   });
 
-  it("should allow gateway after .reset-trust clears the taint", () => {
+  it("should allow gateway after /reset-trust clears the taint", () => {
     const logger = makeLogger();
     const api = makeApi();
 
@@ -266,30 +276,10 @@ describe("Gateway blocked after untrusted web_fetch", () => {
       content: "Vestige is down.",
     }, OWNER_CTX);
 
-    // ── Turn 2: owner sends .reset-trust ──
-    api.fire("context_assembled", {
-      systemPrompt: "test",
-      messageCount: 3,
-      messages: [
-        { role: "user", content: "check vestige" },
-        { role: "assistant", content: "Vestige is down." },
-        { role: "user", content: ".reset-trust" },
-      ],
-    }, OWNER_CTX);
+    // ── Turn 2: owner sends /reset-trust (plugin command path) ──
+    api.invokeCommand("reset-trust", { args: "" });
 
-    api.fire("before_llm_call", {
-      tools: [{ function: { name: "gateway" } }],
-    }, OWNER_CTX);
-
-    api.fire("after_llm_call", {
-      toolCalls: [{
-        name: "gateway",
-        params: { action: "config.patch" },
-      }],
-      iteration: 0,
-    }, OWNER_CTX);
-
-    // After .reset-trust, gateway should be allowed
+    // After /reset-trust, gateway should be allowed
     const gatewayResult = api.fire("before_tool_call", {
       toolName: "gateway",
       params: { action: "config.patch" },
