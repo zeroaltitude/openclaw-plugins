@@ -24,6 +24,13 @@ interface PluginApi {
     handler: (...args: any[]) => any,
     opts?: Record<string, unknown>,
   ): void;
+  registerCommand?(opts: {
+    name: string;
+    description: string;
+    acceptsArgs?: boolean;
+    requireAuth?: boolean;
+    handler: (ctx: any) => { text: string } | Promise<{ text: string }>;
+  }): void;
   pluginConfig: Record<string, unknown> | undefined;
   config: Record<string, unknown>;
   logger: {
