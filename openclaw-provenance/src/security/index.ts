@@ -556,6 +556,56 @@ export function registerSecurityHooks(
    *  (which lacks the senderIsOwner/groupId/spawnedBy fields on its context). */
   const sessionOwnerDmMap = new Map<string, boolean>();
 
+  // --- .reset-trust command (registered as plugin command — fires pre-agent-loop) ---
+  // This is the authoritative reset path. It runs BEFORE the agent event loop starts,
+  // clears all taint state atomically, then short-circuits with a deterministic response.
+  // The context_assembled / before_llm_call fallback handling remains for backward
+  // compatibility with agents that send .reset-trust as a mid-loop message.
+  api.registerCommand?.({
+    name: "reset-trust",
+    description: "Reset session taint to trusted baseline",
+    acceptsArgs: true, // accepts optional level: trusted|shared|external|untrusted
+    requireAuth: true,
+    handler: (ctx: any) => {
+      const rawArgs = (ctx.args ?? "").trim().toLowerCase();
+      const validLevels = ["trusted", "shared", "external", "untrusted"] as const;
+      const targetLevel: TrustLevel = (validLevels as readonly string[]).includes(rawArgs)
+        ? (rawArgs as TrustLevel)
+        : "trusted";
+
+      // Collect all session keys to clear: exact match on channel+from,
+      // plus any thread children, plus the parent channel session if in a thread.
+      const allWatermarks = watermarkStore.listAll();
+      const clearedSessions: string[] = [];
+
+      for (const sessionKey of Object.keys(allWatermarks)) {
+        watermarkStore.clear(sessionKey);
+        blockedToolsBySession.delete(sessionKey);
+        approvalStore.clearAll(sessionKey);
+        trustResetPendingBySession.delete(sessionKey);
+        trustResetRunIdBySession.delete(sessionKey);
+        clearedSessions.push(sessionKey);
+        logger.info(
+          `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (command): cleared watermark (was ${allWatermarks[sessionKey]?.level ?? "unknown"}) → ${targetLevel}`,
+        );
+      }
+
+      watermarkStore.flush();
+
+      const sessionCount = clearedSessions.length;
+      const levelNote = targetLevel !== "trusted" ? ` (to ${targetLevel})` : "";
+      const clearedNote = sessionCount > 0
+        ? `${sessionCount} session${sessionCount > 1 ? "s" : ""} cleared${levelNote}.`
+        : `No active taint watermarks found.`;
+
+      logger.info(`[provenance] 🔄 TRUST_RESET (command): ${clearedNote}`);
+
+      return {
+        text: `✅ Trust reset. Session taint cleared to ${targetLevel}. ${clearedNote}`,
+      };
+    },
+  });
+
   /** Shorthand: failOpen with profiling enabled when verbose is on */
   const profiled = <T extends (...args: any[]) => any>(
     hookName: string,
