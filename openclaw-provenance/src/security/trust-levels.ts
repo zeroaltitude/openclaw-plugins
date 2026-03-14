@@ -173,6 +173,14 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
 
   // ── External sources ──────────────────────────────────────────────
   message: "external", // channel messages contain external content
+
+  // ── message subtools: internal platform metadata (shared by default; deployments can elevate) ──
+  "message.member-info": "shared",      // guild member data; internal platform metadata
+  "message.channel-members": "shared",  // channel membership; internal platform metadata
+  "message.channel-info": "shared",     // channel metadata; internal platform
+  "message.channel-list": "shared",     // channel listing; internal platform
+  "message.role-info": "shared",        // role metadata; internal platform
+
   gog: "external", // email/calendar content
   image: "external", // analyzing external images
 
