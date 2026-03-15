@@ -97,6 +97,34 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "browser.tabs": "trusted",
   "browser.profiles": "trusted",
 
+  // ── local read tools: principle "trust what we have" ──
+  // These tools read from the local workspace or internal memory — they
+  // cannot introduce external content. Always trusted regardless of path.
+  "read": "trusted",
+  "write": "trusted",
+  "edit": "trusted",
+  "memory_search": "trusted",
+  "memory_get": "trusted",
+  "vestige_search": "trusted",
+  "vestige_smart_ingest": "trusted",
+  "vestige_ingest": "trusted",
+  "vestige_promote": "trusted",
+  "vestige_demote": "trusted",
+  "vestige_dream": "trusted",
+  "vestige_consolidate": "trusted",
+  "vestige_importance_score": "trusted",
+  "vestige_explore_connections": "trusted",
+  "vestige_predict": "trusted",
+  "vestige_session_context": "trusted",
+  "image": "trusted",
+  "pdf": "trusted",
+  "canvas": "trusted",
+  "tts": "trusted",
+  "session_status": "trusted",
+  "sessions_list": "trusted",
+  "sessions_history": "trusted",
+  "cron": "trusted",
+
   // ── exec: command-pattern-based taints (generated from exec command rules) ──
   ...buildExecOutputTaints(),
 };

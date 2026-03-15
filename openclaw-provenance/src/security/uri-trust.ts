@@ -74,8 +74,12 @@ export const DEFAULT_URI_TRUST_PATTERNS: Record<string, TrustLevel> = {
   "https://clawhub.com/**": "trusted",
 
   // Web (catch-all — should be last)
-  "https://**": "untrusted",
-  "http://**": "untrusted",
+  // "external" not "untrusted": the web is an untrusted source but not
+  // adversarial by default. "untrusted" is reserved for content that is
+  // actively hostile or has been flagged. Users can override specific
+  // domains to "untrusted" if needed (e.g., known malicious domains).
+  "https://**": "external",
+  "http://**": "external",
 };
 
 // ── Specificity calculation ─────────────────────────────────────────────────
