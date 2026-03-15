@@ -552,6 +552,14 @@ export function registerSecurityHooks(
    *  (which lacks the senderIsOwner/groupId/spawnedBy fields on its context). */
   const sessionOwnerDmMap = new Map<string, boolean>();
 
+  /**
+   * Sessions that have been reset via /new or /reset but whose watermark
+   * has not yet been cleared (because before_reset fires async and may
+   * race context_assembled). context_assembled checks this set and clears
+   * the watermark before inheriting it, then removes the entry.
+   */
+  const resetPendingSessions = new Set<string>();
+
   // --- /reset-trust command (registered as plugin command — fires pre-agent-loop) ---
   // Authoritative, deterministic reset path. Runs BEFORE the agent event loop,
   // clears all taint state atomically, and returns a fixed response string.
@@ -640,25 +648,21 @@ export function registerSecurityHooks(
   // as the baseline since before_agent_start is unreliable.
 
   // --- before_reset hook — /new and /reset clear session watermark ---
-  // When a user runs /new or /reset, the session key is reused but conversation
-  // history is cleared. Clear the watermark so the fresh session starts trusted,
-  // not inheriting taint from previous turns.
+  // before_reset fires async (fire-and-forget in core), so we can't clear
+  // the watermark here directly — context_assembled may already be running.
+  // Instead, mark the session in resetPendingSessions; context_assembled
+  // will check this set and skip watermark inheritance for that turn,
+  // clearing the stale watermark before it can be inherited.
   api.on(
     "before_reset",
     profiled("before_reset", (_event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       if (sessionKey === "unknown") return;
 
-      const existing = watermarkStore.get(sessionKey);
-      if (existing) {
-        watermarkStore.clear(sessionKey);
-        watermarkStore.flush();
-        blockedToolsBySession.delete(sessionKey);
-        approvalStore.clearAll(sessionKey);
-        logger.info(
-          `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (/new or /reset): cleared watermark (was ${existing.level}) → trusted`,
-        );
-      }
+      resetPendingSessions.add(sessionKey);
+      logger.info(
+        `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (/new or /reset): marked for watermark clear on next context_assembled`,
+      );
     }),
   );
 
@@ -813,6 +817,23 @@ export function registerSecurityHooks(
         event.messageCount ?? 0,
         initialTrust,
       );
+
+      // If /new or /reset fired since the last turn, clear the stale watermark
+      // before checking inheritance. before_reset marks the session async, so
+      // we consume and clear the flag here, inside the synchronous hook dispatch.
+      if (resetPendingSessions.has(sessionKey)) {
+        resetPendingSessions.delete(sessionKey);
+        const stale = watermarkStore.get(sessionKey);
+        if (stale) {
+          watermarkStore.clear(sessionKey);
+          watermarkStore.flush();
+          blockedToolsBySession.delete(sessionKey);
+          approvalStore.clearAll(sessionKey);
+          logger.info(
+            `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (/new or /reset): cleared stale watermark (was ${stale.level}) → trusted`,
+          );
+        }
+      }
 
       // Inherit taint watermark from previous turns (same-session)
       const watermark = watermarkStore.getLevel(sessionKey);
