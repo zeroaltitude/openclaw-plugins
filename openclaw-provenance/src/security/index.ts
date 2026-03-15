@@ -572,14 +572,35 @@ export function registerSecurityHooks(
       const allWatermarks = watermarkStore.listAll();
       const clearedSessions: string[] = [];
 
-      for (const sessionKey of Object.keys(allWatermarks)) {
+      // Clear the current session (from ctx) even if it has no watermark yet,
+      // so that /reset-trust always resets the calling session.
+      const callerSessionKey = (ctx.sessionKey ?? ctx.session?.key ?? "") as string;
+      const sessionsToClear = new Set([
+        ...Object.keys(allWatermarks),
+        ...(callerSessionKey ? [callerSessionKey] : []),
+      ]);
+
+      for (const sessionKey of sessionsToClear) {
         watermarkStore.clear(sessionKey);
         blockedToolsBySession.delete(sessionKey);
         approvalStore.clearAll(sessionKey);
         clearedSessions.push(sessionKey);
         logger.info(
-          `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (command): cleared watermark (was ${allWatermarks[sessionKey]?.level ?? "unknown"}) → ${targetLevel}`,
+          `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (command): cleared watermark (was ${allWatermarks[sessionKey]?.level ?? "none"}) → ${targetLevel}`,
         );
+      }
+
+      // If targetLevel is not trusted, re-escalate to that level so the
+      // in-memory and on-disk state reflect the requested baseline.
+      if (targetLevel !== "trusted") {
+        for (const sessionKey of clearedSessions) {
+          watermarkStore.escalate(
+            sessionKey,
+            targetLevel,
+            `/reset-trust ${targetLevel}`,
+            "reset-trust command",
+          );
+        }
       }
 
       watermarkStore.flush();
@@ -617,6 +638,29 @@ export function registerSecurityHooks(
   // NOTE: This hook may not fire on all OpenClaw versions. Watermark clearing
   // is in context_assembled. Latency tracking now also uses context_assembled
   // as the baseline since before_agent_start is unreliable.
+
+  // --- before_reset hook — /new and /reset clear session watermark ---
+  // When a user runs /new or /reset, the session key is reused but conversation
+  // history is cleared. Clear the watermark so the fresh session starts trusted,
+  // not inheriting taint from previous turns.
+  api.on(
+    "before_reset",
+    profiled("before_reset", (_event: any, ctx: AgentContext) => {
+      const sessionKey = ctx.sessionKey ?? "unknown";
+      if (sessionKey === "unknown") return;
+
+      const existing = watermarkStore.get(sessionKey);
+      if (existing) {
+        watermarkStore.clear(sessionKey);
+        watermarkStore.flush();
+        blockedToolsBySession.delete(sessionKey);
+        approvalStore.clearAll(sessionKey);
+        logger.info(
+          `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (/new or /reset): cleared watermark (was ${existing.level}) → trusted`,
+        );
+      }
+    }),
+  );
 
   // --- context_assembled ---
   api.on(
