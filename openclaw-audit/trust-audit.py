@@ -40,11 +40,15 @@ EDDIE_IDENTIFIERS = {
 }
 
 # Trusted agents/bots — these are "us", not external senders
+# Include both Slack (U0...) and Discord (numeric) IDs for each agent
 TRUSTED_AGENTS = {
-    "U0ADE5RMUS0": "Tabitha",       # self
-    "U0AGLQ6MQRF": "Tank",          # Eddie's secondary agent
-    "U0AF45ZACF6": "Telemachus",    # Anisha's agent
-    "U0190KQCEDS": "hatbot",        # hatbot
+    "U0ADE5RMUS0": "Tabitha",           # Tabitha — Slack
+    "U0AGLQ6MQRF": "Tank",              # Tank — Slack
+    "U0AF45ZACF6": "Telemachus",        # Telemachus — Anisha's agent, Slack
+    "U0190KQCEDS": "hatbot",            # hatbot — Slack
+    "U0AKRQQ2VT7": "Narcissus",         # Narcissus — Slack
+    "1481181964550672430": "Narcissus", # Narcissus — Discord
+    "1481529266448629872": "Shiva",     # Shiva — Discord
 }
 TRUSTED_AGENT_NAMES = {v.lower() for v in TRUSTED_AGENTS.values()}
 
