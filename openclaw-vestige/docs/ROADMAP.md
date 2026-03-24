@@ -395,6 +395,48 @@ Phases 1-2 and Phase 3 can proceed in parallel.
 
 ---
 
+## Phase 6 (Adaptive Memory Admission Control) — Research Track
+
+**Source:** arxiv:2603.04549 + [GuilinDev/Adaptive_Memory_Admission_Control_LLM_Agents](https://github.com/GuilinDev/Adaptive_Memory_Admission_Control_LLM_Agents)
+**Flagged by:** Anisha Keshavan, 2026-03-19
+**Status:** Research pending
+
+### Background
+The paper proposes a principled 5-feature admission control score:
+
+```
+S(m) = w_U·U + w_C·C + w_N·N + w_R·R + w_T·T
+```
+
+| Feature | Description | Our Status |
+|---------|-------------|------------|
+| Utility (U) | LLM-assessed future usefulness | ✅ `vestige_importance_score` |
+| Novelty (N) | Semantic uniqueness vs. existing memories | ✅ `vestige_importance_score` |
+| Recency (R) | Temporal freshness (exp. decay) | ✅ FSRS-6 handles this |
+| Confidence (C) | Factual reliability via ROUGE-L consistency | ❌ Missing |
+| Type Prior (T) | Content category (pref/fact/state) — **w=0.60, dominant signal** | ❌ Missing |
+
+Key finding: **Type Prior is the dominant signal** (weight 0.60). Content category
+(preference vs. fact vs. episodic vs. transient state) is more predictive of
+memory usefulness than any other feature.
+
+### Research Goals
+1. Map paper features to current vestige architecture
+2. Prototype **Type Prior classification** in `vestige_importance_score` (highest priority)
+3. Assess **Confidence scoring** (ROUGE-L consistency vs. context window)
+4. Evaluate **LoCoMo** as a benchmark dataset for recall quality
+5. Assess **weight optimization loop** (5-fold CV vs. fixed weights)
+6. Recommend implementation order + create dev tasks
+
+### Proposed Implementation Phases
+- **6a:** Add content-type classifier to `vestige_importance_score` (preference/fact/episodic/transient)
+- **6b:** Weight type prior heavily in admission gating (`vestige_smart_ingest`)
+- **6c:** Add ROUGE-L confidence scoring (requires context window access)
+- **6d:** Learned admission threshold (F1-optimized) replacing current heuristic
+- **6e:** Benchmark against LoCoMo
+
+---
+
 ## Open Questions
 
 1. **Repo structure:** Separate repo (`vestige-mcp`) or

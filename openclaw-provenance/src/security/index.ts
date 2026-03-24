@@ -565,6 +565,52 @@ export function registerSecurityHooks(
   // clears all taint state atomically, and returns a fixed response string.
   // No LLM call is made. Use /reset-trust [level] where level is one of:
   //   trusted (default) | shared | external | untrusted
+
+  /**
+   * Derive a session key from PluginCommandContext.
+   *
+   * Plugin commands don't receive sessionKey directly (it's only on AgentContext),
+   * so we reconstruct it from the available context fields using the same logic
+   * OpenClaw uses for agent sessions.
+   *
+   * Format: agent:<agentId>:<channel>:<peerKind>:<peerId>[:thread:<threadId>]
+   */
+  function deriveSessionKeyFromCommandContext(ctx: any): string | null {
+    const channel = ((ctx.channel ?? ctx.channelId ?? "") as string).trim().toLowerCase();
+    if (!channel) {
+      return null;
+    }
+
+    // `from` contains the channel/conversation ID (e.g., Slack channel ID)
+    const peerId = ((ctx.from ?? ctx.to ?? "") as string).trim().toLowerCase();
+    if (!peerId) {
+      return null;
+    }
+
+    // Default agentId — plugin commands don't have agentId, assume "main"
+    const agentId = "main";
+
+    // Determine peer kind: groups/channels vs DMs
+    // In Slack/Discord, channel IDs starting with certain prefixes indicate type,
+    // but we don't have that info here. Default to "channel" for group contexts.
+    // For DMs, OpenClaw uses "direct" but we can't distinguish here without more context.
+    const peerKind = "channel";
+
+    // Build base session key
+    let sessionKey = `agent:${agentId}:${channel}:${peerKind}:${peerId}`;
+
+    // Add thread suffix if present
+    const threadId = ctx.messageThreadId;
+    if (threadId != null && threadId !== "") {
+      const normalizedThreadId = String(threadId).trim().toLowerCase();
+      if (normalizedThreadId) {
+        sessionKey = `${sessionKey}:thread:${normalizedThreadId}`;
+      }
+    }
+
+    return sessionKey;
+  }
+
   api.registerCommand?.({
     name: "reset-trust",
     description: "Reset session taint to trusted baseline. Usage: /reset-trust [trusted|shared|external|untrusted]",
@@ -582,7 +628,20 @@ export function registerSecurityHooks(
 
       // Clear the current session (from ctx) even if it has no watermark yet,
       // so that /reset-trust always resets the calling session.
-      const callerSessionKey = (ctx.sessionKey ?? ctx.session?.key ?? "") as string;
+      // Try multiple sources: explicit sessionKey, session object, or derive from context.
+      const callerSessionKey = (
+        ctx.sessionKey ??
+        ctx.session?.key ??
+        deriveSessionKeyFromCommandContext(ctx) ??
+        ""
+      ) as string;
+
+      logger.info(
+        `[provenance] 🔄 TRUST_RESET (command): callerSessionKey=${callerSessionKey || "(empty)"}, ` +
+        `channel=${ctx.channel ?? "(none)"}, from=${ctx.from ?? "(none)"}, ` +
+        `threadId=${ctx.messageThreadId ?? "(none)"}, allWatermarks=${Object.keys(allWatermarks).length}`,
+      );
+
       const sessionsToClear = new Set([
         ...Object.keys(allWatermarks),
         ...(callerSessionKey ? [callerSessionKey] : []),
