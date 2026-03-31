@@ -4,16 +4,18 @@
   "description": "OpenClaw plugin for content provenance taint tracking and security policy enforcement",
   "main": "dist/index.js",
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run"
   },
-  "dependencies": {},
   "devDependencies": {
     "@types/node": "^25.2.1",
+    "openclaw": "file:../../openclaw",
     "typescript": "^5.4.0",
     "vitest": "^4.0.18"
   }

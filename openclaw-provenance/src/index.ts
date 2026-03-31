@@ -6,41 +6,12 @@
  * security policies with owner-verified approval.
  */
 
+// @ts-ignore TS7016: plugin-sdk types not available; using runtime definition
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk" assert { "resolution-mode": "require" };
 import { registerSecurityHooks } from "./security/index.js";
 import type { TrustLevel } from "./security/trust-levels.js";
 
-interface PluginApi {
-  registerTool(def: {
-    name: string;
-    description: string;
-    parameters: any;
-    execute: (
-      id: string,
-      params: any,
-    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
-  }): void;
-  on(
-    hookName: string,
-    handler: (...args: any[]) => any,
-    opts?: Record<string, unknown>,
-  ): void;
-  registerCommand?(opts: {
-    name: string;
-    description: string;
-    acceptsArgs?: boolean;
-    requireAuth?: boolean;
-    handler: (ctx: any) => { text: string } | Promise<{ text: string }>;
-  }): void;
-  pluginConfig: Record<string, unknown> | undefined;
-  config: Record<string, unknown>;
-  logger: {
-    info(...args: any[]): void;
-    warn(...args: any[]): void;
-    error(...args: any[]): void;
-  };
-}
-
-export function register(api: PluginApi) {
+export function register(api: OpenClawPluginApi) {
   const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>;
 
   const hooksInternalEnabled =

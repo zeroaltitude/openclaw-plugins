@@ -573,31 +573,22 @@ export function registerSecurityHooks(
    * so we reconstruct it from the available context fields using the same logic
    * OpenClaw uses for agent sessions.
    *
-   * Format: agent:<agentId>:<channel>:<peerKind>:<peerId>[:thread:<threadId>]
+   * `from` field format: <channel>:<peerKind>:<peerId> (e.g., "slack:channel:C0AG45JJ1E1")
+   * Session key format: agent:<agentId>:<from>[:thread:<threadId>]
    */
   function deriveSessionKeyFromCommandContext(ctx: any): string | null {
-    const channel = ((ctx.channel ?? ctx.channelId ?? "") as string).trim().toLowerCase();
-    if (!channel) {
-      return null;
-    }
-
-    // `from` contains the channel/conversation ID (e.g., Slack channel ID)
-    const peerId = ((ctx.from ?? ctx.to ?? "") as string).trim().toLowerCase();
-    if (!peerId) {
+    // `from` contains the full routing path: <channel>:<peerKind>:<peerId>
+    // e.g., "slack:channel:C0AG45JJ1E1" or "discord:channel:1234567890"
+    const from = ((ctx.from ?? ctx.to ?? "") as string).trim().toLowerCase();
+    if (!from) {
       return null;
     }
 
     // Default agentId — plugin commands don't have agentId, assume "main"
     const agentId = "main";
 
-    // Determine peer kind: groups/channels vs DMs
-    // In Slack/Discord, channel IDs starting with certain prefixes indicate type,
-    // but we don't have that info here. Default to "channel" for group contexts.
-    // For DMs, OpenClaw uses "direct" but we can't distinguish here without more context.
-    const peerKind = "channel";
-
-    // Build base session key
-    let sessionKey = `agent:${agentId}:${channel}:${peerKind}:${peerId}`;
+    // Build base session key: agent:<agentId>:<from>
+    let sessionKey = `agent:${agentId}:${from}`;
 
     // Add thread suffix if present
     const threadId = ctx.messageThreadId;
