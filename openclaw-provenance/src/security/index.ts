@@ -58,6 +58,11 @@ import {
   type UriTrustConfig,
 } from "./uri-trust.js";
 import type { UriTaintRecord } from "./watermark-store.js";
+import {
+  readProvenanceConfig,
+  writeProvenanceConfig,
+  deleteProvenanceConfigKeys,
+} from "./config-writer.js";
 
 // Types matching OpenClaw's hook system
 interface HookApi {
@@ -348,7 +353,8 @@ export function registerSecurityHooks(
     ...DEFAULT_COMPOSITE_OUTPUT_TAINTS,
     ...(toolOutputTaintOverrides ?? {}),
   };
-  const resolvedToolTaints = buildToolOutputTaintMap(mergedToolOutputTaintOverrides);
+  // Mutable: hot-reloaded by /trust-uri and /trust-tool commands
+  let resolvedToolTaints = buildToolOutputTaintMap(mergedToolOutputTaintOverrides);
   const verbose = config?.verbose ?? false;
   const developerMode = config?.developerMode ?? false;
 
@@ -357,7 +363,8 @@ export function registerSecurityHooks(
   const uriExtractors = buildUriExtractorMap(config?.uriExtractors);
   const execCommandRules = buildExecCommandRules(config?.execCommandRules);
   const workspaceDir = config?.workspaceDir ?? process.cwd();
-  const defaultUriTrustConfig = buildUriTrustConfig(config?.uriTrust, workspaceDir);
+  // Mutable: hot-reloaded by /trust-uri command
+  let defaultUriTrustConfig = buildUriTrustConfig(config?.uriTrust, workspaceDir);
   const trustedSenderIds = new Set(config?.trustedSenderIds ?? []);
 
   const resolvedMissingIdentityTrust = config?.missingIdentityTrust ?? "shared";
@@ -380,7 +387,8 @@ export function registerSecurityHooks(
     ...DEFAULT_COMPOSITE_TOOL_OVERRIDES,
     ...(config?.toolOverrides ?? {}),
   };
-  const defaultPolicyConfig = buildPolicyConfig(
+  // Mutable: hot-reloaded by /trust-tool command
+  let defaultPolicyConfig = buildPolicyConfig(
     config?.taintPolicy as any,
     mergedToolOverridesForPolicy,
     config?.maxIterations,
@@ -543,7 +551,7 @@ export function registerSecurityHooks(
   const lastLlmNodeBySession = new Map<string, string>();
   const blockedToolsBySession = new Map<string, Set<string>>();
   const lastImpactedToolBySession = new Map<string, string>();
-  const lastProcessedMessageCount = new Map<string, number>();
+  // (lastProcessedMessageCount removed — .approve replaced by /approve command)
   const sessionAgentMap = new Map<string, string>();
   // trustResetPendingBySession and trustResetRunIdBySession removed —
   // .reset-trust is now handled exclusively via /reset-trust plugin command
@@ -584,8 +592,10 @@ export function registerSecurityHooks(
       return null;
     }
 
-    // Default agentId — plugin commands don't have agentId, assume "main"
-    const agentId = "main";
+    // Use agentId from context if available; plugin commands often lack it, fall back to "main".
+    // Without this, /reset-trust run in an agent session (e.g. tank) derives
+    // agent:main:... instead of agent:tank:... and clears the wrong key.
+    const agentId = ((ctx.agentId ?? ctx.agent?.id ?? "main") as string).toLowerCase().trim() || "main";
 
     // Build base session key: agent:<agentId>:<from>
     let sessionKey = `agent:${agentId}:${from}`;
@@ -673,6 +683,380 @@ export function registerSecurityHooks(
 
       return {
         text: `✅ Trust reset. Session taint cleared to ${targetLevel}. ${clearedNote}`,
+      };
+    },
+  });
+
+  // --- /approve command (deterministic, pre-loop approval — replaces .approve in LLM context) ---
+  // Grants tool approval for the current session. Runs before the agent loop.
+  // Usage: /approve <tool|all> [session|<N>m|<N>h]
+  //   session (default) = turn-scoped, cleared at turn end
+  //   30m, 2h = time-bounded, persists until expiry
+  api.registerCommand?.({
+    name: "approve",
+    description:
+      "Approve blocked tool(s) for the current session. Usage: /approve <tool|all> [session|<N>m|<N>h]",
+    acceptsArgs: true,
+    requireAuth: true,
+    handler: (ctx: any) => {
+      const args = ((ctx.args ?? "") as string).trim();
+      if (!args) {
+        return {
+          text:
+            "Usage: `/approve <tool|all> [session|<N>m|<N>h]`\n" +
+            "Examples:\n" +
+            "  `/approve exec` — approve exec for this turn\n" +
+            "  `/approve all 30m` — approve all blocked tools for 30 minutes\n" +
+            "  `/approve web_fetch session` — approve web_fetch for this turn",
+        };
+      }
+
+      const parts = args.split(/\s+/);
+      const target = parts[0].toLowerCase();
+      const durationArg = parts[1]?.toLowerCase() ?? "session";
+
+      // Parse duration: "session" → null (turn-scoped), "30m" → 30, "2h" → 120, bare number → minutes
+      let durationMinutes: number | null = null;
+      if (durationArg && durationArg !== "session") {
+        const mMatch = durationArg.match(/^(\d+)m$/);
+        const hMatch = durationArg.match(/^(\d+)h$/);
+        const numMatch = durationArg.match(/^(\d+)$/);
+        if (mMatch) durationMinutes = parseInt(mMatch[1], 10);
+        else if (hMatch) durationMinutes = parseInt(hMatch[1], 10) * 60;
+        else if (numMatch) durationMinutes = parseInt(numMatch[1], 10); // backward compat
+        else {
+          return { text: `❌ Invalid duration "${durationArg}". Use session, 30m, 2h, etc.` };
+        }
+      }
+
+      const callerSessionKey = (
+        ctx.sessionKey ??
+        ctx.session?.key ??
+        deriveSessionKeyFromCommandContext(ctx) ??
+        ""
+      ) as string;
+
+      if (!callerSessionKey) {
+        return { text: "❌ Could not determine session. Please try again." };
+      }
+
+      const sk = shortKey(callerSessionKey);
+      const durDesc = durationMinutes != null ? `${durationMinutes} minutes` : "this turn";
+
+      if (target === "all") {
+        const blocked = blockedToolsBySession.get(callerSessionKey);
+        const blockedList = blocked && blocked.size > 0 ? Array.from(blocked) : [];
+        approvalStore.approve(callerSessionKey, "all", durationMinutes);
+        if (blockedList.length > 0) {
+          approvalStore.approveMultiple(callerSessionKey, blockedList, durationMinutes);
+          logger.info(
+            `[provenance:${sk}] ✅ /approve all: approved ${blockedList.join(", ")} (${durDesc})`,
+          );
+          return {
+            text:
+              `✅ Approved all blocked tools (${durDesc}):\n` +
+              blockedList.map((t) => `  • ${t}`).join("\n"),
+          };
+        } else {
+          logger.info(`[provenance:${sk}] ✅ /approve all: wildcard set (${durDesc}), no currently blocked tools`);
+          return { text: `✅ Wildcard approval set (${durDesc}). All tools approved going forward this session.` };
+        }
+      } else {
+        approvalStore.approve(callerSessionKey, target, durationMinutes);
+        logger.info(`[provenance:${sk}] ✅ /approve ${target} (${durDesc})`);
+        return { text: `✅ Approved \`${target}\` for ${durDesc}.` };
+      }
+    },
+  });
+
+  // --- /trust-uri command ---
+  // Add, remove, or list URI trust patterns in openclaw.json (with hot-reload).
+  // Usage:
+  //   /trust-uri add <pattern> <trusted|shared|external|untrusted>
+  //   /trust-uri remove <pattern>
+  //   /trust-uri list
+  api.registerCommand?.({
+    name: "trust-uri",
+    description:
+      "Manage URI trust patterns. Usage: /trust-uri add <pattern> <level> | remove <pattern> | list",
+    acceptsArgs: true,
+    requireAuth: true,
+    handler: (ctx: any) => {
+      const args = ((ctx.args ?? "") as string).trim();
+      const parts = args.split(/\s+/);
+      const subcommand = parts[0]?.toLowerCase();
+
+      const validLevels: TrustLevel[] = ["trusted", "shared", "external", "untrusted"];
+
+      if (subcommand === "list") {
+        const current = readProvenanceConfig();
+        const patterns = current.uriTrust ?? {};
+        const entries = Object.entries(patterns);
+        if (entries.length === 0) {
+          return { text: "No user-configured URI trust patterns. Using built-in defaults only." };
+        }
+        const lines = entries.map(([p, l]) => `  • \`${p}\` → **${l}**`).join("\n");
+        return { text: `**URI trust patterns (user-configured):**\n${lines}` };
+      }
+
+      if (subcommand === "add") {
+        const pattern = parts[1];
+        const level = parts[2]?.toLowerCase() as TrustLevel | undefined;
+        if (!pattern || !level) {
+          return { text: "Usage: `/trust-uri add <pattern> <trusted|shared|external|untrusted>`" };
+        }
+        if (!validLevels.includes(level)) {
+          return { text: `❌ Invalid trust level "${level}". Valid: ${validLevels.join(", ")}` };
+        }
+        // Validate the pattern compiles
+        try {
+          buildUriTrustConfig({ [pattern]: level }, workspaceDir);
+        } catch (err) {
+          return { text: `❌ Invalid URI pattern "${pattern}": ${String(err)}` };
+        }
+
+        try {
+          const current = readProvenanceConfig();
+          writeProvenanceConfig({
+            uriTrust: { ...(current.uriTrust ?? {}), [pattern]: level },
+          });
+          // Hot-reload in-memory config
+          const updated = readProvenanceConfig();
+          defaultUriTrustConfig = buildUriTrustConfig(updated.uriTrust, workspaceDir);
+          logger.info(`[provenance] /trust-uri add: "${pattern}" → ${level} (hot-reloaded)`);
+          return { text: `✅ Added URI trust: \`${pattern}\` → **${level}**\nIn-memory config updated immediately.` };
+        } catch (err) {
+          return { text: `❌ Failed to write config: ${String(err)}` };
+        }
+      }
+
+      if (subcommand === "remove") {
+        const pattern = parts[1];
+        if (!pattern) {
+          return { text: "Usage: `/trust-uri remove <pattern>`" };
+        }
+        try {
+          deleteProvenanceConfigKeys("uriTrust", [pattern]);
+          // Hot-reload
+          const updated = readProvenanceConfig();
+          defaultUriTrustConfig = buildUriTrustConfig(updated.uriTrust, workspaceDir);
+          logger.info(`[provenance] /trust-uri remove: "${pattern}" removed (hot-reloaded)`);
+          return { text: `✅ Removed URI trust pattern: \`${pattern}\`\nIn-memory config updated immediately.` };
+        } catch (err) {
+          return { text: `❌ Failed to write config: ${String(err)}` };
+        }
+      }
+
+      return {
+        text:
+          "Usage:\n" +
+          "  `/trust-uri add <pattern> <trusted|shared|external|untrusted>`\n" +
+          "  `/trust-uri remove <pattern>`\n" +
+          "  `/trust-uri list`\n\n" +
+          "Pattern examples:\n" +
+          "  `https://internal.company.com/**` → trusted\n" +
+          "  `https://api.github.com/**` → shared",
+      };
+    },
+  });
+
+  // --- /trust-tool command ---
+  // Add, remove, or list tool trust overrides in openclaw.json (with hot-reload).
+  // Usage:
+  //   /trust-tool add <tool[.sub]> [--policy allow|confirm|restrict] [--output-taint <level>]
+  //   /trust-tool remove <tool[.sub]> --policy | --output-taint | both
+  //   /trust-tool list
+  api.registerCommand?.({
+    name: "trust-tool",
+    description:
+      "Manage tool trust overrides. Usage: /trust-tool add <tool> [--policy allow|confirm|restrict] [--output-taint <level>] | remove <tool> --policy|--output-taint | list",
+    acceptsArgs: true,
+    requireAuth: true,
+    handler: (ctx: any) => {
+      const args = ((ctx.args ?? "") as string).trim();
+      const parts = args.split(/\s+/);
+      const subcommand = parts[0]?.toLowerCase();
+
+      const validLevels: TrustLevel[] = ["trusted", "shared", "external", "untrusted"];
+      const validModes: PolicyMode[] = ["allow", "confirm", "restrict"];
+
+      if (subcommand === "list") {
+        const current = readProvenanceConfig();
+        const lines: string[] = [];
+        const overrides = current.toolOverrides ?? {};
+        const outputTaints = current.toolOutputTaints ?? {};
+        const allTools = new Set([...Object.keys(overrides), ...Object.keys(outputTaints)]);
+        if (allTools.size === 0) {
+          return { text: "No user-configured tool trust overrides. Using built-in defaults only." };
+        }
+        for (const tool of [...allTools].sort()) {
+          const policyPart = overrides[tool]
+            ? `policy: ${JSON.stringify(overrides[tool])}`
+            : null;
+          const taintPart = outputTaints[tool]
+            ? `output-taint: ${outputTaints[tool]}`
+            : null;
+          lines.push(`  • \`${tool}\` — ${[policyPart, taintPart].filter(Boolean).join(", ")}`);
+        }
+        return { text: `**Tool trust overrides (user-configured):**\n${lines.join("\n")}` };
+      }
+
+      if (subcommand === "add") {
+        const tool = parts[1]?.toLowerCase();
+        if (!tool) {
+          return {
+            text:
+              "Usage: `/trust-tool add <tool[.sub]> [--policy allow|confirm|restrict] [--output-taint <level>]`\n" +
+              "At least one of --policy or --output-taint is required.",
+          };
+        }
+
+        // Parse flags
+        const policyIdx = parts.indexOf("--policy");
+        const outputTaintIdx = parts.indexOf("--output-taint");
+        const policyValue = policyIdx >= 0 ? parts[policyIdx + 1]?.toLowerCase() as PolicyMode : undefined;
+        const outputTaintValue = outputTaintIdx >= 0 ? parts[outputTaintIdx + 1]?.toLowerCase() as TrustLevel : undefined;
+
+        if (!policyValue && !outputTaintValue) {
+          return { text: "❌ At least one of `--policy` or `--output-taint` is required." };
+        }
+        if (policyValue && !validModes.includes(policyValue)) {
+          return { text: `❌ Invalid policy mode "${policyValue}". Valid: ${validModes.join(", ")}` };
+        }
+        if (outputTaintValue && !validLevels.includes(outputTaintValue)) {
+          return { text: `❌ Invalid output taint "${outputTaintValue}". Valid: ${validLevels.join(", ")}` };
+        }
+
+        try {
+          const current = readProvenanceConfig();
+          const patch: Partial<typeof current> = {};
+
+          if (policyValue) {
+            patch.toolOverrides = {
+              ...(current.toolOverrides ?? {}),
+              [tool]: { ...(current.toolOverrides?.[tool] ?? {}), "*": policyValue },
+            };
+          }
+          if (outputTaintValue) {
+            patch.toolOutputTaints = {
+              ...(current.toolOutputTaints ?? {}),
+              [tool]: outputTaintValue,
+            };
+          }
+
+          writeProvenanceConfig(patch);
+
+          // Hot-reload in-memory configs
+          const updated = readProvenanceConfig();
+          if (outputTaintValue) {
+            const mergedOutputTaints = {
+              ...DEFAULT_COMPOSITE_OUTPUT_TAINTS,
+              ...(toolOutputTaintOverrides ?? {}),
+              ...(updated.toolOutputTaints ?? {}),
+            };
+            resolvedToolTaints = buildToolOutputTaintMap(mergedOutputTaints);
+          }
+          if (policyValue) {
+            const mergedOverrides = {
+              ...DEFAULT_COMPOSITE_TOOL_OVERRIDES,
+              ...(config?.toolOverrides ?? {}),
+              ...(updated.toolOverrides ?? {}),
+            };
+            defaultPolicyConfig = buildPolicyConfig(
+              config?.taintPolicy as any,
+              mergedOverrides,
+              config?.maxIterations,
+              logger,
+            );
+          }
+
+          const parts2: string[] = [];
+          if (policyValue) parts2.push(`policy: all taint levels → **${policyValue}**`);
+          if (outputTaintValue) parts2.push(`output-taint: **${outputTaintValue}**`);
+          logger.info(`[provenance] /trust-tool add: "${tool}" — ${parts2.join(", ")} (hot-reloaded)`);
+          return {
+            text:
+              `✅ Tool trust updated: \`${tool}\`\n` +
+              parts2.map((p) => `  • ${p}`).join("\n") +
+              "\nIn-memory config updated immediately.",
+          };
+        } catch (err) {
+          return { text: `❌ Failed to write config: ${String(err)}` };
+        }
+      }
+
+      if (subcommand === "remove") {
+        const tool = parts[1]?.toLowerCase();
+        if (!tool) {
+          return { text: "Usage: `/trust-tool remove <tool[.sub]> --policy | --output-taint`" };
+        }
+
+        const removePolicy = parts.includes("--policy");
+        const removeOutputTaint = parts.includes("--output-taint");
+
+        if (!removePolicy && !removeOutputTaint) {
+          return {
+            text:
+              "❌ Specify what to remove:\n" +
+              "  `--policy` — remove call policy override\n" +
+              "  `--output-taint` — remove output taint override\n" +
+              "  Both flags can be combined.",
+          };
+        }
+
+        try {
+          if (removePolicy) deleteProvenanceConfigKeys("toolOverrides", [tool]);
+          if (removeOutputTaint) deleteProvenanceConfigKeys("toolOutputTaints", [tool]);
+
+          // Hot-reload
+          const updated = readProvenanceConfig();
+          if (removeOutputTaint) {
+            const mergedOutputTaints = {
+              ...DEFAULT_COMPOSITE_OUTPUT_TAINTS,
+              ...(toolOutputTaintOverrides ?? {}),
+              ...(updated.toolOutputTaints ?? {}),
+            };
+            resolvedToolTaints = buildToolOutputTaintMap(mergedOutputTaints);
+          }
+          if (removePolicy) {
+            const mergedOverrides = {
+              ...DEFAULT_COMPOSITE_TOOL_OVERRIDES,
+              ...(config?.toolOverrides ?? {}),
+              ...(updated.toolOverrides ?? {}),
+            };
+            defaultPolicyConfig = buildPolicyConfig(
+              config?.taintPolicy as any,
+              mergedOverrides,
+              config?.maxIterations,
+              logger,
+            );
+          }
+
+          const removed: string[] = [];
+          if (removePolicy) removed.push("call policy override");
+          if (removeOutputTaint) removed.push("output taint override");
+          logger.info(`[provenance] /trust-tool remove: "${tool}" — removed ${removed.join(", ")} (hot-reloaded)`);
+          return {
+            text:
+              `✅ Removed from \`${tool}\`: ${removed.join(", ")}\n` +
+              "In-memory config updated immediately.",
+          };
+        } catch (err) {
+          return { text: `❌ Failed to write config: ${String(err)}` };
+        }
+      }
+
+      return {
+        text:
+          "Usage:\n" +
+          "  `/trust-tool add <tool[.sub]> [--policy allow|confirm|restrict] [--output-taint <level>]`\n" +
+          "  `/trust-tool remove <tool[.sub]> --policy | --output-taint`\n" +
+          "  `/trust-tool list`\n\n" +
+          "Examples:\n" +
+          "  `/trust-tool add exec --policy allow`\n" +
+          "  `/trust-tool add message.read --output-taint shared`\n" +
+          "  `/trust-tool add exec.curl --output-taint trusted`\n" +
+          "  `/trust-tool remove exec.curl --output-taint`",
       };
     },
   });
@@ -1003,93 +1387,7 @@ export function registerSecurityHooks(
 
       const sk = shortKey(sessionKey);
 
-      // Process owner commands (.approve)
-      // Track processed message indices to prevent repeated firing from conversation history.
-      const isOwner = ctx.senderIsOwner === true;
-      const messages = event.messages ?? [];
-      const lastUserMsg = [...messages]
-        .reverse()
-        .find((m: any) => m.role === "user");
-      // Deduplicate: only process commands from NEW messages (not replayed history).
-      // Use message count as a proxy — if we've seen this message count before, skip command processing.
-      const messageCount = event.messageCount ?? messages.length;
-      const lastProcessedCount = lastProcessedMessageCount.get(sessionKey) ?? 0;
-      const isNewMessage = messageCount > lastProcessedCount;
-      if (messageCount > 0) {
-        lastProcessedMessageCount.set(sessionKey, messageCount);
-      }
-
-      if (lastUserMsg && isOwner && isNewMessage) {
-        const content =
-          typeof lastUserMsg.content === "string"
-            ? lastUserMsg.content
-            : Array.isArray(lastUserMsg.content)
-              ? lastUserMsg.content
-                  .filter((c: any) => c?.type === "text")
-                  .map((c: any) => c.text)
-                  .join("")
-              : "";
-        const trimmed = content.trim();
-
-        // Process .approve <tool|all> [duration-minutes]
-        const approveMatch = trimmed.match(
-          /\.approve\s+(\S+)(?:\s+(\d+))?/i,
-        );
-        if (approveMatch) {
-          const target = approveMatch[1].toLowerCase();
-          const durationStr = approveMatch[2];
-          const durationMinutes = durationStr
-            ? parseInt(durationStr, 10)
-            : null;
-
-          if (target === "all") {
-            // Approve all currently blocked tools
-            const blocked = blockedToolsBySession.get(sessionKey);
-            if (blocked && blocked.size > 0) {
-              approvalStore.approveMultiple(
-                sessionKey,
-                Array.from(blocked),
-                durationMinutes,
-              );
-              const durDesc =
-                durationMinutes != null
-                  ? `${durationMinutes} minutes`
-                  : "this turn";
-              logger.info(
-                `[provenance:${sk}] ✅ Approved all: ${Array.from(blocked).join(", ")} (duration: ${durDesc})`,
-              );
-            }
-            // Also set wildcard approval
-            approvalStore.approve(sessionKey, "all", durationMinutes);
-          } else {
-            approvalStore.approve(sessionKey, target, durationMinutes);
-            const durDesc =
-              durationMinutes != null
-                ? `${durationMinutes} minutes`
-                : "this turn";
-            logger.info(
-              `[provenance:${sk}] ✅ Approved: ${target} (duration: ${durDesc})`,
-            );
-          }
-        }
-
-      } else if (lastUserMsg && !isOwner) {
-        const content =
-          typeof lastUserMsg.content === "string"
-            ? lastUserMsg.content
-            : "";
-        if (content.includes(".approve")) {
-          if (ctx.senderIsOwner === undefined) {
-            logger.error(
-              `[provenance:${sk}] 🚫 Security command IGNORED: senderIsOwner unavailable — extended security hooks required (senderId: ${ctx.senderId ?? "unknown"})`,
-            );
-          } else {
-            logger.warn(
-              `[provenance:${sk}] 🚫 Non-owner attempted security command (senderId: ${ctx.senderId ?? "unknown"})`,
-            );
-          }
-        }
-      }
+      // NOTE: .approve handling removed — use /approve command instead (deterministic, pre-loop).
 
       // Latency tracking: log time from context_assembled to first LLM call
       const iteration = event.iteration ?? 0;
@@ -1174,7 +1472,7 @@ export function registerSecurityHooks(
           pendingNames[pendingNames.length - 1],
         );
         logger.warn(
-          `[provenance:${sk}]   Approve with: .approve <tool>  (or .approve all)`,
+          `[provenance:${sk}]   Approve with: /approve <tool>  (or /approve all)`,
         );
       }
 
@@ -1362,7 +1660,7 @@ export function registerSecurityHooks(
             block: true,
             blockReason:
               `Tool '${toolName}' requires approval at taint level '${graph.maxTaint}'.\n` +
-              `Approve: .approve ${toolName}  (or .approve all)\n` +
+              `Approve: /approve ${toolName}  (or /approve all)\n` +
               `Or use /reset-trust to clear all restrictions.`,
           };
         }
@@ -1388,7 +1686,7 @@ export function registerSecurityHooks(
           blockReason:
             `Tool '${toolName}' is blocked by security policy. Context contains tainted content.\n` +
             `Blocked tools: ${blockedList}\n` +
-            `Approve: .approve ${toolName}  (or .approve all)\n` +
+            `Approve: /approve ${toolName}  (or /approve all)\n` +
             `Or use /reset-trust to clear all restrictions.`,
         };
       }
