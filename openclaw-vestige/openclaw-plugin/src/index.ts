@@ -209,6 +209,17 @@ export function register(api: PluginApi) {
   });
 
   api.registerTool({
+    name: "vestige_backup",
+    description:
+      "Trigger a SQLite backup of the Vestige database (VACUUM INTO). " +
+      "Run when vestige_session_context reports needsBackup: true.",
+    parameters: Type.Object({}),
+    async execute(_id, _params) {
+      return textResult(await vestigeCall(api, "/backup", {}, LONG_TIMEOUT_MS));
+    },
+  });
+
+  api.registerTool({
     name: "vestige_session_context",
     description:
       "One-call session initialization — retrieves relevant memories, active intentions, " +
