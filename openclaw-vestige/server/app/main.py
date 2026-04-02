@@ -16,6 +16,7 @@ from fastapi import FastAPI, Header, HTTPException
 from .auth import BearerAuthMiddleware
 from .mcp_client import MCPClient, MCPError, MCPToolError
 from .models import (
+    BackupRequest,
     CodebaseRequest,
     ConsolidateRequest,
     DemoteRequest,
@@ -332,3 +333,13 @@ async def consolidate(
     args: dict[str, Any] = {}
     args.update(_agent_context(x_agent_id))
     return await _tool("consolidate", args)
+
+
+@app.post("/backup", response_model=VestigeResponse)
+async def backup(
+    req: BackupRequest,
+    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
+):
+    args: dict[str, Any] = {}
+    args.update(_agent_context(x_agent_id))
+    return await _tool("backup", args)

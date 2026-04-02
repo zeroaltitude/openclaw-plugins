@@ -146,6 +146,11 @@ class ConsolidateRequest(BaseModel):
     pass
 
 
+class BackupRequest(BaseModel):
+    """No parameters — triggers a SQLite backup of the Vestige database."""
+    pass
+
+
 # ── Responses ─────────────────────────────────────────────────────────────────
 
 class VestigeResponse(BaseModel):
