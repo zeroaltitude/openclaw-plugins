@@ -640,8 +640,12 @@ The plugin registers five deterministic slash commands that run **before the age
 | `/provenance` | Show current taint state for all active sessions |
 | `/reset-trust [level]` | Reset session taint to trusted baseline |
 | `/approve <tool\|all> [duration]` | Approve blocked tool(s) |
-| `/trust-uri add\|remove\|list` | Manage URI trust patterns (hot-reloaded) |
-| `/trust-tool add\|remove\|list` | Manage tool trust overrides (hot-reloaded) |
+| `/trust-uri add <pattern> <level>` | Add URI trust pattern (hot-reloaded) |
+| `/trust-uri remove <pattern>` | Remove URI trust pattern |
+| `/trust-uri list` | Show user-configured URI trust patterns |
+| `/trust-tool add <tool> [--policy <mode>] [--output-taint <level>]` | Add tool trust override (hot-reloaded) |
+| `/trust-tool remove <tool> --policy\|--output-taint` | Remove tool trust override |
+| `/trust-tool list` | Show user-configured tool overrides |
 
 See [Slash Command Reference](#slash-command-reference) below for full usage.
 
