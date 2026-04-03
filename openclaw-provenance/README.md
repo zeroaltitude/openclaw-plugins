@@ -643,8 +643,8 @@ The plugin registers five deterministic slash commands that run **before the age
 | `/trust-uri add <pattern> <level>` | Add URI trust pattern (hot-reloaded) |
 | `/trust-uri remove <pattern>` | Remove URI trust pattern |
 | `/trust-uri list` | Show user-configured URI trust patterns |
-| `/trust-tool add <tool> [--policy <mode>] [--output-taint <level>]` | Add tool trust override (hot-reloaded) |
-| `/trust-tool remove <tool> --policy\|--output-taint` | Remove tool trust override |
+| `/trust-tool add <tool[.sub]> [--policy <mode>] [--output-taint <level>]` | Add tool trust override (hot-reloaded, supports composite keys) |
+| `/trust-tool remove <tool[.sub]> --policy\|--output-taint` | Remove tool trust override |
 | `/trust-tool list` | Show user-configured tool overrides |
 
 See [Slash Command Reference](#slash-command-reference) below for full usage.
@@ -1090,10 +1090,17 @@ Manage tool trust overrides. Supports both execution policy and output taint.
 | Subcommand | Arguments | Description |
 |---|---|---|
 | `list` | | Show user-configured tool overrides |
-| `add` | `<tool> [--policy <mode>] [--output-taint <level>]` | Add/update tool override |
-| `remove` | `<tool> --policy \| --output-taint` | Remove specific override |
+| `add` | `<tool[.sub]> [--policy <mode>] [--output-taint <level>]` | Add/update tool override |
+| `remove` | `<tool[.sub]> --policy \| --output-taint` | Remove specific override |
 
-Policy modes: `allow`, `confirm`, `restrict`. Output taint levels: `trusted`, `shared`, `external`, `untrusted`.
+Supports composite tool keys (e.g., `message.read`, `message.send`, `browser.navigate`). Policy modes: `allow`, `confirm`, `restrict`. Output taint levels: `trusted`, `shared`, `external`, `untrusted`.
+
+Examples:
+```
+/trust-tool add message.read --output-taint shared
+/trust-tool add browser.navigate --output-taint untrusted
+/trust-tool add exec --policy allow
+```
 
 ## License
 
