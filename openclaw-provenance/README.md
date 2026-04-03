@@ -39,9 +39,9 @@ The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37
 | ATLAS Technique | Threat | Partial Mitigation | Gap |
 |----------------|--------|-------------------|-----|
 | AML.T0051.001 | Indirect prompt injection (T-EXEC-002) | Taint tracking restricts tool escalation after injection | Cannot detect or prevent the injection itself — only limits its blast radius |
-| AML.T0043 | Approval prompt manipulation (T-EVADE-003) | `.approve` and `.reset-trust` gated by verified owner identity (`senderIsOwner`); prompt injection cannot forge owner credentials | Owner can still be socially engineered into approving a malicious tool call |
+| AML.T0043 | Approval prompt manipulation (T-EVADE-003) | `/approve` and `/reset-trust` are deterministic slash commands gated by `requireAuth: true` (`senderIsOwner`); prompt injection cannot invoke slash commands | Owner can still be socially engineered into approving a malicious tool call |
 | AML.T0009 | Data theft via `web_fetch` (T-EXFIL-001) | `web_fetch` taints context, restricting subsequent dangerous tools | `web_fetch` itself is always allowed (read-only) — data can be exfiltrated via URL parameters in the request |
-| AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | Memory file write blocking prevents tainted content from persisting to MEMORY.md, SOUL.md, etc. Blocked writes are persisted to `.provenance/blocked-writes/` for review — content is never lost. Owner must `.reset-trust` to commit or review manually. | Vestige memory tool output trust is user-configurable. Users who trust their memory infrastructure should configure vestige tools as "trusted" output taint. |
+| AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | Memory file write blocking prevents tainted content from persisting to MEMORY.md, SOUL.md, etc. Blocked writes are persisted to `.provenance/blocked-writes/` for review — content is never lost. Owner must `/reset-trust` to commit or review manually. | Vestige memory tool output trust is user-configurable. Users who trust their memory infrastructure should configure vestige tools as "trusted" output taint. |
 
 ## Architecture
 
@@ -323,7 +323,7 @@ Trust classification is based on **message producer identity**, not venue. The `
 
 Trust is about WHO produced the message, not WHERE it was sent. If the owner sends a message in a group chat, that triggering message is trusted. If non-owner messages exist in the conversation history, those would have been classified as "external" or "untrusted" in their respective turns, and the session watermark would persist that taint across subsequent turns.
 
-The `.reset-trust` command allows the owner to explicitly trust the entire context after reviewing it.
+The `/reset-trust` command allows the owner to explicitly trust the entire context after reviewing it.
 
 **How multi-participant conversations are handled:**
 
@@ -497,8 +497,8 @@ Watermark store errors are best-effort. Provenance graph errors are best-effort.
 | Mode | Behavior |
 |------|----------|
 | `allow` | No restrictions. Tools available normally. |
-| `confirm` | Tools blocked until owner approves (`.approve <tool>` or `.approve all`). |
-| `restrict` | Tools silently removed from tool list. No approval possible — use `.reset-trust`. |
+| `confirm` | Tools blocked until owner approves (`/approve <tool>` or `/approve all`). |
+| `restrict` | Tools silently removed from tool list. No approval possible — use `/reset-trust`. |
 
 ### Taint Policy
 
@@ -626,10 +626,24 @@ When taint is shared, external, or untrusted, `Write` and `Edit` operations targ
    - Full content that would have been written
    - Taint level and reason
    - Timestamp
-2. The agent tells the user: "I saved this to staging — use `.reset-trust` to commit, or review manually at `.provenance/blocked-writes/`"
+2. The agent tells the user: "I saved this to staging — use `/reset-trust` to commit, or review manually at `.provenance/blocked-writes/`"
 3. Blocked writes persist across sessions until explicitly approved or cleaned up
 
 This is the critical persistence defense — preventing tainted content from poisoning future sessions via memory files while never losing the user's work. The `BlockedWriteStore` manages these staged writes on disk.
+
+## Slash Commands
+
+The plugin registers five deterministic slash commands that run **before the agent loop** — no LLM involvement, instant execution, owner-authenticated.
+
+| Command | Purpose |
+|---|---|
+| `/provenance` | Show current taint state for all active sessions |
+| `/reset-trust [level]` | Reset session taint to trusted baseline |
+| `/approve <tool\|all> [duration]` | Approve blocked tool(s) |
+| `/trust-uri add\|remove\|list` | Manage URI trust patterns (hot-reloaded) |
+| `/trust-tool add\|remove\|list` | Manage tool trust overrides (hot-reloaded) |
+
+See [Slash Command Reference](#slash-command-reference) below for full usage.
 
 ## Owner-Verified Approval
 
@@ -638,46 +652,39 @@ When a tool is blocked in `confirm` mode, the agent tells the user which tools a
 ```
 ⚠️ exec is blocked (untrusted content in context).
 Blocked tools: exec, message
-Approve:  .approve exec
-Approve all:  .approve all
+Approve:  /approve exec
+Approve all:  /approve all
 ```
 
 ### Approval Format
 
 ```
-.approve <tool|all> [duration-minutes]
+/approve <tool|all> [session|<N>m|<N>h]
 ```
 
-- **Per-tool**: `.approve exec` — approves only `exec`
-- **All tools**: `.approve all` — approves everything blocked
-- **Duration**: `.approve exec 30` — approval lasts 30 minutes
-- **Turn-scoped** (default): `.approve exec` — approval expires when the turn ends
+- **Per-tool**: `/approve exec` — approves only `exec`
+- **All tools**: `/approve all` — approves everything blocked
+- **Duration**: `/approve exec 30m` — approval lasts 30 minutes
+- **Turn-scoped** (default): `/approve exec` — approval expires when the turn ends
 
 ### Security Model
 
-Approval commands are gated by **verified owner identity** (`senderIsOwner=true`), not by codes. This is the same security model as `.reset-trust` — and for the same reason.
+Slash commands are registered with `requireAuth: true`, meaning they are only processed when `senderIsOwner=true`. A prompt injection cannot invoke slash commands — they are processed by the gateway pre-loop, not parsed from LLM context.
 
-The previous version used 8-character hex approval codes to prevent prompt injection from approving its own tools. But the security analysis that justified removing codes from `.reset-trust` applies equally to `.approve`:
+**The threat model is stronger than the previous dot-command approach:** dot commands (`.approve`, `.reset-trust`) were parsed from message content during the LLM loop, creating a theoretical attack surface. Slash commands run deterministically before the agent loop starts — no LLM involvement, no parsing from context.
 
-1. **Owner identity is the real gate.** Both `.approve` and `.reset-trust` are only processed when `senderIsOwner=true`. A prompt injection in web content or email cannot set this flag — it's determined by OpenClaw's channel layer from verified platform credentials.
-2. **Codes were redundant.** If we trust `senderIsOwner` to gate `.reset-trust` (which is *more* powerful — it clears all restrictions), then gating `.approve` on the same mechanism is equally secure.
-3. **Codes added friction without adding security.** The owner had to copy-paste a hex code every time they wanted to unblock a tool. This slowed down normal workflows without meaningfully improving security posture.
-4. **Codes were defense-in-depth for missing metadata.** The original design assumed `senderIsOwner` might not be available (older OpenClaw versions). With the extended security hooks now standard, owner verification is reliable.
-
-**The threat model is unchanged:** a prompt injection cannot trigger `.approve` because it cannot produce a message with `senderIsOwner=true`. The verification happens in the channel layer (Discord, Slack, etc.), outside the LLM's control.
-
-**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw without extended hook context), `.approve` falls back to allowing the command from any sender. In this degraded mode, the owner should rely on `.reset-trust` for explicit trust management.
+**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw without extended hook context), `requireAuth` falls back to allowing commands from any sender.
 
 ## Trust Reset
 
-Sometimes the owner has reviewed tainted content and is satisfied it's safe — they shouldn't need to approve every tool individually for the rest of the turn. The `.reset-trust` command resets the turn's taint level:
+Sometimes the owner has reviewed tainted content and is satisfied it's safe — they shouldn't need to approve every tool individually for the rest of the turn. The `/reset-trust` command resets the turn's taint level:
 
 ```
-.reset-trust           # Reset to trusted (full trust, all tools available)
-.reset-trust shared    # Reset to shared level
+/reset-trust           # Reset to trusted (full trust, all tools available)
+/reset-trust shared    # Reset to shared level
 ```
 
-When `.reset-trust` is processed:
+When `/reset-trust` is processed:
 1. The provenance graph's `maxTaint` is set to the specified level
 2. The session watermark is cleared
 3. The blocked tools set is cleared
@@ -686,22 +693,20 @@ When `.reset-trust` is processed:
 
 ### Security
 
-**Owner-only:** `.reset-trust` is only processed when `senderIsOwner=true` in the hook context. Non-owner messages containing `.reset-trust` are ignored and logged as a warning.
+**Owner-only:** `/reset-trust` is registered with `requireAuth: true` — only processed when `senderIsOwner=true`.
 
-**No code required:** Like `.approve`, `.reset-trust` is gated by verified owner identity (`senderIsOwner=true`), not by codes. Both commands use the same security model — the channel layer verifies who sent the message, and the plugin trusts that verification.
+**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw versions), `requireAuth` falls back to allowing commands from any sender.
 
-**Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw versions without extended hook context), `.reset-trust` falls back to allowing the command from any sender.
-
-### When to use `.reset-trust` vs `.approve`
+### When to use `/reset-trust` vs `/approve`
 
 | Scenario | Use |
 |----------|-----|
-| One specific tool needs unblocking | `.approve exec` |
-| You've reviewed the content and trust it all | `.reset-trust` |
-| You want time-limited access to a tool | `.approve exec 30` |
-| Multiple tools need unblocking at once | `.approve all` |
-| You want to restore full trust for the rest of the session | `.reset-trust` |
-| Content is from a known-safe source that happens to be classified as untrusted | `.reset-trust shared` |
+| One specific tool needs unblocking | `/approve exec` |
+| You've reviewed the content and trust it all | `/reset-trust` |
+| You want time-limited access to a tool | `/approve exec 30m` |
+| Multiple tools need unblocking at once | `/approve all` |
+| You want to restore full trust for the rest of the session | `/reset-trust` |
+| Content is from a known-safe source that happens to be classified as untrusted | `/reset-trust shared` |
 
 ## Session Taint Watermark (Cross-Turn Persistence)
 
@@ -720,7 +725,7 @@ The **session taint watermark** solves this. It's a persistent record of the wor
 
 The watermark is cleared in two scenarios:
 
-**`.reset-trust`** — When the owner issues a `.reset-trust` command, it clears both the in-memory taint and the persistent watermark. The reset is recorded in the watermark's `resetHistory` array for audit purposes.
+**`/reset-trust`** — When the owner issues a `/reset-trust` command, it clears both the in-memory taint and the persistent watermark. The reset is recorded in the watermark's `resetHistory` array for audit purposes.
 
 **`/new` or `/reset`** — When a fresh session starts (detected by `before_agent_start` seeing ≤1 messages), the watermark is automatically cleared and the session is saved normally. A fresh session is a fresh trust boundary — there's no conversation history to inherit taint from.
 
@@ -970,8 +975,8 @@ The plugin registers handlers on OpenClaw's internal agent loop hooks:
 
 | Hook | Purpose |
 |------|---------|
-| `context_assembled` | Start provenance graph, record initial context, load watermark, execute `.reset-trust` atomically |
-| `before_llm_call` | Evaluate policy, filter tool list, process `.approve` commands (`.reset-trust` fallback) |
+| `context_assembled` | Start provenance graph, record initial context, load watermark |
+| `before_llm_call` | Evaluate policy, filter tool list based on current taint level |
 | `after_llm_call` | Log proposed tool calls (diagnostic), batch gate: pre-filter tools blocked at established taint |
 | `before_tool_call` | Execution-layer enforcement (defense in depth), memory file write blocking |
 | `after_tool_call` | **Primary taint evaluation**: record observed tool output trust, escalate graph taint post-execution |
@@ -1038,6 +1043,53 @@ openclaw-provenance/
         └── __tests__/
             └── policy-engine.test.ts  # Tests covering all components
 ```
+
+## Slash Command Reference
+
+### `/provenance`
+
+Show current taint/provenance state for all active sessions. No arguments.
+
+### `/reset-trust [level]`
+
+Reset session taint. Clears watermarks, blocked tools, and pending approvals atomically.
+
+| Argument | Default | Description |
+|---|---|---|
+| `level` | `trusted` | Target trust level: `trusted`, `shared`, `external`, `untrusted` |
+
+### `/approve <tool|all> [duration]`
+
+Approve blocked tool(s) for the current session.
+
+| Argument | Default | Description |
+|---|---|---|
+| `tool` | (required) | Tool name (e.g., `exec`) or `all` |
+| `duration` | `session` | `session` (turn-scoped), `<N>m` (minutes), `<N>h` (hours) |
+
+### `/trust-uri <subcommand> [args]`
+
+Manage URI trust patterns. Changes written to `openclaw.json` and hot-reloaded.
+
+| Subcommand | Arguments | Description |
+|---|---|---|
+| `list` | | Show user-configured URI trust patterns |
+| `add` | `<pattern> <level>` | Add or update a URI trust pattern |
+| `remove` | `<pattern>` | Remove a URI trust pattern |
+
+Patterns use glob syntax: `*` matches one segment, `**` matches any depth. Most specific pattern wins.
+
+### `/trust-tool <subcommand> [args]`
+
+Manage tool trust overrides. Supports both execution policy and output taint.
+
+| Subcommand | Arguments | Description |
+|---|---|---|
+| `list` | | Show user-configured tool overrides |
+| `add` | `<tool> [--policy <mode>] [--output-taint <level>]` | Add/update tool override |
+| `remove` | `<tool> --policy \| --output-taint` | Remove specific override |
+
+Policy modes: `allow`, `confirm`, `restrict`. Output taint levels: `trusted`, `shared`, `external`, `untrusted`.
 
 ## License
 
