@@ -264,6 +264,7 @@ export const DEFAULT_SAFE_TOOLS: Record<string, ToolOverride> = {
   vestige_explore_connections: { "*": "allow" },
   vestige_predict: { "*": "allow" },
   vestige_session_context: { "*": "allow" },
+  update_plan: { "*": "allow" },
 };
 
 /**

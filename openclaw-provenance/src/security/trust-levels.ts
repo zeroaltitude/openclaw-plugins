@@ -153,6 +153,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   gateway: "trusted",
   session_status: "trusted",
   subagents: "trusted",
+  update_plan: "trusted",
 
   // ── Local memory (trusted: writes are guarded, so reads are safe) ──
   memory_search: "trusted",
