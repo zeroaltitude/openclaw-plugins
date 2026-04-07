@@ -551,7 +551,7 @@ export function registerSecurityHooks(
   const lastLlmNodeBySession = new Map<string, string>();
   const blockedToolsBySession = new Map<string, Set<string>>();
   const lastImpactedToolBySession = new Map<string, string>();
-  // (lastProcessedMessageCount removed — .approve replaced by /approve command)
+  // (lastProcessedMessageCount removed — .approve replaced by /approve-exec command)
   const sessionAgentMap = new Map<string, string>();
   // trustResetPendingBySession and trustResetRunIdBySession removed —
   // .reset-trust is now handled exclusively via /reset-trust plugin command
@@ -687,15 +687,15 @@ export function registerSecurityHooks(
     },
   });
 
-  // --- /approve command (deterministic, pre-loop approval — replaces .approve in LLM context) ---
+  // --- /approve-exec command (deterministic, pre-loop approval — replaces .approve in LLM context) ---
   // Grants tool approval for the current session. Runs before the agent loop.
-  // Usage: /approve <tool|all> [session|<N>m|<N>h]
+  // Usage: /approve-exec <tool|all> [session|<N>m|<N>h]
   //   session (default) = turn-scoped, cleared at turn end
   //   30m, 2h = time-bounded, persists until expiry
   api.registerCommand?.({
-    name: "approve",
+    name: "approve-exec",
     description:
-      "Approve blocked tool(s) for the current session. Usage: /approve <tool|all> [session|<N>m|<N>h]",
+      "Approve blocked tool(s) for the current session. Usage: /approve-exec <tool|all> [session|<N>m|<N>h]",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
@@ -703,11 +703,11 @@ export function registerSecurityHooks(
       if (!args) {
         return {
           text:
-            "Usage: `/approve <tool|all> [session|<N>m|<N>h]`\n" +
+            "Usage: `/approve-exec <tool|all> [session|<N>m|<N>h]`\n" +
             "Examples:\n" +
-            "  `/approve exec` — approve exec for this turn\n" +
-            "  `/approve all 30m` — approve all blocked tools for 30 minutes\n" +
-            "  `/approve web_fetch session` — approve web_fetch for this turn",
+            "  `/approve-exec exec` — approve exec for this turn\n" +
+            "  `/approve-exec all 30m` — approve all blocked tools for 30 minutes\n" +
+            "  `/approve-exec web_fetch session` — approve web_fetch for this turn",
         };
       }
 
@@ -750,7 +750,7 @@ export function registerSecurityHooks(
         if (blockedList.length > 0) {
           approvalStore.approveMultiple(callerSessionKey, blockedList, durationMinutes);
           logger.info(
-            `[provenance:${sk}] ✅ /approve all: approved ${blockedList.join(", ")} (${durDesc})`,
+            `[provenance:${sk}] ✅ /approve-exec all: approved ${blockedList.join(", ")} (${durDesc})`,
           );
           return {
             text:
@@ -758,12 +758,12 @@ export function registerSecurityHooks(
               blockedList.map((t) => `  • ${t}`).join("\n"),
           };
         } else {
-          logger.info(`[provenance:${sk}] ✅ /approve all: wildcard set (${durDesc}), no currently blocked tools`);
+          logger.info(`[provenance:${sk}] ✅ /approve-exec all: wildcard set (${durDesc}), no currently blocked tools`);
           return { text: `✅ Wildcard approval set (${durDesc}). All tools approved going forward this session.` };
         }
       } else {
         approvalStore.approve(callerSessionKey, target, durationMinutes);
-        logger.info(`[provenance:${sk}] ✅ /approve ${target} (${durDesc})`);
+        logger.info(`[provenance:${sk}] ✅ /approve-exec ${target} (${durDesc})`);
         return { text: `✅ Approved \`${target}\` for ${durDesc}.` };
       }
     },
@@ -1387,7 +1387,7 @@ export function registerSecurityHooks(
 
       const sk = shortKey(sessionKey);
 
-      // NOTE: .approve handling removed — use /approve command instead (deterministic, pre-loop).
+      // NOTE: .approve handling removed — use /approve-exec command instead (deterministic, pre-loop).
 
       // Latency tracking: log time from context_assembled to first LLM call
       const iteration = event.iteration ?? 0;
@@ -1472,7 +1472,7 @@ export function registerSecurityHooks(
           pendingNames[pendingNames.length - 1],
         );
         logger.warn(
-          `[provenance:${sk}]   Approve with: /approve <tool>  (or /approve all)`,
+          `[provenance:${sk}]   Approve with: /approve-exec <tool>  (or /approve-exec all)`,
         );
       }
 
@@ -1660,7 +1660,7 @@ export function registerSecurityHooks(
             block: true,
             blockReason:
               `Tool '${toolName}' requires approval at taint level '${graph.maxTaint}'.\n` +
-              `Approve: /approve ${toolName}  (or /approve all)\n` +
+              `Approve: /approve-exec ${toolName}  (or /approve-exec all)\n` +
               `Or use /reset-trust to clear all restrictions.`,
           };
         }
@@ -1686,7 +1686,7 @@ export function registerSecurityHooks(
           blockReason:
             `Tool '${toolName}' is blocked by security policy. Context contains tainted content.\n` +
             `Blocked tools: ${blockedList}\n` +
-            `Approve: /approve ${toolName}  (or /approve all)\n` +
+            `Approve: /approve-exec ${toolName}  (or /approve-exec all)\n` +
             `Or use /reset-trust to clear all restrictions.`,
         };
       }

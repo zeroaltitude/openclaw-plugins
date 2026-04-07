@@ -39,7 +39,7 @@ The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37
 | ATLAS Technique | Threat | Partial Mitigation | Gap |
 |----------------|--------|-------------------|-----|
 | AML.T0051.001 | Indirect prompt injection (T-EXEC-002) | Taint tracking restricts tool escalation after injection | Cannot detect or prevent the injection itself — only limits its blast radius |
-| AML.T0043 | Approval prompt manipulation (T-EVADE-003) | `/approve` and `/reset-trust` are deterministic slash commands gated by `requireAuth: true` (`senderIsOwner`); prompt injection cannot invoke slash commands | Owner can still be socially engineered into approving a malicious tool call |
+| AML.T0043 | Approval prompt manipulation (T-EVADE-003) | `/approve-exec` and `/reset-trust` are deterministic slash commands gated by `requireAuth: true` (`senderIsOwner`); prompt injection cannot invoke slash commands | Owner can still be socially engineered into approving a malicious tool call |
 | AML.T0009 | Data theft via `web_fetch` (T-EXFIL-001) | `web_fetch` taints context, restricting subsequent dangerous tools | `web_fetch` itself is always allowed (read-only) — data can be exfiltrated via URL parameters in the request |
 | AML.T0051.000 | Memory poisoning via prompt injection (T-PERSIST-005) | Memory file write blocking prevents tainted content from persisting to MEMORY.md, SOUL.md, etc. Blocked writes are persisted to `.provenance/blocked-writes/` for review — content is never lost. Owner must `/reset-trust` to commit or review manually. | Vestige memory tool output trust is user-configurable. Users who trust their memory infrastructure should configure vestige tools as "trusted" output taint. |
 
@@ -497,7 +497,7 @@ Watermark store errors are best-effort. Provenance graph errors are best-effort.
 | Mode | Behavior |
 |------|----------|
 | `allow` | No restrictions. Tools available normally. |
-| `confirm` | Tools blocked until owner approves (`/approve <tool>` or `/approve all`). |
+| `confirm` | Tools blocked until owner approves (`/approve-exec <tool>` or `/approve-exec all`). |
 | `restrict` | Tools silently removed from tool list. No approval possible — use `/reset-trust`. |
 
 ### Taint Policy
@@ -639,7 +639,7 @@ The plugin registers five deterministic slash commands that run **before the age
 |---|---|
 | `/provenance` | Show current taint state for all active sessions |
 | `/reset-trust [level]` | Reset session taint to trusted baseline |
-| `/approve <tool\|all> [duration]` | Approve blocked tool(s) |
+| `/approve-exec <tool\|all> [duration]` | Approve blocked tool(s) |
 | `/trust-uri add <pattern> <level>` | Add URI trust pattern (hot-reloaded) |
 | `/trust-uri remove <pattern>` | Remove URI trust pattern |
 | `/trust-uri list` | Show user-configured URI trust patterns |
@@ -656,20 +656,20 @@ When a tool is blocked in `confirm` mode, the agent tells the user which tools a
 ```
 ⚠️ exec is blocked (untrusted content in context).
 Blocked tools: exec, message
-Approve:  /approve exec
-Approve all:  /approve all
+Approve:  /approve-exec exec
+Approve all:  /approve-exec all
 ```
 
 ### Approval Format
 
 ```
-/approve <tool|all> [session|<N>m|<N>h]
+/approve-exec <tool|all> [session|<N>m|<N>h]
 ```
 
-- **Per-tool**: `/approve exec` — approves only `exec`
-- **All tools**: `/approve all` — approves everything blocked
-- **Duration**: `/approve exec 30m` — approval lasts 30 minutes
-- **Turn-scoped** (default): `/approve exec` — approval expires when the turn ends
+- **Per-tool**: `/approve-exec exec` — approves only `exec`
+- **All tools**: `/approve-exec all` — approves everything blocked
+- **Duration**: `/approve-exec exec 30m` — approval lasts 30 minutes
+- **Turn-scoped** (default): `/approve-exec exec` — approval expires when the turn ends
 
 ### Security Model
 
@@ -701,14 +701,14 @@ When `/reset-trust` is processed:
 
 **Backward compatibility:** When `senderIsOwner` is not available (older OpenClaw versions), `requireAuth` falls back to allowing commands from any sender.
 
-### When to use `/reset-trust` vs `/approve`
+### When to use `/reset-trust` vs `/approve-exec`
 
 | Scenario | Use |
 |----------|-----|
-| One specific tool needs unblocking | `/approve exec` |
+| One specific tool needs unblocking | `/approve-exec exec` |
 | You've reviewed the content and trust it all | `/reset-trust` |
-| You want time-limited access to a tool | `/approve exec 30m` |
-| Multiple tools need unblocking at once | `/approve all` |
+| You want time-limited access to a tool | `/approve-exec exec 30m` |
+| Multiple tools need unblocking at once | `/approve-exec all` |
 | You want to restore full trust for the rest of the session | `/reset-trust` |
 | Content is from a known-safe source that happens to be classified as untrusted | `/reset-trust shared` |
 
@@ -1062,7 +1062,7 @@ Reset session taint. Clears watermarks, blocked tools, and pending approvals ato
 |---|---|---|
 | `level` | `trusted` | Target trust level: `trusted`, `shared`, `external`, `untrusted` |
 
-### `/approve <tool|all> [duration]`
+### `/approve-exec <tool|all> [duration]`
 
 Approve blocked tool(s) for the current session.
 
