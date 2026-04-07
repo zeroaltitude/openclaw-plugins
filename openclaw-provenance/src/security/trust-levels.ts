@@ -147,6 +147,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   sessions_send: "trusted",
   sessions_list: "trusted",
   sessions_history: "trusted",
+  sessions_yield: "trusted",
   agents_list: "trusted",
   nodes: "trusted",
   canvas: "trusted",
