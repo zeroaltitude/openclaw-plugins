@@ -156,6 +156,13 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   subagents: "trusted",
   update_plan: "trusted",
 
+  // ── Local wiki vault (trusted: on-machine markdown vault, owner-controlled) ──
+  wiki_status: "trusted",
+  wiki_search: "trusted",
+  wiki_get: "trusted",
+  wiki_lint: "trusted",
+  wiki_apply: "trusted",
+
   // ── Local memory (trusted: writes are guarded, so reads are safe) ──
   memory_search: "trusted",
   memory_get: "trusted",
