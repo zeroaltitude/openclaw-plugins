@@ -297,6 +297,33 @@ export function createBeforeLlmCallHandler(config: BeforeLlmCallConfig) {
     // Always strip old memory blocks first (context hygiene)
     const messages = stripMemoryBlocks(rawMessages);
 
+    // Skip when we're running INSIDE another memory-searching sub-agent
+    // (e.g. the `active-memory` plugin's blocking memory sub-agent). Those
+    // runs have a very narrow tool surface and a recognizable system prompt,
+    // and firing Vestige recursively there burns the sub-agent's latency
+    // budget and can cause its tool-call loop to never terminate.
+    //
+    // Two reliable signals:
+    //  1. The system prompt starts with the active-memory sub-agent preamble.
+    //  2. The tool surface is only memory_search + memory_get.
+    // Either is sufficient; we check both so a prompt edit upstream does
+    // not silently re-enable the recursion.
+    const sysPrompt = typeof event.systemPrompt === "string" ? event.systemPrompt : "";
+    const isActiveMemorySubagent =
+      sysPrompt.includes("You are a memory search agent.") ||
+      (Array.isArray(event.tools) &&
+        event.tools.length > 0 &&
+        event.tools.length <= 2 &&
+        event.tools.every(
+          (t) => t && (t.name === "memory_search" || t.name === "memory_get"),
+        ));
+    if (isActiveMemorySubagent) {
+      log.info(
+        `[vestige] skipping — inside active-memory sub-agent (tools=${event.tools?.length ?? 0}, iteration=${event.iteration})`,
+      );
+      return { messages };
+    }
+
     // Only run on first iteration by default (skip tool-call loop iterations)
     // OpenClaw may use 1-based iteration numbering, so check > 1
     if ((config.firstIterationOnly ?? true) && event.iteration > 1) {
