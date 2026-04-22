@@ -649,6 +649,8 @@ export function registerSecurityHooks(
       ]);
 
       for (const sessionKey of sessionsToClear) {
+        const priorLevel = allWatermarks[sessionKey]?.level;
+        const hadActiveGraph = store.getActive(sessionKey) !== undefined;
         watermarkStore.clear(sessionKey);
         blockedToolsBySession.delete(sessionKey);
         approvalStore.clearAll(sessionKey);
@@ -656,9 +658,14 @@ export function registerSecurityHooks(
         // doesn't re-escalate the watermark on the next turn via the
         // SEALED_PREVIOUS_ESCALATION path in startTurn.
         store.discardActive(sessionKey);
-        clearedSessions.push(sessionKey);
+        // Only count as "cleared" if there was actual state to clear.
+        // Without this, running /reset-trust twice in a row still reports
+        // "1 session cleared" even though nothing changed.
+        if (priorLevel || hadActiveGraph) {
+          clearedSessions.push(sessionKey);
+        }
         logger.info(
-          `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (command): cleared watermark (was ${allWatermarks[sessionKey]?.level ?? "none"}) → ${targetLevel}`,
+          `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (command): cleared watermark (was ${priorLevel ?? "none"}${hadActiveGraph ? ", discarded active graph" : ""}) → ${targetLevel}`,
         );
       }
 
