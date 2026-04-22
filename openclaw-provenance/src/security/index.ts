@@ -652,6 +652,10 @@ export function registerSecurityHooks(
         watermarkStore.clear(sessionKey);
         blockedToolsBySession.delete(sessionKey);
         approvalStore.clearAll(sessionKey);
+        // Discard any pending-but-unsealed active graph so its maxTaint
+        // doesn't re-escalate the watermark on the next turn via the
+        // SEALED_PREVIOUS_ESCALATION path in startTurn.
+        store.discardActive(sessionKey);
         clearedSessions.push(sessionKey);
         logger.info(
           `[provenance:${shortKey(sessionKey)}] 🔄 TRUST_RESET (command): cleared watermark (was ${allWatermarks[sessionKey]?.level ?? "none"}) → ${targetLevel}`,

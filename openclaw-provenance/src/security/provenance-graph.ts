@@ -375,6 +375,15 @@ export class ProvenanceStore {
     return this.activeGraphs.get(sessionKey);
   }
 
+  /**
+   * Discard the active graph for a session without archiving it.
+   * Used by /reset-trust to prevent a pending-but-unsealed graph from
+   * re-escalating the watermark on the next `startTurn` call.
+   */
+  discardActive(sessionKey: string): void {
+    this.activeGraphs.delete(sessionKey);
+  }
+
   /** Complete a turn — seal and archive the graph */
   completeTurn(sessionKey: string): TurnGraphSummary | undefined {
     const graph = this.activeGraphs.get(sessionKey);
