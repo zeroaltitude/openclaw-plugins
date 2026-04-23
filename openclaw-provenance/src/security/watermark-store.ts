@@ -48,6 +48,41 @@ export interface WatermarkFile {
   watermarks: Record<string, WatermarkEntry>;
 }
 
+/**
+ * Shared singleton registry keyed by workspace path.
+ *
+ * The provenance plugin is initialised once per agent, which means multiple
+ * `WatermarkStore` instances would otherwise point at the same file with
+ * independent in-memory state. That races: one instance clears its map on
+ * /reset-trust, but another instance (unaware of the clear) still holds the
+ * old entry and overwrites the disk file on its next flush.
+ *
+ * Scoping the singleton to workspace path ensures every agent running in
+ * the same gateway shares one store per workspace.
+ */
+const GLOBAL_STORE_KEY = Symbol.for("openclaw.provenance.watermarkStore");
+type GlobalStoreRegistry = Map<string, WatermarkStore>;
+function getGlobalStoreRegistry(): GlobalStoreRegistry {
+  const g = globalThis as unknown as Record<symbol, GlobalStoreRegistry>;
+  if (!g[GLOBAL_STORE_KEY]) {
+    g[GLOBAL_STORE_KEY] = new Map();
+  }
+  return g[GLOBAL_STORE_KEY];
+}
+
+/**
+ * Returns the shared WatermarkStore instance for a given workspace.
+ * Every agent sharing the same workspace sees the same store.
+ */
+export function getSharedWatermarkStore(workspaceDir: string): WatermarkStore {
+  const registry = getGlobalStoreRegistry();
+  const existing = registry.get(workspaceDir);
+  if (existing) return existing;
+  const store = new WatermarkStore(workspaceDir);
+  registry.set(workspaceDir, store);
+  return store;
+}
+
 export class WatermarkStore {
   private filePath: string;
   private data: WatermarkFile;

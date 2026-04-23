@@ -13,7 +13,7 @@ import {
   buildWatermarkReason,
 } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
-import { WatermarkStore } from "./watermark-store.js";
+import { getSharedWatermarkStore, WatermarkStore } from "./watermark-store.js";
 import { BlockedWriteStore } from "./blocked-write-store.js";
 import {
   buildPolicyConfig,
@@ -372,7 +372,11 @@ export function registerSecurityHooks(
     `[provenance] missingIdentityTrust: ${resolvedMissingIdentityTrust}${config?.missingIdentityTrust ? " (from config)" : " (default)"}`,
   );
 
-  const watermarkStore = new WatermarkStore(workspaceDir);
+  // Use shared singleton so all agent plugin instances see the same state.
+  // Without this, each agent (main, tank, narcissus, etc.) would have an
+  // independent in-memory view of the same JSON file, causing /reset-trust
+  // to only clear the calling agent's view while others overwrite on flush.
+  const watermarkStore = getSharedWatermarkStore(workspaceDir);
   logger.info(
     `[provenance] Watermark store: ${workspaceDir}/.provenance/watermarks.json`,
   );
