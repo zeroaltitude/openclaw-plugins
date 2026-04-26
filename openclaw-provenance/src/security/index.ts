@@ -1196,15 +1196,13 @@ export function registerSecurityHooks(
             if (!candidate) continue;
             try {
               const parsed = JSON.parse(candidate);
-              // Direct { targetId, url } (e.g., from browser tool result top-level)
+              // Top-level { targetId, url }. Mainline's enrichTabResponseBody
+              // (extensions/browser/src/browser/routes/agent.shared.ts) now
+              // guarantees these fields on every tab-targeting browser
+              // response, so the previous { details: { targetId, url } }
+              // fallback branch is no longer needed.
               if (typeof parsed?.targetId === "string" && typeof parsed?.url === "string") {
                 recordTabUrls([{ targetId: parsed.targetId, url: parsed.url }]);
-                browserUrlsFound++;
-                break;
-              }
-              // Nested in details: { details: { targetId, url } }
-              if (typeof parsed?.details?.targetId === "string" && typeof parsed?.details?.url === "string") {
-                recordTabUrls([{ targetId: parsed.details.targetId, url: parsed.details.url }]);
                 browserUrlsFound++;
                 break;
               }
@@ -2054,58 +2052,52 @@ export function registerSecurityHooks(
       }
 
       // --- Browser URL extraction from results ---
-      // For browser content tools, extract the actual URL from the result
-      // to enable precise URI trust classification.
+      //
+      // Mainline's enrichTabResponseBody (extensions/browser/src/browser/
+      // routes/agent.shared.ts, PR #30323 absorbed 2026-04-25) guarantees
+      // top-level { targetId, url } on every tab-targeting browser response.
+      // Previously this block had to probe three shapes:
+      //   1. result.details.{ targetId, url }      (legacy structured)
+      //   2. content[].text JSON top-level         (MCP standard, post-enrichment)
+      //   3. content[].text JSON details.{...}     (legacy nested)
+      // Shapes (1) and (3) are obsolete — enrichment mirrors the data to the
+      // top level. We keep the content[].text scan because the response
+      // body is serialised into MCP text parts before reaching this hook,
+      // so the JSON we want to read lives in part.text, not in `result`
+      // directly. Falls back gracefully if a non-enriched response slips
+      // through (no record is made — same as the old failure path).
+      //
+      // browserUrl is also used by the URI trust evaluation below to
+      // augment sourceUris with the observed URL.
       let browserUrl: string | undefined;
-      let resolvedTargetId: string | undefined;
       const isBrowserContent =
         BROWSER_CONTENT_TOOLS.has(toolKey) ||
         (toolKey.startsWith("browser.") && toolKey !== "browser.tabs") ||
         (toolName.toLowerCase() === "browser" && toolKey === toolName);
 
       if (isBrowserContent && result && typeof result === "object") {
-        // Try result.details first (structured response extension)
-        const details = (result as any).details;
-        if (typeof details?.url === "string") {
-          browserUrl = details.url;
-          resolvedTargetId = details.targetId ?? params.targetId;
-        }
-
-        // Try content[].text JSON (MCP standard format)
-        if (!browserUrl) {
-          const content = Array.isArray((result as any).content) ? (result as any).content : [];
-          for (const part of content) {
-            if (part?.type === "text" && typeof part.text === "string") {
-              const raw = part.text;
-              if (!raw.includes('"url"')) continue;
-              const candidates = [
-                raw,
-                raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1),
-              ];
-              for (const candidate of candidates) {
-                if (!candidate) continue;
-                try {
-                  const parsed = JSON.parse(candidate);
-                  if (typeof parsed?.url === "string") {
-                    browserUrl = parsed.url;
-                    resolvedTargetId = parsed?.targetId ?? params.targetId;
-                    break;
-                  }
-                  if (typeof parsed?.details?.url === "string") {
-                    browserUrl = parsed.details.url;
-                    resolvedTargetId = parsed?.details?.targetId ?? params.targetId;
-                    break;
-                  }
-                } catch { /* try next candidate */ }
+        const content = Array.isArray((result as any).content) ? (result as any).content : [];
+        outer: for (const part of content) {
+          if (part?.type !== "text" || typeof part.text !== "string") continue;
+          const raw = part.text;
+          if (!raw.includes('"url"')) continue;
+          const candidates = [raw, raw.substring(raw.indexOf("{"), raw.lastIndexOf("}") + 1)];
+          for (const candidate of candidates) {
+            if (!candidate) continue;
+            try {
+              const parsed = JSON.parse(candidate);
+              if (typeof parsed?.url !== "string") continue;
+              browserUrl = parsed.url;
+              const tid =
+                typeof parsed?.targetId === "string" ? parsed.targetId : params.targetId;
+              if (typeof tid === "string") {
+                recordTabUrls([{ targetId: tid, url: parsed.url }]);
               }
-              if (browserUrl) break;
+              break outer;
+            } catch {
+              // Try next candidate.
             }
           }
-        }
-
-        // Update tab URL map if we resolved both URL and targetId
-        if (typeof browserUrl === "string" && typeof resolvedTargetId === "string") {
-          recordTabUrls([{ targetId: resolvedTargetId, url: browserUrl }]);
         }
       }
 

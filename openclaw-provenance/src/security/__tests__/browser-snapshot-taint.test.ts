@@ -173,8 +173,17 @@ describe("Browser snapshot taint deferral", () => {
       toolName: "browser",
       params: { action: "snapshot", targetId: "tab-abc" },
       result: {
-        content: [{ type: "text", text: "page content" }],
-        details: { targetId: "tab-abc", url: "https://openclaw.ai/dashboard" },
+        // Mainline's enrichTabResponseBody puts {targetId,url} at the
+        // top level of the response body, which is serialised into
+        // content[].text. Legacy result.details fallback is gone.
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            ok: true,
+            targetId: "tab-abc",
+            url: "https://openclaw.ai/dashboard",
+          }),
+        }],
       },
     }, ownerCtx);
 
@@ -197,8 +206,15 @@ describe("Browser snapshot taint deferral", () => {
       toolName: "browser",
       params: { action: "snapshot", targetId: "tab-xyz" },
       result: {
-        content: [{ type: "text", text: "page content" }],
-        details: { targetId: "tab-xyz", url: "https://evil-site.example.com/malware" },
+        // Enriched shape (post-mainline enrichTabResponseBody).
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            ok: true,
+            targetId: "tab-xyz",
+            url: "https://evil-site.example.com/malware",
+          }),
+        }],
       },
     }, ownerCtx);
 
