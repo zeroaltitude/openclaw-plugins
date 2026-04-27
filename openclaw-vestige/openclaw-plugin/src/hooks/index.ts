@@ -1,12 +1,16 @@
 /**
  * Hook registration for Vestige plugin.
  *
- * Registers before_llm_call (memory retrieval) and after_llm_call
- * (memory ingestion) handlers powered by local DeBERTa NLI zero-shot classification.
+ * Registers before_prompt_build (memory retrieval) and llm_output
+ * (memory ingestion) handlers powered by local DeBERTa NLI zero-shot
+ * classification.
+ *
+ * Migrated from before_llm_call/after_llm_call (removed from openclaw
+ * mainline as part of Vincent's split hook model).
  */
 
-export { createBeforeLlmCallHandler } from "./before-llm-call.js";
-export { createAfterLlmCallHandler } from "./after-llm-call.js";
+export { createBeforePromptBuildHandler } from "./before-prompt-build.js";
+export { createLlmOutputHandler } from "./llm-output.js";
 export { scoreConcepts, ensureInitialized, isInitialized, hasSalientConcepts, getSalientLabels } from "./nli-scorer.js";
 export type { ConceptScore } from "./nli-scorer.js";
 export { addToWindow, getRecentContext, getLastUserMessage, clearWindow, activeWindowCount } from "./sliding-window.js";
