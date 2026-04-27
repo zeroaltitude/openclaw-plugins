@@ -14,6 +14,11 @@ import {
 } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
 import { getSharedWatermarkStore, WatermarkStore } from "./watermark-store.js";
+import { getSharedIdentityStore, type IdentityStore } from "./identity-store.js";
+import {
+  createInboundClaimHandler,
+  createSubagentSpawnedHandler,
+} from "./inbound-handlers.js";
 import { BlockedWriteStore } from "./blocked-write-store.js";
 import {
   buildPolicyConfig,
@@ -134,6 +139,16 @@ export interface SecurityPluginConfig {
   missingIdentityTrust?: TrustLevel;
   /** Additional exec command taint rules (prepended to built-in defaults) */
   execCommandRules?: ExecCommandRuleConfig[];
+  /**
+   * Sender IDs treated as the agent's owner. Used to compute
+   * `senderIsOwner` from `inbound_claim` events when caching identity.
+   *
+   * Mainline does not surface owner classification on the agent
+   * hookCtx, so provenance derives it itself from the inbound
+   * sender id and this list. If empty/undefined, no senders are
+   * classified as owner and owner-only commands silently no-op.
+   */
+  ownerNumbers?: string[];
 }
 
 /** Browser composite keys whose results may contain URL metadata for tab tracking. */
@@ -184,17 +199,24 @@ function shortKey(sessionKey: string): string {
  * 4. Trusted sender (senderId in trustedSenderIds) → trusted
  * 5. Known non-owner sender → external
  * 6. Unknown sender → untrusted
+ *
+ * Identity fields are sourced from the IdentityStore (populated by the
+ * inbound_claim handler). The agent hookCtx only contributes
+ * messageProvider, which mainline does populate.
  */
-function classifyInitialTrust(
-  ctx: AgentContext,
-  trustedSenderIds: Set<string>,
-  missingIdentityTrust: TrustLevel = "shared",
-): TrustLevel {
+function classifyInitialTrust(params: {
+  identity?: import("./identity-store.js").IdentityRecord;
+  messageProvider?: string;
+  trustedSenderIds: Set<string>;
+  missingIdentityTrust?: TrustLevel;
+}): TrustLevel {
+  const { identity, messageProvider, trustedSenderIds } = params;
+  const missingIdentityTrust = params.missingIdentityTrust ?? "shared";
   // Check sourceProvider first — it reflects the true message origin
   // (e.g. "heartbeat") even when messageProvider reflects the delivery
   // channel (e.g. "discord"). Falls back to messageProvider when
   // sourceProvider is not set.
-  const effectiveProvider = ctx.sourceProvider ?? ctx.messageProvider;
+  const effectiveProvider = identity?.sourceProvider ?? messageProvider;
   if (
     !effectiveProvider ||
     effectiveProvider === "heartbeat" ||
@@ -206,19 +228,19 @@ function classifyInitialTrust(
     return "trusted";
   }
 
-  if (ctx.spawnedBy) {
+  if (identity?.spawnedBy) {
     return "trusted";
   }
 
-  if (ctx.senderIsOwner) {
+  if (identity?.senderIsOwner) {
     return "trusted";
   }
 
-  if (ctx.senderId && trustedSenderIds.has(ctx.senderId)) {
+  if (identity?.senderId && trustedSenderIds.has(identity.senderId)) {
     return "trusted";
   }
 
-  if (ctx.senderId) {
+  if (identity?.senderId) {
     return "external";
   }
 
@@ -234,8 +256,11 @@ function classifyInitialTrust(
  * exception. Subagents are automated and may inherit tainted context from their
  * parent; granting them blanket message-send bypass would enable taint laundering.
  */
-function isOwnerDm(ctx: AgentContext): boolean {
-  return ctx.senderIsOwner === true && !ctx.groupId && !ctx.spawnedBy;
+function isOwnerDm(
+  identity: import("./identity-store.js").IdentityRecord | undefined,
+): boolean {
+  if (!identity) return false;
+  return identity.senderIsOwner === true && !identity.groupId && !identity.spawnedBy;
 }
 
 /**
@@ -379,6 +404,18 @@ export function registerSecurityHooks(
   const watermarkStore = getSharedWatermarkStore(workspaceDir);
   logger.info(
     `[provenance] Watermark store: ${workspaceDir}/.provenance/watermarks.json`,
+  );
+
+  // Identity store: caches per-session sender/owner/group/spawn data so
+  // that agent-loop hooks (before_prompt_build, llm_output, etc.) can
+  // look up identity by sessionKey instead of relying on agent hookCtx
+  // fields that mainline does not populate. Persisted to disk for
+  // continuity across gateway restarts.
+  const identityStore = getSharedIdentityStore(workspaceDir);
+  const ownerNumbers = (config?.ownerNumbers ?? []) as readonly string[];
+  logger.info(
+    `[provenance] Identity store: ${workspaceDir}/.provenance/identity.json | ` +
+      `ownerNumbers configured: ${ownerNumbers.length}`,
   );
 
   const blockedWriteStore = new BlockedWriteStore(workspaceDir);
@@ -1096,6 +1133,32 @@ export function registerSecurityHooks(
   // is in context_assembled. Latency tracking now also uses context_assembled
   // as the baseline since before_agent_start is unreliable.
 
+    // --- inbound_claim — cache identity from inbound message events ---
+  //
+  // Mainline does not populate senderId/senderIsOwner/sourceProvider/
+  // groupId on the agent hookCtx. We capture those from the
+  // inbound_claim event payload (which has them natively) and cache
+  // by sessionKey for the agent-loop hooks to look up.
+  api.on(
+    "inbound_claim",
+    profiled(
+      "inbound_claim",
+      createInboundClaimHandler({ identityStore, ownerNumbers, logger }),
+    ),
+  );
+
+  // --- subagent_spawned — capture parent→child session relationship ---
+  //
+  // Used by the parent-taint inheritance logic to find a sub-agent's
+  // parent without relying on agent-hookCtx spawnedBy.
+  api.on(
+    "subagent_spawned",
+    profiled(
+      "subagent_spawned",
+      createSubagentSpawnedHandler({ identityStore, logger }),
+    ),
+  );
+
   // --- before_reset hook — /new and /reset clear session watermark ---
   // before_reset fires async (fire-and-forget in core), so we can't clear
   // the watermark here directly — context_assembled may already be running.
@@ -1115,13 +1178,30 @@ export function registerSecurityHooks(
     }),
   );
 
-  // --- context_assembled ---
+  // --- before_prompt_build (replaces context_assembled + before_llm_call) ---
+  //
+  // Mainline removed context_assembled and before_llm_call; before_prompt_build
+  // is the supported pre-call hook for prompt-policy mutation. We collapse
+  // the previous two handlers' work into this single subscription:
+  //
+  //   - turn-start setup (was context_assembled): cache agentId + isOwnerDm,
+  //     scan messages for browser tab URLs, watermark inheritance, parent
+  //     taint inheritance.
+  //   - prompt mutation (was before_llm_call): append taint introspection
+  //     to systemPrompt via result.appendSystemContext.
+  //
+  // Tool filtering by taint moves entirely to before_tool_call (which
+  // we already subscribe to). Identity fields (senderId, senderIsOwner,
+  // sourceProvider, groupId, spawnedBy, senderName) are read from the
+  // IdentityStore (populated by the inbound_claim handler) instead of
+  // from the agent hookCtx, which mainline does not populate for these.
   api.on(
-    "context_assembled",
-    profiled("context_assembled", (event: any, ctx: AgentContext) => {
+    "before_prompt_build",
+    profiled("before_prompt_build", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
+      const identity = identityStore.get(sessionKey);
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
-      sessionOwnerDmMap.set(sessionKey, isOwnerDm(ctx));
+      sessionOwnerDmMap.set(sessionKey, isOwnerDm(identity));
       turnStartTimes.set(sessionKey, performance.now());
 
       // Scan conversation messages for browser.tabs responses to populate tab URL map.
@@ -1232,7 +1312,7 @@ export function registerSecurityHooks(
       if (sealedPrevious) {
         const sealedMaxTaint = sealedPrevious.summary().maxTaint;
         if (sealedMaxTaint && sealedMaxTaint !== "trusted") {
-          const agentId = sessionAgentMap.get(sessionKey) ?? ctx.agentId ?? "unknown";
+          const _agentId = sessionAgentMap.get(sessionKey) ?? ctx.agentId ?? "unknown";
           const sealedTools = sealedPrevious.summary().toolsUsed;
           const sealedReason = `interrupted turn sealed with tools: ${sealedTools.length > 0 ? sealedTools.join(", ") : "(none)"}`;
           watermarkStore.escalate(
@@ -1257,13 +1337,35 @@ export function registerSecurityHooks(
       // contexts where each turn may report messageCount=1 despite being an
       // ongoing conversation.
 
-      const initialTrust = classifyInitialTrust(ctx, trustedSenderIds, config?.missingIdentityTrust);
+      const initialTrust = classifyInitialTrust({
+        identity,
+        messageProvider: ctx.messageProvider,
+        trustedSenderIds,
+        missingIdentityTrust: config?.missingIdentityTrust,
+      });
 
-      graph.recordContextAssembled(
-        event.systemPrompt ?? "",
-        event.messageCount ?? 0,
-        initialTrust,
-      );
+      // before_prompt_build's event payload does not carry messageCount or
+      // systemPrompt directly; derive both from `messages`. The first system
+      // message (if any) serves as the systemPrompt for graph recording
+      // purposes (only its length is consumed downstream).
+      const promptBuildMessages = event.messages ?? [];
+      const messageCount = promptBuildMessages.length;
+      const inferredSystemPrompt = (() => {
+        for (const m of promptBuildMessages) {
+          if (m?.role !== "system") continue;
+          if (typeof m.content === "string") return m.content;
+          if (Array.isArray(m.content)) {
+            return m.content
+              .filter((p: any) => p?.type === "text" && typeof p.text === "string")
+              .map((p: any) => p.text as string)
+              .join("\n");
+          }
+          break;
+        }
+        return "";
+      })();
+
+      graph.recordContextAssembled(inferredSystemPrompt, messageCount, initialTrust);
 
       // If /new or /reset fired since the last turn, clear the stale watermark
       // before checking inheritance. before_reset marks the session async, so
@@ -1304,26 +1406,27 @@ export function registerSecurityHooks(
       // Inherit taint from parent session (cross-session propagation).
       // When a tainted parent spawns a subagent, the child must inherit
       // the parent's taint to prevent taint laundering.
-      if (ctx.spawnedBy) {
+      const spawnedBy = identity?.spawnedBy ?? null;
+      if (spawnedBy) {
         // Check parent's persisted watermark (completed previous turns)
-        const parentWm = watermarkStore.getLevel(ctx.spawnedBy);
+        const parentWm = watermarkStore.getLevel(spawnedBy);
         // Check parent's active graph (current in-flight turn — the parent's
-        // before_response_emit hasn't fired yet, so its watermark hasn't
+        // message_sending hasn't fired yet, so its watermark hasn't
         // been flushed for the current turn)
-        const parentGraph = store.getActive(ctx.spawnedBy);
+        const parentGraph = store.getActive(spawnedBy);
         let parentTaint: TrustLevel = "trusted";
         if (parentWm) parentTaint = minTrust(parentTaint, parentWm.level);
         if (parentGraph) parentTaint = minTrust(parentTaint, parentGraph.maxTaint);
 
         if (parentTaint !== "trusted") {
-          const parentSk = shortKey(ctx.spawnedBy);
+          const parentSk = shortKey(spawnedBy);
           graph.addNode({
             id: "inherited-parent-taint",
             kind: "history",
             trust: parentTaint,
             metadata: {
               reason: `inherited from parent (${parentSk})`,
-              parentSessionKey: ctx.spawnedBy,
+              parentSessionKey: spawnedBy,
               parentWatermarkLevel: parentWm?.level,
               parentGraphTaint: parentGraph?.maxTaint,
             },
@@ -1348,7 +1451,7 @@ export function registerSecurityHooks(
       // Capture turn-start taint for developerMode header
       const startReason = watermark && watermark.level !== "trusted"
         ? watermark.reason
-        : `sender: ${ctx.senderName ?? ctx.senderId ?? "unknown"}`;
+        : `sender: ${identity?.senderName ?? identity?.senderId ?? "unknown"}`;
       turnStartTaintBySession.set(sessionKey, { level: effectiveTaint, reason: startReason });
 
       logger.info(`[provenance:${sk}] ── Turn Start ──`);
@@ -1356,7 +1459,7 @@ export function registerSecurityHooks(
         `[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`,
       );
       logger.info(
-        `[provenance:${sk}]   CLASSIFY_INITIAL_TRUST: ${initialTrust} | sender=${ctx.senderName ?? ctx.senderId ?? "unknown"} owner=${ctx.senderIsOwner ?? "unset"} group=${ctx.groupId ?? "none"} provider=${ctx.messageProvider ?? "none"}${ctx.sourceProvider ? ` sourceProvider=${ctx.sourceProvider}` : ""} effectiveProvider=${ctx.sourceProvider ?? ctx.messageProvider ?? "none"}`,
+        `[provenance:${sk}]   CLASSIFY_INITIAL_TRUST: ${initialTrust} | sender=${identity?.senderName ?? identity?.senderId ?? "unknown"} owner=${identity?.senderIsOwner ?? "unset"} group=${identity?.groupId ?? "none"} provider=${ctx.messageProvider ?? "none"}${identity?.sourceProvider ? ` sourceProvider=${identity.sourceProvider}` : ""} effectiveProvider=${identity?.sourceProvider ?? ctx.messageProvider ?? "none"}`,
       );
       if (watermark) {
         const wmIdx = TRUST_ORDER.indexOf(watermark.level);
@@ -1620,8 +1723,10 @@ export function registerSecurityHooks(
       const toolKey = resolveToolKey(toolName, params, compositeTools, execCommandRules);
       const toolKeyLower = toolKey.toLowerCase();
 
-      // Message tool: owner DM exception
-      if (toolNameLower === "message" && isOwnerDm(ctx)) {
+      // Message tool: owner DM exception (looks up identity by sessionKey;
+      // mainline does not populate ownership/group on the agent hookCtx).
+      const sessionKeyForOwnerDm = ctx.sessionKey ?? "unknown";
+      if (toolNameLower === "message" && isOwnerDm(identityStore.get(sessionKeyForOwnerDm))) {
         // Always allow message in owner DMs regardless of taint
         return undefined;
       }
