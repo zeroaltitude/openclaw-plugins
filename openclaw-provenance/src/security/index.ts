@@ -1127,6 +1127,19 @@ export function registerSecurityHooks(
   // (core passes sessionKey: undefined to after_tool_call in some code paths)
   let lastToolCallSessionKey = "unknown";
   const turnStartTaintBySession = new Map<string, { level: TrustLevel; reason: string }>();
+  // Final-taint snapshot pumped from agent_end → consumed by message_sending
+  // for the developer-mode footer. Cleared after one footer is rendered.
+  const finalTaintBySession = new Map<
+    string,
+    {
+      startLevel: TrustLevel;
+      startReason: string;
+      endLevel: TrustLevel;
+      endReason: string;
+      impactedTool: string;
+      uriTaintRecords: UriTaintRecord[];
+    }
+  >();
 
   // --- before_agent_start ---
   // NOTE: This hook may not fire on all OpenClaw versions. Watermark clearing
@@ -1484,147 +1497,304 @@ export function registerSecurityHooks(
         );
       }
 
+      // ── Taint introspection footer (was injected via before_llm_call's
+      //    systemPrompt return value; now via before_prompt_build's
+      //    appendSystemContext, which is cacheable across the turn). ──
+      //
+      // Lets the LLM see its own security state — critical for correct
+      // reasoning about which tools are available and why some may be
+      // blocked. The footer is appended (not replaced) so it composes
+      // cleanly with other plugins' system-prompt contributions.
+      const currentTaintForFooter = graph.maxTaint;
+      const taintEmoji =
+        currentTaintForFooter === "trusted"
+          ? "\uD83D\uDFE2"
+          : currentTaintForFooter === "shared"
+            ? "\uD83D\uDFE1"
+            : currentTaintForFooter === "external"
+              ? "\uD83D\uDFE0"
+              : "\uD83D\uDD34";
+      const currentWmForFooter = watermarkStore.getLevel(sessionKey);
+      const wmInfo =
+        currentWmForFooter && currentWmForFooter.level !== "trusted"
+          ? ` | watermark: ${currentWmForFooter.level} (${currentWmForFooter.reason ?? "unknown"})`
+          : "";
+      const resetHint =
+        currentTaintForFooter !== "trusted"
+          ? " | Owner can use /reset-trust to clear."
+          : "";
+      const taintIntrospection = `\n[Security] ${taintEmoji} Taint: ${currentTaintForFooter}${wmInfo}${resetHint}`;
+
+      return { appendSystemContext: taintIntrospection };
     }),
   );
 
-  // --- before_llm_call ---
+  // --- llm_input — LLM-call observation (was inside before_llm_call) ---
+  //
+  // before_llm_call has been removed from mainline. The new architecture
+  // splits its responsibilities:
+  //   - systemPrompt mutation (taint footer)   → before_prompt_build above
+  //                                                via appendSystemContext
+  //   - LLM-call observation (recordLlmCall,   → this llm_input subscription
+  //                            latency)
+  //   - policy evaluation + tool gating        → before_tool_call below
+  //
+  // The legacy block-the-whole-turn return path (`{ block: true, ... }`) is
+  // gone; tool-level blocking via before_tool_call achieves the same
+  // security outcome (LLM call proceeds, but no tainted/non-approved
+  // tools execute). Pending-confirmation logging is replicated in
+  // before_tool_call.
   api.on(
-    "before_llm_call",
-    profiled("before_llm_call", (event: any, ctx: AgentContext) => {
+    "llm_input",
+    profiled("llm_input", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       const graph = store.getActive(sessionKey);
       if (!graph) return;
 
-      const llmNodeId = graph.recordLlmCall(
-        event.iteration ?? 0,
-        event.tools?.length ?? 0,
-      );
+      // Iteration count is derived from graph state — the new event
+      // payload does not carry an iteration field, but the graph already
+      // tracks iteration cardinality via the recordLlmCall counter.
+      const iteration = graph.iterationCount + 1;
+      const llmNodeId = graph.recordLlmCall(iteration, 0);
       lastLlmNodeBySession.set(sessionKey, llmNodeId);
 
       const sk = shortKey(sessionKey);
 
-      // NOTE: .approve handling removed — use /approve-exec command instead (deterministic, pre-loop).
-
-      // Latency tracking: log time from context_assembled to first LLM call
-      const iteration = event.iteration ?? 0;
+      // Latency tracking: time from before_prompt_build → first LLM call
       if (iteration <= 1 && turnStartTimes.has(sessionKey)) {
         const turnT0 = turnStartTimes.get(sessionKey);
         if (turnT0 !== undefined) {
           const latencyMs = performance.now() - turnT0;
           logger.info(
-            `[provenance:${sk}] ⏱ ctx_assembled→first_llm: ${latencyMs.toFixed(0)}ms`,
+            `[provenance:${sk}] ⏱ prompt_build→first_llm: ${latencyMs.toFixed(0)}ms`,
           );
           turnStartTimes.delete(sessionKey);
         }
       }
 
-      // Evaluate policy (agent-aware)
-      // Build taint introspection line for system prompt injection.
-      // This lets the LLM see its own security state — critical for correct reasoning
-      // about what tools are available and why some may be blocked.
-      const currentTaint = graph.maxTaint;
-      const taintEmoji = currentTaint === "trusted" ? "🟢"
-        : currentTaint === "shared" ? "🟡"
-        : currentTaint === "external" ? "🟠"
-        : "🔴";
-      const currentWm = watermarkStore.getLevel(sessionKey);
-      const wmInfo = currentWm && currentWm.level !== "trusted"
-        ? ` | watermark: ${currentWm.level} (${currentWm.reason ?? "unknown"})`
-        : "";
-      const resetHint = currentTaint !== "trusted"
-        ? " | Owner can use /reset-trust to clear."
-        : "";
-      const taintIntrospection = `\n[Security] ${taintEmoji} Taint: ${currentTaint}${wmInfo}${resetHint}`;
-      let systemPromptWithTaint = (event.systemPrompt ?? "") + taintIntrospection;
+      logger.info(
+        `[provenance:${sk}] ── LLM Call (iteration ${iteration}) ──`,
+      );
+      logger.info(
+        `[provenance:${sk}]   Taint: ${graph.maxTaint} | model: ${event.model ?? "unknown"} | provider: ${event.provider ?? "unknown"}`,
+      );
+    }),
+  );
 
-      const currentTools: Array<{ name: string }> = event.tools ?? [];
-      const currentToolNames = currentTools.map((t: any) => t.name);
+  // --- llm_output (replaces after_llm_call) ---
+  //
+  // after_llm_call has been removed from mainline. The new llm_output
+  // hook is observation-only and does NOT carry toolCalls in its event
+  // payload — tool-call gating and per-tool taint logging now live
+  // entirely in before_tool_call (which fires before each individual
+  // tool call, replacing the batch-style filtering that lived here).
+  //
+  // What remains here: lightweight per-call observation logging so the
+  // provenance log narrates the model output. Taint evaluation still
+  // happens in after_tool_call (post-execution).
+  api.on(
+    "llm_output",
+    profiled("llm_output", (event: any, ctx: AgentContext) => {
+      const sessionKey = ctx.sessionKey ?? "unknown";
+      const graph = store.getActive(sessionKey);
+      if (!graph) return;
+
+      const sk = shortKey(sessionKey);
+      const assistantTexts: string[] = Array.isArray(event.assistantTexts)
+        ? event.assistantTexts
+        : [];
+      const totalChars = assistantTexts.reduce(
+        (n: number, t: string) => n + (typeof t === "string" ? t.length : 0),
+        0,
+      );
+      logger.info(
+        `[provenance:${sk}] ── LLM Response (iteration ${graph.iterationCount}) ──`,
+      );
+      logger.info(
+        `[provenance:${sk}]   Output text: ${totalChars} chars across ${assistantTexts.length} part(s) | model: ${event.model ?? "unknown"} | provider: ${event.provider ?? "unknown"}`,
+      );
+      logger.info(
+        `[provenance:${sk}]   Established taint: ${graph.maxTaint} (taint evaluation deferred to after_tool_call)`,
+      );
+    }),
+  );
+
+  // --- loop_iteration_start / loop_iteration_end DROPPED ---
+  //
+  // The original handlers were observation-only diagnostics:
+  //   - loop_iteration_start: logged "Iteration N start (M messages)"
+  //   - loop_iteration_end: called graph.recordIterationEnd(iteration,
+  //       toolCallsMade, willContinue) — pure bookkeeping, not used
+  //       downstream by any policy decision.
+  //
+  // Mainline removed both hooks. graph.iterationCount is still kept
+  // accurate via recordLlmCall in llm_input above. The lost log lines
+  // are diagnostic-only, not security-relevant.
+
+  // --- agent_end + message_sending (replaces before_response_emit) ---
+  //
+  // before_response_emit has been removed from mainline. Its work splits:
+  //   - turn-completion bookkeeping (recordOutput, completeTurn,
+  //     watermark persistence, summary logging) → agent_end
+  //   - developer-mode footer mutation on outbound content → message_sending
+  //
+  // The skip-on-NO_REPLY/HEARTBEAT_OK guard moves to message_sending,
+  // which fires per outbound message and naturally skips when content
+  // is one of the silent markers.
+  api.on(
+    "agent_end",
+    profiled("agent_end", (event: any, ctx: AgentContext) => {
+      const sessionKey = ctx.sessionKey ?? "unknown";
+      const graph = store.getActive(sessionKey);
+      if (!graph) return;
+
+      // Last assistant message text → drives recordOutput length.
+      const messages: any[] = Array.isArray(event.messages) ? event.messages : [];
+      let lastAssistantText = "";
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m?.role !== "assistant") continue;
+        if (typeof m.content === "string") {
+          lastAssistantText = m.content;
+          break;
+        }
+        if (Array.isArray(m.content)) {
+          lastAssistantText = m.content
+            .filter((p: any) => p?.type === "text" && typeof p.text === "string")
+            .map((p: any) => p.text as string)
+            .join("\n");
+          break;
+        }
+      }
+
+      // Skip turn-completion bookkeeping for silent markers — they are
+      // not real agent replies. (Mirrors the legacy NO_REPLY/HEARTBEAT_OK
+      // guard from before_response_emit.)
+      const trimmed = lastAssistantText.trim();
+      if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return;
+      if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return;
+
+      graph.recordOutput(lastAssistantText.length);
+
+      const taintLevel = graph.maxTaint;
+      const currentWatermark = watermarkStore.getLevel(sessionKey);
+      const taintReason = buildTaintReason(graph, currentWatermark?.reason);
+
+      // Clear turn-scoped approvals
+      approvalStore.clearTurnScoped(sessionKey);
+
+      const summary = store.completeTurn(sessionKey);
+      if (!summary) return;
+
+      // Collect URI taint records from the completed graph
       const agentId = sessionAgentMap.get(sessionKey);
-      const effectivePolicyConfig = getPolicyConfig(agentId);
-      const result = evaluateWithApprovals(
-        graph,
-        currentToolNames,
-        effectivePolicyConfig,
-        approvalStore,
+      const effectiveToolTaints = getResolvedToolTaints(agentId);
+      const effectiveUriTrustConfig = getUriTrustConfig(agentId);
+      const uriTaintRecords: UriTaintRecord[] = graph
+        .getAllNodes()
+        .filter((n) => n.kind === "tool_call" && n.sourceUris?.length)
+        .flatMap((n) => {
+          const toolKey = n.tool!;
+          const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
+          return n.sourceUris!.map((uri) => {
+            const uriTrust = classifyUri(uri, effectiveUriTrustConfig);
+            return {
+              uri,
+              toolTrust,
+              uriTrust,
+              effectiveTrust: uriTrust ?? toolTrust,
+              tool: toolKey,
+              firstSeenAt: new Date(n.timestamp).toISOString(),
+              turnId: graph.turnId,
+            } satisfies UriTaintRecord;
+          });
+        });
+
+      // Persist watermark with URI taint records
+      const wmReason = buildWatermarkReason(graph);
+      watermarkStore.escalate(
         sessionKey,
+        summary.maxTaint,
+        wmReason,
+        wmReason,
+        uriTaintRecords.length > 0 ? uriTaintRecords : undefined,
       );
+      watermarkStore.flush();
 
-      if (result.mode === "allow") {
+      const sk = shortKey(sessionKey);
+      const wmBefore = currentWatermark?.level ?? "none";
+      const wmAfter = watermarkStore.getLevel(sessionKey)?.level ?? "none";
+
+      logger.info(`[provenance:${sk}] ── Turn Complete ──`);
+      logger.info(`[provenance:${sk}]   Final taint: ${summary.maxTaint}`);
+      if (summary.maxTaint !== "trusted" || wmBefore !== "none") {
         logger.info(
-          `[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`,
-        );
-        logger.info(
-          `[provenance:${sk}]   Taint: ${graph.maxTaint} | Mode: allow | Tools: ${currentToolNames.length}`,
-        );
-        return { systemPrompt: systemPromptWithTaint };
-      }
-
-      if (result.block) {
-        if (result.blockReason?.startsWith("Max iterations exceeded")) {
-          logger.warn(
-            `[provenance:${sk}]   Max iterations warning: ${result.blockReason} — allowing agent loop to handle`,
-          );
-          return undefined;
-        }
-        logger.warn(
-          `[provenance:${sk}]   Turn BLOCKED: ${result.blockReason}`,
-        );
-        return { block: true, blockReason: result.blockReason };
-      }
-
-      // Log pending confirmations
-      if (result.pendingConfirmations.length > 0) {
-        const pendingNames = result.pendingConfirmations.map(
-          (p) => p.toolName,
-        );
-        logger.warn(
-          `[provenance:${sk}] ⚠️ SECURITY: Tools restricted due to ${graph.maxTaint} content in context.`,
-        );
-        logger.warn(
-          `[provenance:${sk}]   Restricted: ${pendingNames.join(", ")}`,
-        );
-        lastImpactedToolBySession.set(
-          sessionKey,
-          pendingNames[pendingNames.length - 1],
-        );
-        logger.warn(
-          `[provenance:${sk}]   Approve with: /approve-exec <tool>  (or /approve-exec all)`,
+          `[provenance:${sk}]   WATERMARK_UPDATE: ${wmBefore} → ${wmAfter} (turn maxTaint=${summary.maxTaint}, reason: ${wmReason})`,
         );
       }
-
-      const removedTools = Array.from(result.toolRemovals);
-      const removedStr =
-        removedTools.length > 0 ? removedTools.join(", ") : "(none)";
-
       logger.info(
-        `[provenance:${sk}] ── LLM Call (iteration ${event.iteration ?? 0}) ──`,
+        `[provenance:${sk}]   External sources: ${summary.externalSources.length > 0 ? summary.externalSources.join(", ") : "(none)"}`,
       );
       logger.info(
-        `[provenance:${sk}]   Taint: ${graph.maxTaint} | Mode: ${result.mode} | Tools: ${currentToolNames.length - removedTools.length}/${currentToolNames.length} | Removed: ${removedStr}`,
+        `[provenance:${sk}]   Tools used: ${summary.toolsUsed.length > 0 ? summary.toolsUsed.join(", ") : "(none)"}`,
+      );
+      logger.info(
+        `[provenance:${sk}]   Tools blocked: ${summary.toolsBlocked.length > 0 ? summary.toolsBlocked.join(", ") : "(none)"}`,
+      );
+      logger.info(
+        `[provenance:${sk}]   Iterations: ${summary.iterationCount} | Nodes: ${summary.nodeCount} | Edges: ${summary.edgeCount}`,
       );
 
-      if (result.toolRemovals.size > 0) {
-        blockedToolsBySession.set(
-          sessionKey,
-          new Set(result.toolRemovals),
-        );
+      blockedToolsBySession.delete(sessionKey);
+      // Stash final taint info for the message_sending handler to surface
+      // in the developer-mode footer. We use a per-session map keyed on
+      // sessionKey; message_sending fires shortly after agent_end with
+      // the same sessionKey on its hookCtx.
+      finalTaintBySession.set(sessionKey, {
+        startLevel: turnStartTaintBySession.get(sessionKey)?.level ?? "trusted",
+        startReason: turnStartTaintBySession.get(sessionKey)?.reason ?? "unknown",
+        endLevel: taintLevel,
+        endReason: taintReason,
+        impactedTool: lastImpactedToolBySession.get(sessionKey) ?? "none",
+        uriTaintRecords,
+      });
+    }),
+  );
 
-        const removalsLower = new Set(
-          Array.from(result.toolRemovals).map((t) => t.toLowerCase()),
-        );
-        const allowedTools = currentTools.filter(
-          (t: any) => !removalsLower.has(t.name.toLowerCase()),
-        );
+  api.on(
+    "message_sending",
+    profiled("message_sending", (event: any, ctx: AgentContext): { content?: string } | undefined => {
+      // Developer-mode footer: append a one-line summary of taint
+      // trajectory to outbound content. Only when developerMode is on,
+      // only when content is not a silent marker, and only when we have
+      // final taint info from the matching agent_end above.
+      if (!developerMode) return undefined;
+      const sessionKey = ctx.sessionKey ?? "unknown";
+      const final = finalTaintBySession.get(sessionKey);
+      if (!final) return undefined;
 
-        for (const toolName of result.toolRemovals) {
-          graph.recordBlockedTool(toolName, "policy", event.iteration ?? 0);
-        }
-        return { tools: allowedTools, systemPrompt: systemPromptWithTaint };
-      } else {
-        blockedToolsBySession.delete(sessionKey);
-      }
+      const content = event.content;
+      if (typeof content !== "string" || content.length === 0) return undefined;
+      const trimmed = content.trim();
+      if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return undefined;
+      if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return undefined;
 
-      return { systemPrompt: systemPromptWithTaint };
+      const taintEmoji = (level: string) =>
+        level === "trusted" ? "🟢"
+          : level === "shared" ? "🟡"
+            : level === "external" ? "🟠" : "🔴";
+      const uriSummary = (final.uriTaintRecords ?? [])
+        .filter((r) => r.effectiveTrust !== "trusted")
+        .map((r) => `${r.tool}(${truncate(r.uri, 40)})`)
+        .slice(0, 3);
+      const uriPart = uriSummary.length > 0 ? ` | sources: ${uriSummary.join(", ")}` : "";
+      const footer =
+        `\`${taintEmoji(final.startLevel)} ${final.startLevel} (${truncate(final.startReason, 60)}) → ` +
+        `${taintEmoji(final.endLevel)} ${final.endLevel} (${truncate(final.endReason, 60)}) | ` +
+        `impacted: ${final.impactedTool}${uriPart}\``;
+      // Single-shot: clear so we don't append on subsequent chunks.
+      finalTaintBySession.delete(sessionKey);
+      return { content: content + "\n" + footer };
     }),
   );
 
@@ -1812,299 +1982,6 @@ export function registerSecurityHooks(
     }),
   );
 
-  // --- after_llm_call ---
-  // IMPORTANT: This hook fires BEFORE tools execute. It does NOT escalate taint.
-  // Taint evaluation happens in after_tool_call (post-execution, observed).
-  // This hook's responsibilities:
-  //   1. Log proposed tool calls with predicted trust (diagnostics only)
-  //   2. Use the gate to pre-filter tool calls that are blocked at the
-  //      current ESTABLISHED taint level (from before_llm_call / watermark)
-  api.on(
-    "after_llm_call",
-    profiled("after_llm_call", (event: any, ctx: AgentContext) => {
-      const sessionKey = ctx.sessionKey ?? "unknown";
-      const graph = store.getActive(sessionKey);
-      if (!graph) return;
-
-      // Core sends tool calls with `id`, `name`, `arguments`; normalize for internal use
-      const rawToolCalls: Array<{
-        id?: string;
-        name: string;
-        params?: Record<string, unknown>;
-        arguments?: Record<string, unknown>;
-      }> = event.toolCalls ?? [];
-      const toolCalls = rawToolCalls.map((tc) => ({
-        id: tc.id,
-        name: tc.name,
-        params: tc.params ?? tc.arguments ?? {},
-      }));
-
-      if (toolCalls.length === 0) return;
-
-      const sk = shortKey(sessionKey);
-      const agentId = sessionAgentMap.get(sessionKey);
-      const effectiveToolTaints = getResolvedToolTaints(agentId);
-      const effectiveUriTrustConfig = getUriTrustConfig(agentId);
-      const effectivePolicyConfig = getPolicyConfig(agentId);
-
-      // Log proposed tool calls with their predicted trust (diagnostic only — no graph mutation)
-      const toolDescriptions = toolCalls.map((tc) => {
-        const params = tc.params ?? {};
-        const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
-        const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
-        const sourceUris = extractToolSourceUris(toolKey, tc.name, params, uriExtractors, execCommandRules);
-        if (sourceUris.length > 0) {
-          const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
-          const effective = uriTrust ?? toolTrust;
-          return `${toolKey}(predicted:${effective}${uriTrust ? ` uri:${sourceUris[0]}` : ""})`;
-        }
-        return `${toolKey}(predicted:${toolTrust})`;
-      });
-
-      logger.info(
-        `[provenance:${sk}] ── LLM Response (iteration ${event.iteration ?? 0}) ──`,
-      );
-      logger.info(
-        `[provenance:${sk}]   Proposed tool calls: ${toolDescriptions.join(", ")}`,
-      );
-      logger.info(
-        `[provenance:${sk}]   Established taint: ${graph.maxTaint} (taint evaluation deferred to after_tool_call)`,
-      );
-
-      // Gate: pre-filter tool calls that are blocked at the current established taint.
-      // This is a batch-level optimization — rather than letting each tool hit
-      // before_tool_call and fail individually, we filter the batch up front.
-      // The gate returns { toolCalls: allowed } so the core only executes allowed tools.
-      const currentTaint = graph.maxTaint;
-      const allowed: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
-      const blocked: string[] = [];
-
-      for (const tc of toolCalls) {
-        const params = tc.params ?? {};
-        const toolKey = resolveToolKey(tc.name, params, compositeTools, execCommandRules);
-        const toolKeyLower = toolKey.toLowerCase();
-
-        // Owner DM exception: message tools always pass in owner DMs
-        if (sessionOwnerDmMap.get(sessionKey) && tc.name.toLowerCase() === "message") {
-          if (tc.id) {
-            allowed.push({ id: tc.id, name: tc.name, arguments: params as Record<string, unknown> });
-          }
-          continue;
-        }
-
-        // Composite key override check (e.g., message.send always allowed)
-        if (toolKey !== tc.name) {
-          const compositeOverride = effectivePolicyConfig.toolOverrides[toolKeyLower];
-          if (compositeOverride) {
-            const mode = compositeOverride[currentTaint] ?? compositeOverride["*"];
-            if (mode === "allow") {
-              if (tc.id) {
-                allowed.push({ id: tc.id, name: tc.name, arguments: params as Record<string, unknown> });
-              }
-              continue;
-            }
-          }
-        }
-
-        // Policy check at current established taint
-        const mode = getToolMode(toolKeyLower, currentTaint, effectivePolicyConfig);
-        if (mode === "restrict") {
-          blocked.push(toolKey);
-          continue;
-        }
-        if (mode === "confirm" && !approvalStore.isApproved(sessionKey, toolKeyLower)) {
-          blocked.push(toolKey);
-          continue;
-        }
-
-        // Tool passes gate
-        if (tc.id) {
-          allowed.push({ id: tc.id, name: tc.name, arguments: params as Record<string, unknown> });
-        }
-      }
-
-      if (blocked.length > 0) {
-        logger.warn(
-          `[provenance:${sk}]   GATE_FILTERED: ${blocked.join(", ")} blocked at established taint ${currentTaint}`,
-        );
-        // Return gate result: only allowed tool calls proceed to execution
-        return { toolCalls: allowed };
-      }
-
-      // All tools pass — no gate filtering needed
-      return undefined;
-    }),
-  );
-
-  // --- loop_iteration_start ---
-  api.on(
-    "loop_iteration_start",
-    profiled(
-      "loop_iteration_start",
-      (event: any, _ctx: AgentContext) => {
-        if (verbose) {
-          logger.info(
-            `[provenance] Iteration ${event.iteration} start (${event.messageCount} messages)`,
-          );
-        }
-      },
-    ),
-  );
-
-  // --- loop_iteration_end ---
-  api.on(
-    "loop_iteration_end",
-    profiled(
-      "loop_iteration_end",
-      (event: any, ctx: AgentContext) => {
-        const sessionKey = ctx.sessionKey ?? "unknown";
-        const graph = store.getActive(sessionKey);
-        if (!graph) return;
-        graph.recordIterationEnd(
-          event.iteration ?? 0,
-          event.toolCallsMade ?? 0,
-          event.willContinue ?? false,
-        );
-
-        const sk = shortKey(sessionKey);
-        logger.info(
-          `[provenance:${sk}] ── Iteration ${event.iteration ?? 0} End ──`,
-        );
-        logger.info(
-          `[provenance:${sk}]   Tool calls made: ${event.toolCallsMade ?? 0} | Will continue: ${event.willContinue ?? false}`,
-        );
-      },
-    ),
-  );
-
-  // --- before_response_emit ---
-  api.on(
-    "before_response_emit",
-    profiled(
-      "before_response_emit",
-      (event: any, ctx: AgentContext) => {
-        const sessionKey = ctx.sessionKey ?? "unknown";
-        const graph = store.getActive(sessionKey);
-        if (!graph) return;
-
-        // Don't append footer to silent/heartbeat messages — it breaks
-        // the downstream regex detection that swallows NO_REPLY / HEARTBEAT_OK
-        const content = event.content;
-        if (typeof content === "string") {
-          const trimmed = content.trim();
-          if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return;
-          if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return;
-        }
-
-        graph.recordOutput(event.content?.length ?? 0);
-
-        const taintLevel = graph.maxTaint;
-        const currentWatermark = watermarkStore.getLevel(sessionKey);
-        const taintReason = buildTaintReason(
-          graph,
-          currentWatermark?.reason,
-        );
-
-        // Clear turn-scoped approvals
-        approvalStore.clearTurnScoped(sessionKey);
-
-        const summary = store.completeTurn(sessionKey);
-        if (!summary) return;
-
-        // Collect URI taint records from the completed graph
-        const agentId = sessionAgentMap.get(sessionKey);
-        const effectiveToolTaints = getResolvedToolTaints(agentId);
-        const effectiveUriTrustConfig = getUriTrustConfig(agentId);
-        const uriTaintRecords: UriTaintRecord[] = graph
-          .getAllNodes()
-          .filter(
-            (n) => n.kind === "tool_call" && n.sourceUris?.length,
-          )
-          .flatMap((n) => {
-            const toolKey = n.tool!;
-            const toolTrust = getToolTrust(toolKey, effectiveToolTaints);
-            return n.sourceUris!.map((uri) => {
-              const uriTrust = classifyUri(uri, effectiveUriTrustConfig);
-              return {
-                uri,
-                toolTrust,
-                uriTrust,
-                effectiveTrust: uriTrust ?? toolTrust,
-                tool: toolKey,
-                firstSeenAt: new Date(n.timestamp).toISOString(),
-                turnId: graph.turnId,
-              } satisfies UriTaintRecord;
-            });
-          });
-
-        // Persist watermark with URI taint records
-        const wmReason = buildWatermarkReason(graph);
-        watermarkStore.escalate(
-          sessionKey,
-          summary.maxTaint,
-          wmReason,
-          wmReason,
-          uriTaintRecords.length > 0 ? uriTaintRecords : undefined,
-        );
-        watermarkStore.flush();
-
-        const sk = shortKey(sessionKey);
-
-        const wmBefore = currentWatermark?.level ?? "none";
-        const wmAfter = watermarkStore.getLevel(sessionKey)?.level ?? "none";
-
-        logger.info(`[provenance:${sk}] ── Turn Complete ──`);
-        logger.info(
-          `[provenance:${sk}]   Final taint: ${summary.maxTaint}`,
-        );
-        if (summary.maxTaint !== "trusted" || wmBefore !== "none") {
-          logger.info(
-            `[provenance:${sk}]   WATERMARK_UPDATE: ${wmBefore} → ${wmAfter} (turn maxTaint=${summary.maxTaint}, reason: ${wmReason})`,
-          );
-        }
-        logger.info(
-          `[provenance:${sk}]   External sources: ${summary.externalSources.length > 0 ? summary.externalSources.join(", ") : "(none)"}`,
-        );
-        logger.info(
-          `[provenance:${sk}]   Tools used: ${summary.toolsUsed.length > 0 ? summary.toolsUsed.join(", ") : "(none)"}`,
-        );
-        logger.info(
-          `[provenance:${sk}]   Tools blocked: ${summary.toolsBlocked.length > 0 ? summary.toolsBlocked.join(", ") : "(none)"}`,
-        );
-        logger.info(
-          `[provenance:${sk}]   Iterations: ${summary.iterationCount} | Nodes: ${summary.nodeCount} | Edges: ${summary.edgeCount}`,
-        );
-
-        blockedToolsBySession.delete(sessionKey);
-
-        // Developer mode header
-        if (developerMode && event.content) {
-          const lastImpacted =
-            lastImpactedToolBySession.get(sessionKey) ?? "none";
-          const taintEmoji = (level: string) =>
-            level === "trusted"
-              ? "🟢"
-              : level === "shared"
-                ? "🟡"
-                : level === "external"
-                  ? "🟠"
-                  : "🔴";
-          // Turn start taint
-          const turnStart = turnStartTaintBySession.get(sessionKey);
-          const startLevel = turnStart?.level ?? "trusted";
-          const startReason = turnStart?.reason ?? "unknown";
-          // Include URI sources in header if available
-          const uriSummary = uriTaintRecords
-            .filter((r) => r.effectiveTrust !== "trusted")
-            .map((r) => `${r.tool}(${truncate(r.uri, 40)})`)
-            .slice(0, 3);
-          const uriPart = uriSummary.length > 0 ? ` | sources: ${uriSummary.join(", ")}` : "";
-          const footer = `\`${taintEmoji(startLevel)} ${startLevel} (${truncate(startReason, 60)}) → ${taintEmoji(taintLevel)} ${taintLevel} (${truncate(taintReason, 60)}) | impacted: ${lastImpacted}${uriPart}\``;
-          return { content: event.content + "\n" + footer };
-        }
-      },
-    ),
-  );
 
   // --- after_tool_call ---
   // PRIMARY taint evaluation site: evaluates trust AFTER tool execution,
