@@ -19,6 +19,7 @@ import {
   registerSecurityHooks,
   type SecurityPluginConfig,
 } from "../index.js";
+import { makeApi, seedIdentity } from "./test-shim.js";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -32,28 +33,6 @@ function makeLogger() {
   };
 }
 
-interface HookHandler {
-  (...args: any[]): any;
-}
-
-function makeApi() {
-  const hooks = new Map<string, HookHandler[]>();
-  return {
-    on(name: string, handler: HookHandler) {
-      if (!hooks.has(name)) hooks.set(name, []);
-      hooks.get(name)!.push(handler);
-    },
-    fire(name: string, event: any, ctx: any): any {
-      const handlers = hooks.get(name) ?? [];
-      let result: any;
-      for (const h of handlers) {
-        result = h(event, ctx);
-      }
-      return result;
-    },
-    hooks,
-  };
-}
 
 // ── Tests ────────────────────────────────────────────────────
 
@@ -70,7 +49,7 @@ describe("Heartbeat trust classification", () => {
 
   function setup(config?: Partial<SecurityPluginConfig>) {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const { store } = registerSecurityHooks(api, logger, {
       workspaceDir: tmpDir,
       verbose: true,

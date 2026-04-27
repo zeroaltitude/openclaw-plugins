@@ -13,6 +13,7 @@ import {
   registerSecurityHooks,
   type SecurityPluginConfig,
 } from "../index.js";
+import { makeApi, seedIdentity } from "./test-shim.js";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -26,28 +27,6 @@ function makeLogger() {
   };
 }
 
-interface HookHandler {
-  (...args: any[]): any;
-}
-
-function makeApi() {
-  const hooks = new Map<string, HookHandler[]>();
-  return {
-    on(name: string, handler: HookHandler) {
-      if (!hooks.has(name)) hooks.set(name, []);
-      hooks.get(name)!.push(handler);
-    },
-    fire(name: string, event: any, ctx: any): any {
-      const handlers = hooks.get(name) ?? [];
-      let result: any;
-      for (const h of handlers) {
-        result = h(event, ctx);
-      }
-      return result;
-    },
-    hooks,
-  };
-}
 
 // ── Tests ────────────────────────────────────────────────────
 
@@ -64,7 +43,7 @@ describe("Cross-session taint inheritance", () => {
 
   it("subagent inherits taint from parent's in-flight graph", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -146,7 +125,7 @@ describe("Cross-session taint inheritance", () => {
 
   it("subagent from clean parent starts with trusted taint", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -220,7 +199,7 @@ describe("Cross-session taint inheritance", () => {
 
   it("subagent inherits taint from parent's persisted watermark", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -294,7 +273,7 @@ describe("Cross-session taint inheritance", () => {
 
   it("subagent inherits untrusted taint from parent with web_fetch", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -350,7 +329,7 @@ describe("Cross-session taint inheritance", () => {
 
   it("per-agent overrides still apply to inherited taint", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -434,7 +413,7 @@ describe("Owner DM exception narrowing", () => {
 
   it("subagent does NOT get owner DM exception for message tool", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -521,7 +500,7 @@ describe("Owner DM exception narrowing", () => {
 
   it("actual owner DM still gets exception", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {

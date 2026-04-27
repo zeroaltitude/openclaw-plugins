@@ -13,6 +13,7 @@ import {
   registerSecurityHooks,
   type SecurityPluginConfig,
 } from "../index.js";
+import { makeApi, seedIdentity } from "./test-shim.js";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -26,28 +27,6 @@ function makeLogger() {
   };
 }
 
-interface HookHandler {
-  (...args: any[]): any;
-}
-
-function makeApi() {
-  const hooks = new Map<string, HookHandler[]>();
-  return {
-    on(name: string, handler: HookHandler) {
-      if (!hooks.has(name)) hooks.set(name, []);
-      hooks.get(name)!.push(handler);
-    },
-    fire(name: string, event: any, ctx: any): any {
-      const handlers = hooks.get(name) ?? [];
-      let result: any;
-      for (const h of handlers) {
-        result = h(event, ctx);
-      }
-      return result;
-    },
-    hooks,
-  };
-}
 
 // ── Tests ────────────────────────────────────────────────────
 
@@ -64,7 +43,7 @@ describe("Per-agent policy overrides", () => {
 
   it("default agent gets default taint from web_search (untrusted)", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -111,7 +90,7 @@ describe("Per-agent policy overrides", () => {
 
   it("agent with toolOutputTaints override treats web_search as trusted", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -169,7 +148,7 @@ describe("Per-agent policy overrides", () => {
 
   it("agent with taintPolicy override allows exec at external taint", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -244,7 +223,7 @@ describe("Per-agent policy overrides", () => {
 
   it("default agent has exec blocked at external taint (confirm mode)", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
@@ -305,7 +284,7 @@ describe("Per-agent policy overrides", () => {
 
   it("logs agent override info at startup", () => {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       agentOverrides: {

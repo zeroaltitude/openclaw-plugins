@@ -13,6 +13,7 @@ import {
   registerSecurityHooks,
   type SecurityPluginConfig,
 } from "../index.js";
+import { makeApi, seedIdentity } from "./test-shim.js";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -26,39 +27,6 @@ function makeLogger() {
   };
 }
 
-interface HookHandler {
-  (...args: any[]): any;
-}
-
-function makeApi() {
-  const hooks = new Map<string, HookHandler[]>();
-  const commands = new Map<string, { handler: (ctx: any) => any }>();
-  return {
-    on(name: string, handler: HookHandler) {
-      if (!hooks.has(name)) hooks.set(name, []);
-      hooks.get(name)!.push(handler);
-    },
-    fire(name: string, event: any, ctx: any): any {
-      const handlers = hooks.get(name) ?? [];
-      let result: any;
-      for (const h of handlers) {
-        result = h(event, ctx);
-      }
-      return result;
-    },
-    registerCommand(opts: { name: string; handler: (ctx: any) => any }) {
-      commands.set(opts.name, opts);
-    },
-    /** Invoke a registered command by name (simulates /command dispatch) */
-    invokeCommand(name: string, ctx: any = {}) {
-      const cmd = commands.get(name);
-      if (!cmd) throw new Error(`Command not registered: ${name}`);
-      return cmd.handler(ctx);
-    },
-    hooks,
-    commands,
-  };
-}
 
 function readWatermarks(tmpDir: string): Record<string, any> {
   try {
@@ -88,7 +56,7 @@ describe("Thread reset cascade", () => {
 
   function setup() {
     const logger = makeLogger();
-    const api = makeApi();
+    const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
