@@ -4,13 +4,19 @@
  * Registers cognitive memory tools backed by the Vestige HTTP bridge server.
  * Each tool maps to a FastAPI endpoint which in turn calls vestige-mcp over stdio.
  *
- * Also registers before_llm_call and after_llm_call hooks for automatic
+ * Also registers before_prompt_build and llm_output hooks for automatic
  * memory retrieval and ingestion via a local DeBERTa NLI zero-shot classifier.
+ *
+ * Migrated from before_llm_call/after_llm_call (removed from openclaw
+ * mainline as part of Vincent's split hook model). The mutating prompt
+ * surface is now `before_prompt_build` (used for memory retrieval +
+ * injection via prependContext); the post-call observation surface is
+ * `llm_output` (used for saliency-gated ingestion).
  */
 
 import { Type } from "@sinclair/typebox";
-import { createBeforeLlmCallHandler } from "./hooks/before-llm-call.js";
-import { createAfterLlmCallHandler } from "./hooks/after-llm-call.js";
+import { createBeforePromptBuildHandler } from "./hooks/before-prompt-build.js";
+import { createLlmOutputHandler } from "./hooks/llm-output.js";
 
 // The OpenClaw plugin API type (provided at runtime)
 interface PluginApi {
@@ -322,8 +328,10 @@ export function register(api: PluginApi) {
   // ── Hook-based saliency (automatic memory retrieval + ingestion) ─────
   //
   // These hooks remove the LLM from the memory decision loop:
-  // - before_llm_call: scores inbound messages, retrieves relevant memories
-  // - after_llm_call: scores outbound exchanges, auto-ingests important ones
+  // - before_prompt_build: scores inbound messages, retrieves relevant
+  //   memories, injects them via `prependContext` for the LLM to see this
+  //   turn. Per-turn (not persisted in conversation history).
+  // - llm_output: scores outbound exchanges, auto-ingests important ones.
   //
   // Uses local DeBERTa-v3-xsmall NLI zero-shot classifier — no external
   // API keys needed. Model downloaded lazily on first use (~22MB quantized).
@@ -335,26 +343,25 @@ export function register(api: PluginApi) {
   if (hooksEnabled) {
     // Feature-detect: gracefully degrade if the host doesn't support these hooks.
     try {
-      // Inbound: retrieve relevant memories before LLM call
+      // Inbound: retrieve relevant memories before prompt is finalized
       api.on(
-        "before_llm_call",
-        createBeforeLlmCallHandler({
+        "before_prompt_build",
+        createBeforePromptBuildHandler({
           vestigeServerUrl: serverUrl,
           vestigeAuthToken: token || undefined,
           conceptLabels,
           saliencyThreshold,
           maxMemories: (cfg.maxMemories as number) ?? 5,
           maxMemoryTokens: (cfg.maxMemoryTokens as number) ?? 1000,
-          firstIterationOnly: true,
           logger: api.logger,
         }),
         { priority: 10 },
       );
 
-      // Outbound: auto-ingest important exchanges after LLM call
+      // Outbound: auto-ingest important exchanges from the model's output
       api.on(
-        "after_llm_call",
-        createAfterLlmCallHandler({
+        "llm_output",
+        createLlmOutputHandler({
           vestigeServerUrl: serverUrl,
           vestigeAuthToken: token || undefined,
           conceptLabels,
@@ -363,11 +370,13 @@ export function register(api: PluginApi) {
         { priority: 90 },
       );
 
-      api.logger.info("[vestige] Ambient memory hooks registered (model: DeBERTa-v3-xsmall NLI, local)");
+      api.logger.info(
+        "[vestige] Ambient memory hooks registered: before_prompt_build + llm_output (model: DeBERTa-v3-xsmall NLI, local)",
+      );
     } catch (err) {
       // Host doesn't support these hooks — fall back to tool-only mode
       api.logger.info(
-        "[vestige] Host lacks before_llm_call/after_llm_call hooks — falling back to tool-only mode",
+        "[vestige] Host lacks before_prompt_build/llm_output hooks — falling back to tool-only mode",
       );
     }
   }
