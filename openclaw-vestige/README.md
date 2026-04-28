@@ -104,14 +104,27 @@ The Vestige memory engine exposed via HTTP:
 - No Node.js or supergateway dependency
 
 ### Plugin (`plugin/`)
-An OpenClaw TypeScript plugin (CommonJS) that registers five tools:
+An OpenClaw TypeScript plugin (CommonJS) that registers twelve tools:
+
+Memory I/O
 - `vestige_search` — Hybrid keyword + semantic memory search
 - `vestige_ingest` — Direct memory storage
 - `vestige_smart_ingest` — Intelligent ingestion with duplicate detection
 - `vestige_promote` — Strengthen a memory (mark as helpful)
 - `vestige_demote` — Weaken a memory (mark as wrong)
 
-The plugin includes request timeouts (30s) and parses MCP content from responses.
+Maintenance & lifecycle
+- `vestige_dream` — Replay recent memories to discover connections (FSRS-6 consolidation)
+- `vestige_consolidate` — Run a full FSRS-6 maintenance cycle
+- `vestige_backup` — Trigger a SQLite VACUUM INTO backup
+
+Context & retrieval
+- `vestige_session_context` — One-call session priming (memories, intentions, predictions, status)
+- `vestige_explore_connections` — Explore the memory graph (chain / associations / bridges)
+- `vestige_predict` — Predict memories likely to be relevant to the current task
+- `vestige_importance_score` — 4-channel importance scoring (novelty / relevance / valence / utility)
+
+The plugin also registers two ambient hooks (`before_prompt_build` for retrieval and `llm_output` for ingestion), includes request timeouts (30s), and parses MCP content from responses.
 
 ### Helm Chart (`helm/vestige/`)
 Production k8s deployment with sidecar pattern:

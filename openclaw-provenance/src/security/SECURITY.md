@@ -25,16 +25,16 @@ The previous six-level model (system → owner → local → shared → external
 
 1. **Evaluate** (`after_tool_call`): After a tool executes and returns results, compute the effective trust from tool output taint + URI classification. Call `graph.recordToolCall()` — the ONLY place taint escalates.
 
-2. **Block** (`after_llm_call` batch gate + `before_tool_call` execution gate): Before tools execute, check if they are permitted at the current established taint level. Filter blocked tools from the batch.
+2. **Block** (`before_tool_call`): Before each tool executes, check if it is permitted at the current established taint level. Deny the call (or route through approval) when blocked.
 
-3. **Reset/Approve** (`context_assembled`): Process `.reset-trust` and `.approve` commands from the verified owner.
+3. **Reset/Approve** (`before_reset` + `before_prompt_build`): `.reset-trust` is handled in `before_reset`; `.approve` and turn-start trust classification happen in `before_prompt_build`.
 
 ### Observed vs. Predicted Taint
 
 Taint evaluation uses **observed** output — it happens in `after_tool_call` after the tool has executed and returned results. This is critical:
 
-- **Old model (predictive):** `after_llm_call` evaluated taint before tools executed, based on what the LLM *proposed* to call. This caused false positive blocking of same-batch tools and phantom taint in watermarks when tools never actually executed.
-- **New model (observed):** `after_tool_call` evaluates taint after execution, based on what actually happened. Taint only escalates when tainted content actually enters the context.
+- **Old model (predictive):** an `after_llm_call` batch gate evaluated taint before tools executed, based on what the LLM *proposed* to call. This caused false positive blocking of same-batch tools and phantom taint in watermarks when tools never actually executed.
+- **New model (observed):** `after_tool_call` evaluates taint after execution, based on what actually happened. `before_tool_call` enforces blocks per call against that observed taint. Taint only escalates when tainted content actually enters the context.
 
 ### Parallel Batch Correctness
 
@@ -50,12 +50,16 @@ Across batches: enforcement is deterministic (gate reads updated `maxTaint`).
 
 | Hook | Taint Role |
 |------|------------|
-| `context_assembled` | Load watermark, classify initial trust, process `.reset-trust` |
-| `before_llm_call` | Filter tool list based on current `maxTaint`, process `.approve` |
-| `after_llm_call` | Log proposed tools (diagnostic), batch gate: pre-filter blocked tools |
-| `before_tool_call` | Execution gate: defense-in-depth re-check, memory file write blocking |
+| `inbound_claim` | Capture sender/channel identity for trust classification |
+| `subagent_spawned` | Record subagent identity context |
+| `before_reset` | Process `.reset-trust` before session reset |
+| `before_prompt_build` | Load watermark, classify initial trust, process `.approve` |
+| `llm_input` | Observe outgoing LLM call (diagnostic) |
+| `llm_output` | Observe LLM response (diagnostic) |
+| `before_tool_call` | **PRIMARY enforcement gate**: per-call check against `maxTaint`, memory file write blocking |
 | `after_tool_call` | **PRIMARY taint evaluation**: `recordToolCall()`, escalate `maxTaint` |
-| `before_response_emit` | Flush watermark to disk, seal graph |
+| `agent_end` | Flush watermark to disk, seal graph |
+| `message_sending` | Append developer-mode taint trajectory footer |
 
 ## Policy Modes
 

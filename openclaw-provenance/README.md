@@ -66,7 +66,7 @@ These are orthogonal:
 | `vestige_search` | `trusted` | always allowed | Read-only local cognitive memory. Override to `shared` if using shared infrastructure. |
 | `gateway` | `trusted` | always requires approval | Can disable security plugins. Response is system-level config. |
 
-A tool's response trust determines **how it taints the context after execution** (evaluated in `after_tool_call`). A tool's call permission determines **whether it can be invoked given the current established taint** (evaluated in `after_llm_call` batch gate and `before_tool_call` execution gate).
+A tool's response trust determines **how it taints the context after execution** (evaluated in `after_tool_call`). A tool's call permission determines **whether it can be invoked given the current established taint** (evaluated per-call in `before_tool_call`).
 
 ### Tool Output Taint Defaults and Configuration
 
@@ -275,7 +275,7 @@ Each of these adds nodes to the provenance graph, and each node's trust level fe
 
 ### Initial Trust: Sender & Channel Classification
 
-When a turn begins, the plugin classifies the **initial trust level** from the metadata OpenClaw provides about who sent the message and what channel it arrived on. This is the `context_assembled` hook, which fires once per turn before any LLM calls.
+When a turn begins, the plugin classifies the **initial trust level** from the metadata OpenClaw provides about who sent the message and what channel it arrived on. This happens in `before_prompt_build`, which fires once per turn before the prompt is assembled and the LLM is called.
 
 The classification logic (`classifyInitialTrust()` in `security/index.ts`):
 
@@ -390,7 +390,7 @@ When a tool completes, `after_tool_call` invokes `recordToolCall()` which looks 
 
 ```
 Turn starts:
-  context_assembled → node(trust: trusted)
+  before_prompt_build → node(trust: trusted)
   history → node(trust: trusted)            maxTaint = trusted
 
 Iteration 1:
@@ -425,17 +425,15 @@ Iteration 2: maxTaint = untrusted
   Now the tainted content IS in the context, and exec is blocked.
 ```
 
-**Key timing detail:** Taint escalation happens in `after_tool_call` — after a tool has **executed** and returned its results. This is *observed* taint, not predicted taint. The policy enforcement happens in three places:
+**Key timing detail:** Taint escalation happens in `after_tool_call` — after a tool has **executed** and returned its results. This is *observed* taint, not predicted taint. Policy enforcement happens at a single per-call gate:
 
-1. **`after_llm_call` (batch gate):** Before tools in a batch execute, tools that are blocked at the *current established taint* are filtered out. This catches restrictions from previous batches.
-2. **`before_tool_call` (execution gate):** Each individual tool is re-checked against `graph.maxTaint` immediately before execution. This is defense-in-depth.
-3. **`before_llm_call` (next iteration):** The full tool list is filtered based on the updated taint level before the LLM sees its options.
+1. **`before_tool_call` (execution gate):** Each individual tool is checked against `graph.maxTaint` immediately before execution. If the tool is blocked at the current established taint, the call is denied.
 
-**Within a parallel batch**, tools execute concurrently. If the LLM proposes `[web_fetch, exec]` in the same batch and both pass the gate at the current taint level, they may execute in parallel. If `web_fetch` completes first and escalates the taint, `exec` may still be running — or may have already completed. This is **correct behavior**: `exec` was evaluated against a context that genuinely did not contain the untrusted `web_fetch` output. The tainted content doesn't exist in exec's context window because it hasn't been returned yet. You can't be tainted by content that doesn't exist.
+**Within a parallel batch**, tools execute concurrently. If the LLM proposes `[web_fetch, exec]` in the same batch and both pass the per-call gate at the current taint level, they may execute in parallel. If `web_fetch` completes first and escalates the taint, `exec` may still be running — or may have already completed. This is **correct behavior**: `exec` was evaluated against a context that genuinely did not contain the untrusted `web_fetch` output. The tainted content doesn't exist in exec's context window because it hasn't been returned yet. You can't be tainted by content that doesn't exist.
 
-**Across batches**, enforcement is deterministic. After a batch completes, `after_tool_call` has escalated the taint. The next `after_llm_call` gate and `before_llm_call` filter will see the updated `maxTaint` and block restricted tools.
+**Across batches**, enforcement is deterministic. After a batch completes, `after_tool_call` has escalated the taint. The next iteration's `before_tool_call` gate will see the updated `maxTaint` and block restricted tools.
 
-**Consequence:** If `web_fetch` and `exec` are called in the same batch, exec may execute before taint escalates — but this is factually accurate, not a loophole. If `web_fetch` is called in batch 1 and `exec` in batch 2, exec is deterministically blocked. The plugin enforces taint based on what the LLM has actually consumed, not what it *might* consume.
+**Consequence:** If `web_fetch` and `exec` are called in the same batch, exec may execute before taint escalates — but this is factually accurate, not a loophole. If `web_fetch` is called in batch 1 and `exec` in batch 2, exec is deterministically blocked by `before_tool_call`. The plugin enforces taint based on what the LLM has actually consumed, not what it *might* consume.
 
 **Taint never decreases within a turn.** `minTrust()` is a one-way ratchet. If one tool returns untrusted content, the entire remainder of the turn is tainted, even if subsequent tools return trusted content.
 
@@ -448,36 +446,30 @@ A more granular per-branch model would require **agent forks** — branching the
 The plugin builds a directed acyclic graph for each turn:
 
 ```
-context_assembled
+before_prompt_build
   ├── node: system_prompt (trust: trusted)
   └── node: history (trust: trusted)
                                             maxTaint: trusted
-llm_call_1 (trust: trusted)
+llm_input → llm_call_1 (trust: trusted)
   └── tool: web_fetch (trust: untrusted)  ← after_tool_call escalates maxTaint
                                             maxTaint: untrusted
-llm_call_2 (trust: untrusted)            ← inherits maxTaint
-  └── tool: exec → BLOCKED               ← policy sees maxTaint=untrusted, blocks exec
+llm_input → llm_call_2 (trust: untrusted) ← inherits maxTaint
+  └── tool: exec → BLOCKED               ← before_tool_call sees maxTaint=untrusted, blocks exec
                                             maxTaint: untrusted
-output (trust: untrusted)
+agent_end → seal graph, flush watermark   (output trust: untrusted)
 ```
 
 Currently all DAGs are linear chains (one LLM call → one or more tool calls → next LLM call). The infrastructure supports branching for future agent fork architectures.
 
-### Three-Layer Enforcement (Defense in Depth)
+### Per-Call Enforcement
 
-**Layer 1: `before_llm_call` — Tool List Filtering**
+**`before_tool_call` — Execution Gate**
 
-Before each LLM call, the plugin evaluates the current taint level against the policy and removes restricted tools from the tool list. The LLM never sees restricted tools and cannot attempt to call them.
+Each individual tool call is checked against `graph.maxTaint` immediately before execution. If the tool is blocked at the current established taint level, the call is denied (or routed through approval if the policy is `confirm`). This single gate enforces taint policy across all batches and all parallel tool calls.
 
-**Layer 2: `after_llm_call` — Batch Gate**
+The gate is *observed-taint based*: it only blocks tools after `after_tool_call` has actually recorded tainted content from a prior call. Same-batch parallel calls that pass the gate at the entry taint level are allowed to run concurrently — see the parallel-batch discussion above for why this is sound.
 
-After the LLM proposes tool calls but before they execute, the batch gate pre-filters tools that are blocked at the current established taint. This catches cases where taint escalated between `before_llm_call` (which set the tool list) and the LLM's response.
-
-**Layer 3: `before_tool_call` — Execution Blocking**
-
-Each individual tool is re-checked against `graph.maxTaint` immediately before execution. This catches any taint escalation that happened between the batch gate and the tool's actual execution (e.g., from a sibling tool in the same batch completing first via `after_tool_call`).
-
-Why three layers? Layer 1 is the primary defense (the LLM can't call what it can't see). Layer 2 catches batch-level restrictions. Layer 3 is the per-tool safety net. In testing, we found cases where the LLM would name tools from prior context even after they were removed from the current tool list.
+The earlier design used a three-layer model (pre-LLM tool-list filter, post-LLM batch gate, pre-execution gate) on top of an older OpenClaw hook surface. That has been collapsed into one per-call gate now that OpenClaw fires `before_tool_call` for every tool invocation. The result is simpler, with fewer false positives and no phantom taint from tools the LLM merely *proposed* but never executed.
 
 ### Fail-Open Design
 
@@ -721,7 +713,7 @@ The **session taint watermark** solves this. It's a persistent record of the wor
 ### How It Works
 
 1. When a tool call escalates the turn's taint (e.g., `web_fetch` → `untrusted`), the watermark store records the new level, reason, and timestamp.
-2. On the next turn's `context_assembled`, the watermark is loaded from disk and injected as a provenance node. The turn starts at the watermark's taint level (or the initial classification, whichever is stricter).
+2. On the next turn's `before_prompt_build`, the watermark is loaded from disk and injected as a provenance node. The turn starts at the watermark's taint level (or the initial classification, whichever is stricter).
 3. The watermark only escalates — it never decreases on its own within a session.
 4. The watermark survives gateway restarts (it's persisted to disk with debounced writes).
 
@@ -975,22 +967,24 @@ Note: `SIGUSR1` does not reload plugins — a full restart is required.
 
 ## Hooks Used
 
-The plugin registers handlers on OpenClaw's internal agent loop hooks:
+The plugin registers handlers on OpenClaw's mainline plugin hooks:
 
 | Hook | Purpose |
 |------|---------|
-| `context_assembled` | Start provenance graph, record initial context, load watermark |
-| `before_llm_call` | Evaluate policy, filter tool list based on current taint level |
-| `after_llm_call` | Log proposed tool calls (diagnostic), batch gate: pre-filter tools blocked at established taint |
-| `before_tool_call` | Execution-layer enforcement (defense in depth), memory file write blocking |
+| `inbound_claim` | Capture sender/channel identity for trust classification |
+| `subagent_spawned` | Record subagent identity context |
+| `before_reset` | Process `.reset-trust` before session reset |
+| `before_prompt_build` | Start provenance graph, classify initial trust, load watermark, process `.approve` |
+| `llm_input` | Observe outgoing LLM call (diagnostic only) |
+| `llm_output` | Observe LLM response (diagnostic only) |
+| `before_tool_call` | **Per-call enforcement**: gate every tool against current `maxTaint`; memory-file write blocking |
 | `after_tool_call` | **Primary taint evaluation**: record observed tool output trust, escalate graph taint post-execution |
-| `loop_iteration_start` | Logging |
-| `loop_iteration_end` | Record iteration metadata |
-| `before_response_emit` | Seal graph, flush watermark, clear turn-scoped approvals, log summary |
+| `agent_end` | Seal graph, flush watermark to disk, clear turn-scoped approvals, log summary |
+| `message_sending` | Append developer-mode taint trajectory footer to outbound messages |
 
 All hook handlers are wrapped in fail-open try/catch — errors are logged but never block the agent.
 
-These hooks require the `feature/extended-security-hooks` branch of OpenClaw (or equivalent core support for internal agent loop hooks).
+These hooks ship in mainline OpenClaw — no feature branch required.
 
 ## Security Theory
 
@@ -1014,7 +1008,7 @@ The "no write down" property is the novel contribution. Without it, an untrusted
 
 1. **Taint is conservative**: The high-water mark over-restricts. If an agent reads one untrusted web page and ten local files, the entire turn is tainted as `untrusted`. Per-branch tracking would reduce false positives but requires agent forks.
 
-2. **Within-batch taint is best-effort**: When the LLM proposes multiple tools in a single batch (e.g., `[web_fetch, exec]`), they execute concurrently. Taint from one tool's output cannot block a sibling tool that is already executing. This is *correct* — a tool that hasn't received tainted content can't be influenced by it — but it means enforcement granularity is per-batch, not per-tool. The plugin compensates with the batch gate (`after_llm_call`), which pre-filters tools blocked at the *established* taint before any execute.
+2. **Within-batch taint is best-effort**: When the LLM proposes multiple tools in a single batch (e.g., `[web_fetch, exec]`), they execute concurrently. Taint from one tool's output cannot block a sibling tool that is already executing. This is *correct* — a tool that hasn't received tainted content can't be influenced by it — but it means enforcement granularity is per-batch, not per-tool. The per-call `before_tool_call` gate enforces blocks based on the *established* taint at the moment each tool starts; cross-tool escalation within a batch is observed in the next iteration.
 
 3. **Tool trust classification is static without URI overrides**: Tool trust levels are hardcoded defaults. However, the [URI Trust Classification](#uri-trust-classification) system overrides tool defaults on a per-domain basis — `web_fetch` to `https://internal-api.company.com` can be classified differently from `https://random-blog.com` via `uriTrust` config patterns.
 
