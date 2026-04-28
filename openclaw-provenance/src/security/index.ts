@@ -357,6 +357,89 @@ function failOpen<T extends (...args: any[]) => any>(
   }) as T;
 }
 
+// =============================================================================
+// PROCESS-GLOBAL PER-SESSION STATE
+// =============================================================================
+//
+// Some maps must be PROCESS-GLOBAL (anchored on globalThis), not
+// function-scoped, NOR even merely module-scoped, because:
+//
+//   1. `registerSecurityHooks` is invoked multiple times during a gateway
+//      lifetime (once per agent context: tank, narcissus, shiva, smith,
+//      main, ...). Function-scoped state means each closure has its own
+//      copy.
+//
+//   2. The plugin module itself can be loaded more than once in a single
+//      Node process. Different agent runtime contexts and different hook
+//      runners can resolve and `require`/`import` the plugin from
+//      independent paths (CommonJS+ESM, agent-scoped node_modules, etc.),
+//      each yielding a fresh module instance with its own top-level state.
+//      Plain module scope is NOT sufficient.
+//
+// The empirical evidence captured in the gateway log on 2026-04-28 showed:
+//   agent_end SET    fullKey=agent:tank:discord:tank:direct:1594  mapInstance=d3j2d7fe
+//   message_sending  sessionKey=agent:tank:discord:tank:direct:1594 lookupHit=false mapInstance=amk32ibv
+//   message_sending  sessionKey=agent:tank:discord:tank:direct:1594 lookupHit=true  mapInstance=d3j2d7fe
+// confirming the cross-instance leak even after the maps were promoted to
+// module scope. Anchoring the state on globalThis fixes both layers in one
+// step — every plugin instance in the same process points at the same Map.
+//
+// Maps that MUST be shared (read/written across hooks that can land on
+// different instances during one delivery):
+//   - finalTaintBySession        (agent_end → message_sending)
+//   - turnStartTaintBySession    (before_prompt_build / inbound_claim → agent_end)
+//   - lastImpactedToolBySession  (after_tool_call → agent_end)
+//   - blockedToolsBySession      (before_tool_call → agent_end clear)
+// Maps that can stay function-scoped (read+written only inside one instance's
+// own hook chain): turnStartTimes, lastLlmNodeBySession, sessionAgentMap.
+
+type FinalTaintEntry = {
+  startLevel: TrustLevel;
+  startReason: string;
+  endLevel: TrustLevel;
+  endReason: string;
+  impactedTool: string;
+  uriTaintRecords: UriTaintRecord[];
+};
+
+type TurnStartTaintEntry = { level: TrustLevel; reason: string };
+
+type ProvenanceProcessState = {
+  finalTaintBySession: Map<string, FinalTaintEntry>;
+  turnStartTaintBySession: Map<string, TurnStartTaintEntry>;
+  lastImpactedToolBySession: Map<string, string>;
+  blockedToolsBySession: Map<string, Set<string>>;
+  /** Bumped each time the module is evaluated; used to detect duplicate loads. */
+  moduleLoadCount: number;
+};
+
+const PROVENANCE_GLOBAL_KEY = Symbol.for(
+  "openclaw.provenance.processState.v1",
+);
+
+function getProcessState(): ProvenanceProcessState {
+  const g = globalThis as unknown as Record<symbol, ProvenanceProcessState | undefined>;
+  let state = g[PROVENANCE_GLOBAL_KEY];
+  if (!state) {
+    state = {
+      finalTaintBySession: new Map<string, FinalTaintEntry>(),
+      turnStartTaintBySession: new Map<string, TurnStartTaintEntry>(),
+      lastImpactedToolBySession: new Map<string, string>(),
+      blockedToolsBySession: new Map<string, Set<string>>(),
+      moduleLoadCount: 0,
+    };
+    g[PROVENANCE_GLOBAL_KEY] = state;
+  }
+  state.moduleLoadCount += 1;
+  return state;
+}
+
+const __provenanceProcessState = getProcessState();
+const finalTaintBySession = __provenanceProcessState.finalTaintBySession;
+const turnStartTaintBySession = __provenanceProcessState.turnStartTaintBySession;
+const lastImpactedToolBySession = __provenanceProcessState.lastImpactedToolBySession;
+const blockedToolsBySession = __provenanceProcessState.blockedToolsBySession;
+
 /**
  * Register the security/provenance hooks.
  */
@@ -588,10 +671,9 @@ export function registerSecurityHooks(
     },
   });
 
-  // Per-session state
+  // Per-session state (instance-local maps that don't need cross-instance
+  // sharing; the maps that DO need sharing are declared at module scope above).
   const lastLlmNodeBySession = new Map<string, string>();
-  const blockedToolsBySession = new Map<string, Set<string>>();
-  const lastImpactedToolBySession = new Map<string, string>();
   // (lastProcessedMessageCount removed — .approve replaced by /approve-exec command)
   const sessionAgentMap = new Map<string, string>();
   // trustResetPendingBySession and trustResetRunIdBySession removed —
@@ -1126,20 +1208,6 @@ export function registerSecurityHooks(
   // Track sessionKey from before_tool_call so after_tool_call can use it
   // (core passes sessionKey: undefined to after_tool_call in some code paths)
   let lastToolCallSessionKey = "unknown";
-  const turnStartTaintBySession = new Map<string, { level: TrustLevel; reason: string }>();
-  // Final-taint snapshot pumped from agent_end → consumed by message_sending
-  // for the developer-mode footer. Cleared after one footer is rendered.
-  const finalTaintBySession = new Map<
-    string,
-    {
-      startLevel: TrustLevel;
-      startReason: string;
-      endLevel: TrustLevel;
-      endReason: string;
-      impactedTool: string;
-      uriTaintRecords: UriTaintRecord[];
-    }
-  >();
 
   // --- before_agent_start ---
   // NOTE: This hook may not fire on all OpenClaw versions. Watermark clearing
