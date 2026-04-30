@@ -1838,14 +1838,45 @@ export function registerSecurityHooks(
       // final taint info from the matching agent_end above.
       if (!developerMode) return undefined;
       const sessionKey = ctx.sessionKey ?? "unknown";
-      const final = finalTaintBySession.get(sessionKey);
-      if (!final) return undefined;
 
       const content = event.content;
       if (typeof content !== "string" || content.length === 0) return undefined;
       const trimmed = content.trim();
       if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return undefined;
       if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return undefined;
+
+      // Two paths to footer data:
+      //   (1) agent_end already staged finalTaintBySession (preferred path,
+      //       includes uriTaintRecords for the sources summary).
+      //   (2) agent_end hasn't completed yet — it fires fire-and-forget
+      //       (`void hookRunner.runAgentEnd(...)`) from the agent harness,
+      //       so message_sending can race ahead of it. We must NOT depend
+      //       on staging; compute from live state as a fallback. Without
+      //       this fallback the footer alternates per-turn based on which
+      //       async path wins the microtask race.
+      let final = finalTaintBySession.get(sessionKey);
+      let consumed = false;
+      if (final) {
+        consumed = true;
+      } else {
+        const graph = store.getActive(sessionKey);
+        const watermark = watermarkStore.getLevel(sessionKey);
+        const endLevel: TrustLevel = graph?.maxTaint ?? watermark?.level ?? "trusted";
+        const endReason = graph
+          ? buildTaintReason(graph, watermark?.reason)
+          : watermark?.reason ?? "unknown";
+        const turnStart = turnStartTaintBySession.get(sessionKey);
+        final = {
+          startLevel: turnStart?.level ?? "trusted",
+          startReason: turnStart?.reason ?? "unknown",
+          endLevel,
+          endReason,
+          impactedTool: lastImpactedToolBySession.get(sessionKey) ?? "none",
+          // URI summary is only populated by agent_end's full graph walk;
+          // omit it on the fallback path rather than racing on a partial graph.
+          uriTaintRecords: [],
+        };
+      }
 
       const taintEmoji = (level: string) =>
         level === "trusted" ? "🟢"
@@ -1860,8 +1891,9 @@ export function registerSecurityHooks(
         `\`${taintEmoji(final.startLevel)} ${final.startLevel} (${truncate(final.startReason, 60)}) → ` +
         `${taintEmoji(final.endLevel)} ${final.endLevel} (${truncate(final.endReason, 60)}) | ` +
         `impacted: ${final.impactedTool}${uriPart}\``;
-      // Single-shot: clear so we don't append on subsequent chunks.
-      finalTaintBySession.delete(sessionKey);
+      // Only delete if we consumed a staged entry. On the fallback path
+      // there's nothing to delete; agent_end will overwrite shortly.
+      if (consumed) finalTaintBySession.delete(sessionKey);
       return { content: content + "\n" + footer };
     }),
   );
