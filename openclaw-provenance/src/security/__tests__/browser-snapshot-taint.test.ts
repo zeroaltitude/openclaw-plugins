@@ -171,7 +171,13 @@ describe("Browser snapshot taint deferral", () => {
   });
 
   it("after_tool_call with untrusted URL escalates taint", () => {
-    const { api, logger, store } = setup();
+    // Default catch-all https://** classifies unknown hosts as 'external'
+    // (89136a0: "the web is an untrusted source but not adversarial by
+    // default"). To exercise the 'untrusted' escalation path, declare the
+    // hostile domain explicitly — mirrors the real-world override pattern.
+    const { api, logger, store } = setup({
+      uriTrust: { "https://evil-site.example.com/**": "untrusted" },
+    });
 
     simulateBrowserToolCall(api, ownerCtx, "snapshot", {
       targetId: "tab-xyz",
@@ -292,7 +298,10 @@ describe("Browser snapshot taint deferral", () => {
   // ── URL extraction from content text (MCP standard format) ──
 
   it("after_tool_call extracts URL from content text JSON and escalates for untrusted site", () => {
-    const { api, logger, store } = setup();
+    // See note above: declare the hostile host as 'untrusted' explicitly.
+    const { api, logger, store } = setup({
+      uriTrust: { "https://evil-site.example.com/**": "untrusted" },
+    });
 
     simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
 
@@ -346,7 +355,10 @@ describe("Browser snapshot taint deferral", () => {
   });
 
   it("after_tool_call handles bare 'browser' toolName when params.action is missing", () => {
-    const { api, logger, store } = setup();
+    // See note above: declare the hostile host as 'untrusted' explicitly.
+    const { api, logger, store } = setup({
+      uriTrust: { "https://hackers.com/**": "untrusted" },
+    });
 
     simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
 
@@ -440,7 +452,10 @@ describe("Browser snapshot taint deferral", () => {
   });
 
   it("browser.navigate to untrusted site escalates taint", () => {
-    const { api, store } = setup();
+    // See note above: declare the hostile host as 'untrusted' explicitly.
+    const { api, store } = setup({
+      uriTrust: { "https://hackers.com/**": "untrusted" },
+    });
 
     api.fire("context_assembled", {
       systemPrompt: "test",
@@ -471,7 +486,10 @@ describe("Browser snapshot taint deferral", () => {
   });
 
   it("two snapshots: trusted site then untrusted site escalates correctly", () => {
-    const { api, store } = setup();
+    // See note above: declare the hostile host as 'untrusted' explicitly.
+    const { api, store } = setup({
+      uriTrust: { "https://hackers.com/**": "untrusted" },
+    });
 
     // Turn 1: snapshot openclaw.ai — stays trusted
     simulateBrowserToolCall(api, ownerCtx, "snapshot", {});
