@@ -65,7 +65,10 @@ async function runTests() {
     console.log("  Scores:", scores.map(s => `${s.label}: ${s.score.toFixed(3)}`).join(", "));
     assert(hasSalientConcepts(scores, 0.5), "Has salient concepts above 0.5");
     const pref = scores.find(s => s.label === "preference");
-    assert(pref && pref.score > 0.3, "Preference scores > 0.3", pref ? `score=${pref.score.toFixed(3)}` : "not found");
+    // Threshold lowered from 0.3 to 0.2: expanded DEFAULT_CONCEPT_LABELS in eca8862
+    // (2026-03-05) added competing labels that redistribute multi-label NLI confidence.
+    // Tracked for thorough rework in openclaw-vestige-32a.
+    assert(pref && pref.score > 0.2, "Preference scores > 0.2", pref ? `score=${pref.score.toFixed(3)}` : "not found");
   }
 
   {
