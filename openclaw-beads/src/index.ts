@@ -37,6 +37,15 @@ import {
   type BdRepo,
   type BdMutateInput,
 } from "./beads-cli.js";
+import { TtlCache } from "./ttl-cache.js";
+
+export { TtlCache } from "./ttl-cache.js";
+
+const DEFAULT_PROMPT_BLOCK_TTL_MS = 60_000;
+const DEFAULT_READY_API_TTL_MS = 20_000;
+
+const promptBlockCache = new TtlCache<string>();
+const readyApiCache = new TtlCache<unknown>();
 
 interface PluginApi {
   registerHttpRoute(params: {
@@ -86,6 +95,17 @@ interface BeadsPluginConfig {
     startupWake?: boolean;
     startupWakeTarget?: string;
     startupWakeDelayMs?: number;
+    /**
+     * TTL for the cached `<plans_and_tasks>` block injected into agent
+     * turns. Defaults to 60s. Set to 0 to disable caching (still dedupes
+     * concurrent calls). Hot path: fires every prompt build.
+     */
+    readyCacheTtlMs?: number;
+    /**
+     * TTL for the cached `/beads/api/ready` response. Defaults to 20s.
+     * Set to 0 to disable caching (still dedupes concurrent calls).
+     */
+    readyApiCacheTtlMs?: number;
     /**
      * Per-session resume after gateway restart. When the gateway boots, the
      * plugin walks `~/.openclaw/agents/*\/sessions/sessions.json`, identifies
@@ -396,24 +416,34 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
   const limit = Math.max(1, config.runLoop?.readyLimitPerRepo ?? 1);
   const includeUnassigned = config.runLoop?.includeUnassigned ?? false;
   const actionableRepos = repos.filter((repo) => !/test/i.test(repo.name));
-  const results = await Promise.all(
-    actionableRepos.map(async (repo) => {
-      try {
-        const ready = await readyIssues(Math.max(10, limit * 4), {
-          cwd: repo.path,
-          bdBinary: config.bdBinary,
-          timeoutMs: 4_000,
-        });
-        const issues = ready
-          .filter((issue) => shouldIncludeReadyIssue(issue, agentId, includeUnassigned))
-          .slice(0, limit);
-        return { repo, issues };
-      } catch (err: any) {
-        return { repo, issues: [] as BdIssue[], error: String(err?.message ?? err).slice(0, 300) };
-      }
-    }),
-  );
-  return formatPlansAndTasksBlock({ agentId, repos: results });
+  const ttlMs = Math.max(0, config.runLoop?.readyCacheTtlMs ?? DEFAULT_PROMPT_BLOCK_TTL_MS);
+  const cacheKey = JSON.stringify({
+    agentId,
+    limit,
+    includeUnassigned,
+    bdBinary: config.bdBinary ?? "",
+    repos: actionableRepos.map((r) => [r.name, r.path]),
+  });
+  return promptBlockCache.getOrLoad(cacheKey, ttlMs, async () => {
+    const results = await Promise.all(
+      actionableRepos.map(async (repo) => {
+        try {
+          const ready = await readyIssues(Math.max(10, limit * 4), {
+            cwd: repo.path,
+            bdBinary: config.bdBinary,
+            timeoutMs: 4_000,
+          });
+          const issues = ready
+            .filter((issue) => shouldIncludeReadyIssue(issue, agentId, includeUnassigned))
+            .slice(0, limit);
+          return { repo, issues };
+        } catch (err: any) {
+          return { repo, issues: [] as BdIssue[], error: String(err?.message ?? err).slice(0, 300) };
+        }
+      }),
+    );
+    return formatPlansAndTasksBlock({ agentId, repos: results });
+  });
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): boolean {
@@ -797,58 +827,68 @@ export function activate(api: PluginApi): void {
       const limit = Math.max(1, Math.min(10, Number.isFinite(rawLimit) ? rawLimit : 1));
       const includeTest = params.get("includeTest") === "1" || params.get("includeTest") === "true";
       const repos = (cfg(api).repos ?? []).filter((repo) => includeTest || !/test/i.test(repo.name));
+      const ttlMs = Math.max(0, cfg(api).runLoop?.readyApiCacheTtlMs ?? DEFAULT_READY_API_TTL_MS);
+      const cacheKey = JSON.stringify({
+        limit,
+        includeTest,
+        bdBinary: cfg(api).bdBinary ?? "",
+        repos: repos.map((r) => [r.name, r.path]),
+      });
       try {
-        const results = await Promise.all(
-          repos.map(async (repo) => {
-            try {
-              const issues = await readyIssues(limit, {
-                cwd: repo.path,
-                bdBinary: cfg(api).bdBinary,
-                timeoutMs: 5_000,
-              });
-              const issueIds = new Set(issues.map((issue) => issue.id));
-              const edges = await listEdges(issues, { cwd: repo.path, bdBinary: cfg(api).bdBinary, timeoutMs: 5_000 });
-              const behindIds = new Set(edges.filter((edge) => issueIds.has(edge.to)).map((edge) => edge.from));
-              // Always pull the full issue list so we can derive both 'behind'
-              // (dep-blocked by a ready issue) and 'stuck' (open issues in a
-              // non-actionable status like blocked / deferred / waiting_for_*).
-              const allIssues = await listIssues({ cwd: repo.path, bdBinary: cfg(api).bdBinary });
-              const isStuckStatus = (s: unknown): boolean => {
-                const v = String(s ?? "").toLowerCase();
-                if (v === "blocked" || v === "deferred") return true;
-                if (v.startsWith("waiting_") || v.startsWith("waiting-")) return true;
-                return false;
-              };
-              const isOpenIsh = (s: unknown): boolean => {
-                const v = String(s ?? "").toLowerCase();
-                return v !== "closed" && v !== "done" && v !== "resolved";
-              };
-              const behind = allIssues
-                .filter((issue) => behindIds.has(issue.id) && !issueIds.has(issue.id))
-                .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
-              const behindIdSet = new Set(behind.map((i) => i.id));
-              const stuck = allIssues
-                .filter((issue) =>
-                  isOpenIsh(issue.status) &&
-                  isStuckStatus(issue.status) &&
-                  !issueIds.has(issue.id) &&
-                  !behindIdSet.has(issue.id),
-                )
-                .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
-              return { repo: repo.name, path: repo.path, issues, behind, stuck };
-            } catch (err: any) {
-              return {
-                repo: repo.name,
-                path: repo.path,
-                issues: [] as BdIssue[],
-                behind: [] as BdIssue[],
-                stuck: [] as BdIssue[],
-                error: String(err?.message ?? err).slice(0, 300),
-              };
-            }
-          }),
-        );
-        return sendJson(res, 200, { repos: results, limit });
+        const body = await readyApiCache.getOrLoad(cacheKey, ttlMs, async () => {
+          const results = await Promise.all(
+            repos.map(async (repo) => {
+              try {
+                const issues = await readyIssues(limit, {
+                  cwd: repo.path,
+                  bdBinary: cfg(api).bdBinary,
+                  timeoutMs: 5_000,
+                });
+                const issueIds = new Set(issues.map((issue) => issue.id));
+                const edges = await listEdges(issues, { cwd: repo.path, bdBinary: cfg(api).bdBinary, timeoutMs: 5_000 });
+                const behindIds = new Set(edges.filter((edge) => issueIds.has(edge.to)).map((edge) => edge.from));
+                // Always pull the full issue list so we can derive both 'behind'
+                // (dep-blocked by a ready issue) and 'stuck' (open issues in a
+                // non-actionable status like blocked / deferred / waiting_for_*).
+                const allIssues = await listIssues({ cwd: repo.path, bdBinary: cfg(api).bdBinary });
+                const isStuckStatus = (s: unknown): boolean => {
+                  const v = String(s ?? "").toLowerCase();
+                  if (v === "blocked" || v === "deferred") return true;
+                  if (v.startsWith("waiting_") || v.startsWith("waiting-")) return true;
+                  return false;
+                };
+                const isOpenIsh = (s: unknown): boolean => {
+                  const v = String(s ?? "").toLowerCase();
+                  return v !== "closed" && v !== "done" && v !== "resolved";
+                };
+                const behind = allIssues
+                  .filter((issue) => behindIds.has(issue.id) && !issueIds.has(issue.id))
+                  .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
+                const behindIdSet = new Set(behind.map((i) => i.id));
+                const stuck = allIssues
+                  .filter((issue) =>
+                    isOpenIsh(issue.status) &&
+                    isStuckStatus(issue.status) &&
+                    !issueIds.has(issue.id) &&
+                    !behindIdSet.has(issue.id),
+                  )
+                  .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
+                return { repo: repo.name, path: repo.path, issues, behind, stuck };
+              } catch (err: any) {
+                return {
+                  repo: repo.name,
+                  path: repo.path,
+                  issues: [] as BdIssue[],
+                  behind: [] as BdIssue[],
+                  stuck: [] as BdIssue[],
+                  error: String(err?.message ?? err).slice(0, 300),
+                };
+              }
+            }),
+          );
+          return { repos: results, limit };
+        });
+        return sendJson(res, 200, body);
       } catch (err: any) {
         log.warn(`[beads] /beads/api/ready failed:`, err?.message ?? err);
         return sendJson(res, 500, { error: String(err?.message ?? err) });

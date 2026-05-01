@@ -95,6 +95,16 @@
           "startupWakeDelayMs": {
             "type": "number",
             "default": 1000
+          },
+          "readyCacheTtlMs": {
+            "type": "number",
+            "description": "TTL for the cached <plans_and_tasks> prompt block. The plugin shells out to `bd ready` per repo on every agent turn — caching here is what keeps the gateway off the CPU. Set to 0 to disable caching (concurrent calls still dedupe).",
+            "default": 60000
+          },
+          "readyApiCacheTtlMs": {
+            "type": "number",
+            "description": "TTL for the cached /beads/api/ready response (per limit/includeTest/repos signature). Set to 0 to disable caching (concurrent calls still dedupe).",
+            "default": 20000
           }
         }
       }

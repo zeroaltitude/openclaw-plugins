@@ -218,7 +218,7 @@
       const [showClosed, setShowClosed] = useState(false);
       const [pollIntervalSec, setPollIntervalSec] = useState(() => {
         const v = Number(localStorage.getItem("beads.pollIntervalSec"));
-        return Number.isFinite(v) && v >= 0 ? v : 15;
+        return Number.isFinite(v) && v >= 0 ? v : 60;
       });
       const [lastSyncedAt, setLastSyncedAt] = useState(null);
       const [syncTick, setSyncTick] = useState(0);
