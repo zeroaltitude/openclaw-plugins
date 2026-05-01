@@ -1,0 +1,27 @@
+{
+  "name": "@openclaw/beads",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenClaw plugin: gateway-mounted /beads UI + API for visualizing and managing Beads issue tracker repos as DAGs",
+  "main": "dist/index.js",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.1",
+    "typescript": "^5.4.0"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "ui",
+    "README.md"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "id": "beads",
+  "name": "Beads Visualizer",
+  "version": "0.1.0",
+  "description": "Gateway-mounted /beads UI + API for browsing the Beads issue tracker as a DAG.",
+  "author": "Tank (Eddie's stack)",
+  "main": "dist/index.js",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "repos": {
+        "type": "array",
+        "description": "Configured Beads repos to expose. Each entry: { name, path }. The plugin shells out to `bd --cwd <path>`.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "path"],
+          "properties": {
+            "name": { "type": "string", "description": "Display name (e.g., 'openclaw-vestige')" },
+            "path": { "type": "string", "description": "Absolute path to the repo containing .beads/" }
+          }
+        },
+        "default": []
+      },
+      "bdBinary": {
+        "type": "string",
+        "description": "Path to the `bd` executable.",
+        "default": "bd"
+      },
+      "defaultRepo": {
+        "type": "string",
+        "description": "Repo name to load by default in the UI (must match a repos[].name)."
+      }
+    }
+  },
+  "uiHints": {
+    "repos": { "label": "Beads Repos" },
+    "bdBinary": { "label": "bd Binary Path", "placeholder": "bd" },
+    "defaultRepo": { "label": "Default Repo Name" }
+  }
+}

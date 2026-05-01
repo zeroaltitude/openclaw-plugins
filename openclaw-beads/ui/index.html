@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beads — DAG</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body, #root { height: 100%; margin: 0; padding: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #0c0d0f; color: #e5e7eb; }
+    button, input, textarea, select { font: inherit; color: inherit; }
+
+    .topbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #1f2937; background: #11131a; height: 49px; }
+    .topbar h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
+    .topbar select { background: #0c0d0f; color: #e5e7eb; border: 1px solid #374151; border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+    .topbar .stat { font-size: 12px; color: #9ca3af; }
+    .topbar .check { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #9ca3af; user-select: none; }
+    .topbar .check input { margin: 0; accent-color: #3b82f6; }
+    .topbar .err-pill { color: #fca5a5; font-size: 12px; padding: 2px 8px; border: 1px solid #7f1d1d; border-radius: 4px; cursor: help; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topbar .spacer { flex: 1; }
+    .topbar .api-links { display: flex; gap: 6px; font-size: 11px; }
+    .topbar .api-links a { color: #93c5fd; text-decoration: none; padding: 2px 6px; border: 1px solid #1f2937; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, monospace; }
+    .topbar .api-links a:hover { background: #1f2937; color: #dbeafe; }
+    .topbar .new-btn { background: #1e40af; color: white; border: 1px solid #2563eb; border-radius: 6px; padding: 4px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
+    .topbar .new-btn:hover { background: #2563eb; }
+    .topbar .ver { font-size: 10px; color: #4b5563; font-family: ui-monospace, SFMono-Regular, monospace; padding: 2px 6px; border: 1px solid #1f2937; border-radius: 4px; }
+
+    .err-banner { position: absolute; left: 16px; right: 16px; top: 60px; background: #1f0d0d; border: 1px solid #7f1d1d; border-radius: 6px; padding: 10px 14px; font-size: 12px; color: #fecaca; font-family: ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; z-index: 10; }
+    .err-banner button { float: right; background: transparent; color: #fca5a5; border: 1px solid #7f1d1d; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; margin-left: 8px; }
+    .err-banner .retry { color: #93c5fd; border-color: #1e40af; }
+
+    .main { position: absolute; inset: 49px 0 0 0; display: flex; }
+    .canvas-wrap { flex: 1; overflow: hidden; position: relative; }
+    .empty { padding: 32px; color: #9ca3af; }
+    .legend { position: absolute; right: 16px; bottom: 16px; padding: 8px 10px; background: #11131a; border: 1px solid #1f2937; border-radius: 6px; font-size: 11px; line-height: 1.5; z-index: 1; }
+    .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+
+    .detail { width: 420px; flex-shrink: 0; border-left: 1px solid #1f2937; background: #0f1117; overflow-y: auto; padding: 16px; }
+    .detail .close-x { float: right; background: transparent; color: #9ca3af; border: none; font-size: 20px; cursor: pointer; line-height: 1; padding: 0 4px; }
+    .detail .close-x:hover { color: #e5e7eb; }
+    .detail .id { font-family: ui-monospace, SFMono-Regular, monospace; color: #93c5fd; font-size: 12px; }
+    .detail h2 { font-size: 16px; margin: 6px 0 8px; }
+    .detail .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 11px; color: #9ca3af; margin: 8px 0 12px; }
+    .detail .meta span { display: inline-flex; align-items: center; min-height: 26px; padding: 0 8px; border: 1px solid #1f2937; border-radius: 4px; background: #0c0d0f; line-height: 1; }
+    .detail .meta select { width: auto; display: inline-flex; min-height: 26px; margin-top: 0; padding: 0 28px 0 8px; font-size: 11px; line-height: 1; border-radius: 4px; }
+    .detail .desc { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding: 12px; background: #0c0d0f; border: 1px solid #1f2937; border-radius: 6px; max-height: 300px; overflow-y: auto; }
+    .detail input, .detail textarea, .detail select { width: 100%; background: #0c0d0f; color: #e5e7eb; border: 1px solid #374151; border-radius: 6px; padding: 6px 10px; font-size: 13px; margin-top: 4px; }
+    .detail textarea { min-height: 120px; font-family: ui-monospace, SFMono-Regular, monospace; resize: vertical; }
+    .detail label { font-size: 11px; color: #9ca3af; display: block; margin-top: 10px; }
+    .detail .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    .detail .actions button { padding: 6px 12px; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #e5e7eb; cursor: pointer; font-size: 12px; }
+    .detail .actions button:hover { background: #374151; }
+    .detail .actions .primary { background: #1e40af; border-color: #2563eb; }
+    .detail .actions .primary:hover { background: #2563eb; }
+    .detail .actions .danger { background: #7f1d1d; border-color: #b91c1c; }
+    .detail .actions .danger:hover { background: #b91c1c; }
+    .detail .saving { font-size: 11px; color: #fbbf24; }
+    .detail .deps { margin-top: 16px; padding: 12px; background: #0c0d0f; border: 1px solid #1f2937; border-radius: 6px; }
+    .detail .deps h3 { font-size: 12px; margin: 0 0 6px; color: #9ca3af; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+    .detail .dep-row { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 0; font-family: ui-monospace, SFMono-Regular, monospace; }
+    .detail .dep-row a { color: #93c5fd; text-decoration: none; cursor: pointer; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .detail .dep-row a:hover { text-decoration: underline; }
+    .detail .dep-row .x { color: #fca5a5; cursor: pointer; padding: 0 6px; border: 1px solid #7f1d1d; border-radius: 4px; font-size: 11px; background: transparent; }
+    .detail .dep-row .x:hover { background: #7f1d1d; color: white; }
+    .detail .dep-empty { color: #6b7280; font-size: 11px; font-style: italic; padding: 4px 0; }
+    .detail .add-dep { margin-top: 8px; display: flex; gap: 4px; }
+    .detail .add-dep select { flex: 1; }
+    .detail .add-dep button { padding: 4px 12px; border-radius: 6px; border: 1px solid #2563eb; background: #1e40af; color: white; cursor: pointer; font-size: 11px; }
+    .detail .add-dep button:hover { background: #2563eb; }
+    .detail .add-dep button:disabled { background: #374151; border-color: #4b5563; cursor: not-allowed; }
+
+    .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); z-index: 100; display: flex; align-items: center; justify-content: center; }
+    .modal { background: #11131a; border: 1px solid #1f2937; border-radius: 8px; padding: 24px; min-width: 480px; max-width: 600px; max-height: 80vh; overflow-y: auto; }
+    .modal h2 { margin: 0 0 16px; font-size: 16px; }
+    .modal label { display: block; font-size: 11px; color: #9ca3af; margin-top: 12px; }
+    .modal input, .modal textarea, .modal select { width: 100%; background: #0c0d0f; color: #e5e7eb; border: 1px solid #374151; border-radius: 6px; padding: 8px 10px; font-size: 13px; margin-top: 4px; }
+    .modal textarea { min-height: 140px; font-family: ui-monospace, SFMono-Regular, monospace; resize: vertical; }
+    .modal .row { display: flex; gap: 12px; }
+    .modal .row > * { flex: 1; }
+    .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .modal .actions button { padding: 8px 16px; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #e5e7eb; cursor: pointer; font-size: 13px; }
+    .modal .actions .primary { background: #1e40af; border-color: #2563eb; }
+
+    .node-card { background: #11131a; border: 2px solid var(--status-color, #3b82f6); border-radius: 4px; padding: 5px 9px; height: 100%; display: flex; flex-direction: column; justify-content: center; cursor: pointer; pointer-events: auto; position: relative; }
+    .node-card:hover { background: #1a1d27; box-shadow: 0 0 0 1px var(--status-color, #3b82f6); }
+    .node-card.selected { outline: 2px solid #93c5fd; outline-offset: -2px; }
+    .node-card.drop-valid { outline: 2px dashed #22c55e; outline-offset: -2px; background: #0a1f12; }
+    .node-card.drop-invalid { outline: 2px dashed #4b5563; outline-offset: -2px; opacity: 0.4; }
+    .node-card .node-owner { font-size: 10px; color: #9ca3af; margin-top: 3px; font-family: ui-monospace, SFMono-Regular, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-card .node-owner.unset { color: #6b7280; font-style: italic; }
+    .link-anchor {
+      position: absolute;
+      right: 4px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #3b82f6;
+      border: 2px solid #0c0d0f;
+      cursor: grab;
+      box-shadow: 0 0 0 2px #11131a, 0 0 8px rgba(59, 130, 246, 0.7);
+      z-index: 5;
+    }
+    .link-anchor:hover { background: #60a5fa; }
+    .link-anchor:active { cursor: grabbing; background: #93c5fd; }
+    .node-card .node-id { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; color: #93c5fd; }
+    .node-card .node-title { font-size: 11px; color: #e5e7eb; margin-top: 2px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "reaflow": "https://esm.sh/reaflow@5.3.4?deps=react@18.3.1,react-dom@18.3.1"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="root"><div class="empty">Loading…</div></div>
+
+  <script type="module">
+    import React, { useEffect, useMemo, useState, useCallback } from "react";
+    import { createRoot } from "react-dom/client";
+    import { Canvas, Node as ReaNode, Edge as ReaEdge } from "reaflow";
+
+    const STATUS_COLORS = {
+      open:        "#3b82f6",
+      in_progress: "#f59e0b",
+      waiting_for_user: "#06b6d4",
+      waiting_for_available_agent: "#ec4899",
+      blocked:     "#ef4444",
+      closed:      "#6b7280",
+      deferred:    "#8b5cf6",
+    };
+    const colorForStatus = (s) => STATUS_COLORS[String(s ?? "open").toLowerCase()] ?? "#3b82f6";
+
+    const ISSUE_TYPES = ["task", "bug", "feature", "epic", "chore", "decision"];
+    const STATUSES = ["open", "in_progress", "waiting_for_user", "waiting_for_available_agent", "blocked", "closed", "deferred"];
+    const DEFAULT_OWNER_OPTIONS = ["any", "eddie", "main", "tank", "narcissus", "smith", "shiva"];
+    const labelForStatus = (s) => String(s || "").replace(/_/g, " ");
+    const pathRepoFromLocation = () => {
+      const parts = window.location.pathname.split("/").filter(Boolean);
+      if (parts[0] !== "beads" || !parts[1] || parts[1] === "api") return null;
+      try { return decodeURIComponent(parts[1]); } catch { return parts[1]; }
+    };
+    const urlForRepo = (repo) => repo ? `/beads/${encodeURIComponent(repo)}` : "/beads";
+    const REFERENCE_LABEL_PREFIX = "ref:";
+    const LEGACY_MEMORY_LABEL_PREFIX = "memory:";
+    const referencesFromLabels = (labels) => {
+      if (!Array.isArray(labels)) return [];
+      const out = [];
+      for (const l of labels) {
+        if (typeof l !== "string") continue;
+        if (l.startsWith(REFERENCE_LABEL_PREFIX)) {
+          const v = l.slice(REFERENCE_LABEL_PREFIX.length);
+          if (v) out.push(v);
+        } else if (l.startsWith(LEGACY_MEMORY_LABEL_PREFIX)) {
+          const v = l.slice(LEGACY_MEMORY_LABEL_PREFIX.length);
+          if (v) out.push(v);
+        }
+      }
+      return out;
+    };
+    const parseReferencesText = (text) =>
+      String(text || "")
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const PRIORITIES = [
+      { v: "0", label: "P0 (highest)" },
+      { v: "1", label: "P1" },
+      { v: "2", label: "P2" },
+      { v: "3", label: "P3" },
+      { v: "4", label: "P4 (lowest)" },
+    ];
+
+    function App() {
+      const [repos, setRepos] = useState([]);
+      const [ownerOptions, setOwnerOptions] = useState(DEFAULT_OWNER_OPTIONS);
+      const [selectedRepo, setSelectedRepo] = useState(null);
+      const [issues, setIssues] = useState([]);
+      const [edges, setEdges] = useState([]);
+      const [error, setError] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [selectedId, setSelectedId] = useState(null);
+      const [creating, setCreating] = useState(false);
+      const [reloadKey, setReloadKey] = useState(0);
+      const [showClosed, setShowClosed] = useState(false);
+
+      useEffect(() => {
+        fetch("/beads/api/repos")
+          .then((r) => r.json())
+          .then((d) => {
+            const nextRepos = d.repos || [];
+            setRepos(nextRepos);
+            setOwnerOptions(Array.isArray(d.ownerOptions) && d.ownerOptions.length ? d.ownerOptions : DEFAULT_OWNER_OPTIONS);
+            const pathRepo = pathRepoFromLocation();
+            const repoNames = new Set(nextRepos.map((r) => r.name));
+            const next = pathRepo && repoNames.has(pathRepo) ? pathRepo : (d.defaultRepo || (nextRepos?.[0]?.name ?? null));
+            setSelectedRepo(next);
+            if (next && pathRepo !== next) window.history.replaceState(null, "", urlForRepo(next));
+          })
+          .catch((e) => setError(String(e)));
+      }, []);
+
+      useEffect(() => {
+        const onPopState = () => {
+          const pathRepo = pathRepoFromLocation();
+          if (pathRepo && repos.some((r) => r.name === pathRepo)) {
+            setSelectedRepo(pathRepo);
+            setSelectedId(null);
+          }
+        };
+        window.addEventListener("popstate", onPopState);
+        return () => window.removeEventListener("popstate", onPopState);
+      }, [repos]);
+
+      useEffect(() => {
+        if (!selectedRepo) return;
+        let cancelled = false;
+        setLoading(true);
+        setError(null);
+        // Clear immediately so Reaflow doesn't relayout the previous repo's
+        // graph under the new repo key while the new data is still loading.
+        setIssues([]);
+        setEdges([]);
+        setSelectedId(null);
+        (async () => {
+          try {
+            const i = await fetch(`/beads/api/issues?repo=${encodeURIComponent(selectedRepo)}`).then((r) => r.json());
+            if (i.error) throw new Error(i.error);
+            const nextIssues = i.issues || [];
+            const ids = nextIssues.map((issue) => issue.id).filter(Boolean).join(",");
+            const d = await fetch(`/beads/api/deps?repo=${encodeURIComponent(selectedRepo)}&ids=${encodeURIComponent(ids)}`).then((r) => r.json());
+            if (d.error) throw new Error(d.error);
+            if (cancelled) return;
+            setIssues(nextIssues);
+            setEdges(d.edges || []);
+          } catch (e) {
+            if (!cancelled) setError(String(e?.message ?? e));
+          } finally {
+            if (!cancelled) setLoading(false);
+          }
+        })();
+        return () => {
+          cancelled = true;
+        };
+      }, [selectedRepo, reloadKey]);
+
+      const refresh = () => setReloadKey((k) => k + 1);
+
+      const visibleIssues = useMemo(
+        () => issues.filter((i) => showClosed || String(i.status || "").toLowerCase() !== "closed"),
+        [issues, showClosed],
+      );
+      const hiddenClosedCount = issues.length - visibleIssues.length;
+
+      const reaflowNodes = useMemo(
+        () =>
+          visibleIssues.map((i) => ({
+            id: i.id,
+            data: i,
+            width: 220,
+            height: 92,
+          })),
+        [visibleIssues],
+      );
+
+      const reaflowEdges = useMemo(() => {
+        const ids = new Set(visibleIssues.map((i) => i.id));
+        return edges
+          .filter((e) => ids.has(e.from) && ids.has(e.to))
+          .map((e, idx) => ({ id: `e-${idx}`, from: e.from, to: e.to }));
+      }, [edges, visibleIssues]);
+
+      const graphLayout = useMemo(() => {
+        const count = visibleIssues.length;
+        const edgeCount = reaflowEdges.length;
+        const adjacency = new Map();
+        for (const issue of visibleIssues) adjacency.set(issue.id, new Set());
+        for (const edge of reaflowEdges) {
+          adjacency.get(edge.from)?.add(edge.to);
+          adjacency.get(edge.to)?.add(edge.from);
+        }
+        const seen = new Set();
+        let components = 0;
+        let largestComponent = 0;
+        for (const issue of visibleIssues) {
+          if (seen.has(issue.id)) continue;
+          components += 1;
+          let size = 0;
+          const stack = [issue.id];
+          seen.add(issue.id);
+          while (stack.length) {
+            const id = stack.pop();
+            size += 1;
+            for (const next of adjacency.get(id) || []) {
+              if (!seen.has(next)) {
+                seen.add(next);
+                stack.push(next);
+              }
+            }
+          }
+          largestComponent = Math.max(largestComponent, size);
+        }
+
+        // ELK layered is the graph algorithm Reaflow already delegates to.
+        // For small graphs, top-down reads naturally. For denser graphs,
+        // left-to-right keeps dependency depth horizontal and lets sibling
+        // fanout/connected components use vertical space instead of running
+        // off the default 2k canvas.
+        const dense = count >= 18 || largestComponent >= 12;
+        const direction = dense ? "RIGHT" : "DOWN";
+        const layers = Math.max(3, Math.ceil(Math.sqrt(Math.max(count, 1))));
+        const maxWidth = dense
+          ? Math.max(4200, Math.min(18000, (largestComponent + components) * 420))
+          : Math.max(2600, Math.min(10000, layers * 700));
+        const maxHeight = dense
+          ? Math.max(2600, Math.min(14000, (Math.ceil(count / 2) + components) * 170))
+          : Math.max(2200, Math.min(12000, count * 190));
+        const nodeNode = dense ? 85 : 75;
+        const layerSpacing = dense ? 180 : 140;
+        const componentSpacing = dense ? 180 : 120;
+        return {
+          direction,
+          maxWidth,
+          maxHeight,
+          label: `${direction.toLowerCase()} · ${components} component${components === 1 ? "" : "s"}`,
+          options: {
+            "elk.algorithm": "org.eclipse.elk.layered",
+            "elk.direction": direction,
+            "elk.separateConnectedComponents": "true",
+            separateConnectedComponents: "true",
+            "elk.spacing.componentComponent": String(componentSpacing),
+            "spacing.componentComponent": String(componentSpacing),
+            "elk.spacing.nodeNode": String(nodeNode),
+            spacing: String(nodeNode),
+            "elk.layered.spacing.nodeNodeBetweenLayers": String(layerSpacing),
+            "spacing.nodeNodeBetweenLayers": String(layerSpacing),
+            "elk.layered.spacing.edgeNodeBetweenLayers": "70",
+            "org.eclipse.elk.layered.layering.strategy": "NETWORK_SIMPLEX",
+            "org.eclipse.elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
+            "org.eclipse.elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+            "org.eclipse.elk.layered.nodePlacement.bk.fixedAlignment": "BALANCED",
+            "org.eclipse.elk.edgeRouting": "ORTHOGONAL",
+            "elk.padding": "[left=80, top=80, right=160, bottom=120]",
+          },
+        };
+      }, [visibleIssues, reaflowEdges]);
+
+      const selectedIssue = visibleIssues.find((i) => i.id === selectedId);
+
+      useEffect(() => {
+        if (selectedId && !visibleIssues.some((i) => i.id === selectedId)) setSelectedId(null);
+      }, [selectedId, visibleIssues]);
+
+      const onNodeClick = useCallback((id) => setSelectedId(id), []);
+      const [dragSourceId, setDragSourceId] = useState(null);
+
+      const linkIssues = useCallback(
+        async (fromId, toId) => {
+          if (!selectedRepo || !fromId || !toId || fromId === toId) return;
+          try {
+            const r = await fetch(`/beads/api/deps/edit?repo=${encodeURIComponent(selectedRepo)}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ from: fromId, to: toId }),
+            });
+            const j = await r.json();
+            if (j.error) throw new Error(j.error);
+            refresh();
+          } catch (e) {
+            setError(`Edge create failed: ${String(e?.message ?? e)}`);
+          }
+        },
+        [selectedRepo],
+      );
+
+      return React.createElement(
+        React.Fragment,
+        null,
+        // ── Topbar ───────────────────────────────────────────────────
+        React.createElement(
+          "div",
+          { className: "topbar" },
+          React.createElement("h1", null, "🪡 Beads"),
+          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.20"),
+          React.createElement(
+            "select",
+            {
+              value: selectedRepo ?? "",
+              onChange: (e) => {
+                const next = e.target.value;
+                setSelectedRepo(next);
+                setSelectedId(null);
+                window.history.pushState(null, "", urlForRepo(next));
+              },
+            },
+            repos.length === 0
+              ? [React.createElement("option", { key: "_none", value: "" }, "(no repos configured)")]
+              : repos.map((r) =>
+                  React.createElement("option", { key: r.name, value: r.name }, r.name),
+                ),
+          ),
+          React.createElement(
+            "span",
+            { className: "stat" },
+            `${visibleIssues.length}${hiddenClosedCount ? `/${issues.length}` : ""} issues · ${reaflowEdges.length} edges · ${graphLayout.label}`,
+          ),
+          React.createElement(
+            "label",
+            { className: "check" },
+            React.createElement("input", {
+              type: "checkbox",
+              checked: showClosed,
+              onChange: (e) => setShowClosed(e.target.checked),
+            }),
+            "show closed",
+          ),
+          loading && React.createElement("span", { className: "stat" }, "loading…"),
+          error &&
+            React.createElement(
+              "span",
+              { className: "err-pill", title: error },
+              "error — see banner",
+            ),
+          React.createElement("span", { className: "spacer" }),
+          React.createElement(
+            "button",
+            {
+              className: "new-btn",
+              onClick: () => setCreating(true),
+              disabled: !selectedRepo,
+            },
+            "+ New issue",
+          ),
+          React.createElement(
+            "span",
+            { className: "api-links" },
+            React.createElement(
+              "a",
+              { href: "/beads/api/repos", target: "_blank", rel: "noreferrer" },
+              "/repos",
+            ),
+            React.createElement(
+              "a",
+              {
+                href: selectedRepo
+                  ? `/beads/api/issues?repo=${encodeURIComponent(selectedRepo)}`
+                  : "/beads/api/issues",
+                target: "_blank",
+                rel: "noreferrer",
+              },
+              "/issues",
+            ),
+            React.createElement(
+              "a",
+              {
+                href: selectedRepo
+                  ? `/beads/api/deps?repo=${encodeURIComponent(selectedRepo)}`
+                  : "/beads/api/deps",
+                target: "_blank",
+                rel: "noreferrer",
+              },
+              "/deps",
+            ),
+          ),
+        ),
+
+        // ── Error banner ─────────────────────────────────────────────
+        error &&
+          React.createElement(
+            "div",
+            { className: "err-banner" },
+            React.createElement("button", { onClick: () => setError(null) }, "dismiss"),
+            React.createElement(
+              "button",
+              {
+                className: "retry",
+                onClick: () => {
+                  const r = selectedRepo;
+                  setSelectedRepo(null);
+                  setTimeout(() => setSelectedRepo(r), 0);
+                },
+              },
+              "retry",
+            ),
+            error,
+          ),
+
+        // ── Main body ────────────────────────────────────────────────
+        React.createElement(
+          "div",
+          { className: "main" },
+          React.createElement(
+            "div",
+            { className: "canvas-wrap" },
+            reaflowNodes.length === 0
+              ? React.createElement(
+                  "div",
+                  { className: "empty" },
+                  loading ? "Loading…" : "No issues yet. Click + New issue to file one.",
+                )
+              : React.createElement(Canvas, {
+                  key: `${selectedRepo}-${graphLayout.direction}-${issues.length}-${reaflowEdges.length}`,
+                  nodes: reaflowNodes,
+                  edges: reaflowEdges,
+                  fit: true,
+                  pannable: true,
+                  // Reaflow's scroll-pan wheel handler uses deltaY * -0.02,
+                  // so one physical mouse notch can jump the entire zoom range.
+                  // Drag-pan avoids hijacking the wheel; pinch zoom remains available.
+                  panType: "drag",
+                  zoomable: true,
+                  minZoom: -0.75,
+                  maxZoom: 1.25,
+                  direction: graphLayout.direction,
+                  layoutOptions: graphLayout.options,
+                  maxWidth: graphLayout.maxWidth,
+                  maxHeight: graphLayout.maxHeight,
+                  selections: selectedId ? [selectedId] : [],
+                  node: React.createElement(ReaNode, {
+                    style: (node) => ({
+                      fill: "#11131a",
+                      stroke: colorForStatus(node?.data?.status),
+                      strokeWidth: 2,
+                    }),
+                    linkable: false,
+                    removable: false,
+                    children: (event) => {
+                      const issue = event.node?.data;
+                      if (!issue) return null;
+                      const sel = selectedId === issue.id;
+                      const dragging = dragSourceId !== null;
+                      const isSource = dragSourceId === issue.id;
+                      const isValidTarget = dragging && !isSource;
+                      let dropClass = "";
+                      if (dragging) dropClass = isValidTarget ? " drop-valid" : " drop-invalid";
+                      return React.createElement(
+                        "foreignObject",
+                        {
+                          width: event.width,
+                          height: event.height,
+                          x: 0,
+                          y: 0,
+                        },
+                        React.createElement(
+                          "div",
+                          {
+                            xmlns: "http://www.w3.org/1999/xhtml",
+                            className: "node-card" + (sel ? " selected" : "") + dropClass,
+                            style: { "--status-color": colorForStatus(issue.status) },
+                            onClick: (e) => {
+                              e.stopPropagation();
+                              onNodeClick(issue.id);
+                            },
+                            onDragOver: (e) => {
+                              if (isValidTarget) {
+                                e.preventDefault();
+                                e.dataTransfer.dropEffect = "link";
+                              }
+                            },
+                            onDragEnter: (e) => {
+                              if (isValidTarget) e.preventDefault();
+                            },
+                            onDrop: (e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              // Read source from React state (more reliable than
+                              // dataTransfer, which has cross-browser quirks).
+                              const sourceId = dragSourceId;
+                              setDragSourceId(null);
+                              if (sourceId && sourceId !== issue.id) {
+                                linkIssues(sourceId, issue.id);
+                              }
+                            },
+                          },
+                          React.createElement(
+                            "div",
+                            { className: "node-id" },
+                            issue.id,
+                            issue.priority !== undefined && issue.priority !== null
+                              ? ` · P${issue.priority}`
+                              : "",
+                          ),
+                          React.createElement(
+                            "div",
+                            { className: "node-title" },
+                            issue.title || "(no title)",
+                          ),
+                          React.createElement(
+                            "div",
+                            {
+                              className: "node-owner" + (issue.assignee ? "" : " unset"),
+                            },
+                            issue.assignee ? `👤 ${issue.assignee}` : "👤 (no owner)",
+                          ),
+                          // Blue link anchor: visible only when node is selected.
+                          sel &&
+                            React.createElement("div", {
+                              className: "link-anchor",
+                              title: "Drag to another issue to link as dependency",
+                              draggable: true,
+                              onClick: (e) => e.stopPropagation(),
+                              onDragStart: (e) => {
+                                e.dataTransfer.effectAllowed = "link";
+                                // Set data for completeness (some browsers refuse to
+                                // start a drag without data), but we read source from React state.
+                                try { e.dataTransfer.setData("text/plain", issue.id); } catch {}
+                                setDragSourceId(issue.id);
+                              },
+                              onDragEnd: () => setDragSourceId(null),
+                            }),
+                        ),
+                      );
+                    },
+                  }),
+                  edge: React.createElement(ReaEdge, {
+                    style: { stroke: "#4b5563", strokeWidth: 1.5 },
+                    onClick: async (_e, edge) => {
+                      const ok = confirm(
+                        `Remove dependency edge ${edge.from} → ${edge.to}?`,
+                      );
+                      if (!ok) return;
+                      try {
+                        const r = await fetch(
+                          `/beads/api/deps/edit?repo=${encodeURIComponent(selectedRepo)}`,
+                          {
+                            method: "DELETE",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ from: edge.from, to: edge.to }),
+                          },
+                        );
+                        const j = await r.json();
+                        if (j.error) throw new Error(j.error);
+                        refresh();
+                      } catch (e) {
+                        setError(`Edge remove failed: ${String(e?.message ?? e)}`);
+                      }
+                    },
+                  }),
+                }),
+            React.createElement(
+              "div",
+              { className: "legend" },
+              ...STATUSES.map((k) =>
+                React.createElement(
+                  "div",
+                  { key: k },
+                  React.createElement("span", {
+                    className: "swatch",
+                    style: { background: STATUS_COLORS[k] },
+                  }),
+                  labelForStatus(k),
+                ),
+              ),
+            ),
+          ),
+          selectedIssue &&
+            React.createElement(DetailPanel, {
+              key: selectedIssue.id,
+              repo: selectedRepo,
+              issue: selectedIssue,
+              allIssues: visibleIssues,
+              edges: edges,
+              onClose: () => setSelectedId(null),
+              ownerOptions: ownerOptions,
+              onChanged: () => {
+                refresh();
+              },
+              onDeleted: () => {
+                setSelectedId(null);
+                refresh();
+              },
+              onSelectIssue: (id) => setSelectedId(id),
+            }),
+        ),
+
+        // ── Create modal ─────────────────────────────────────────────
+        creating &&
+          React.createElement(CreateModal, {
+            repo: selectedRepo,
+            ownerOptions: ownerOptions,
+            onClose: () => setCreating(false),
+            onCreated: () => {
+              setCreating(false);
+              refresh();
+            },
+          }),
+      );
+    }
+
+    function DetailPanel({ repo, issue, allIssues, edges, ownerOptions, onClose, onChanged, onDeleted, onSelectIssue }) {
+      const [editing, setEditing] = useState(false);
+      const [title, setTitle] = useState(issue.title || "");
+      const [description, setDescription] = useState(issue.description || "");
+      const [priority, setPriority] = useState(String(issue.priority ?? "2"));
+      const [owner, setOwner] = useState(issue.assignee || ownerOptions?.[0] || "any");
+      const [type, setType] = useState(issue.issue_type || "task");
+      const [status, setStatus] = useState(issue.status || "open");
+      const issueRefs = referencesFromLabels(issue.labels);
+      const [referencesText, setReferencesText] = useState(issueRefs.join("\n"));
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+
+      const isClosed = String(issue.status || "").toLowerCase() === "closed";
+
+      const save = async () => {
+        if (!title.trim()) return setErr("title is required");
+        if (!owner.trim()) return setErr("owner is required");
+        const references = parseReferencesText(referencesText);
+        setBusy(true);
+        setErr(null);
+        try {
+          const r = await fetch(`/beads/api/issue/${encodeURIComponent(issue.id)}?repo=${encodeURIComponent(repo)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title,
+              description,
+              priority,
+              owner: owner.trim(),
+              type,
+              status,
+              references,
+            }),
+          });
+          const j = await r.json();
+          if (j.error) throw new Error(j.error);
+          setEditing(false);
+          onChanged();
+        } catch (e) {
+          setErr(String(e?.message ?? e));
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const closeOrReopen = async () => {
+        setBusy(true);
+        setErr(null);
+        try {
+          const action = isClosed ? "reopen" : "close";
+          const r = await fetch(`/beads/api/issue/${encodeURIComponent(issue.id)}/${action}?repo=${encodeURIComponent(repo)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          const j = await r.json();
+          if (j.error) throw new Error(j.error);
+          onChanged();
+        } catch (e) {
+          setErr(String(e?.message ?? e));
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      // ── Dependency management ────────────────────────────────────
+      // edges in our DAG: { from: dependent, to: blocker }
+      //   so issue.id == from  → this issue depends on edge.to (blocked by it)
+      //   so issue.id == to    → this issue is depended on by edge.from (blocks it)
+      const dependsOn = (edges || []).filter((e) => e.from === issue.id);
+      const blocks    = (edges || []).filter((e) => e.to === issue.id);
+      const issueTitleById = new Map((allIssues || []).map((i) => [i.id, i.title || ""]));
+
+      const removeDep = async (from, to) => {
+        setBusy(true);
+        setErr(null);
+        try {
+          const r = await fetch(`/beads/api/deps/edit?repo=${encodeURIComponent(repo)}`, {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ from, to }),
+          });
+          const j = await r.json();
+          if (j.error) throw new Error(j.error);
+          onChanged();
+        } catch (e) {
+          setErr(String(e?.message ?? e));
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const renderDepRow = (otherId, dir) => {
+        const title = (issueTitleById.get(otherId) || "").slice(0, 50);
+        return React.createElement(
+          "div",
+          { key: `${dir}-${otherId}`, className: "dep-row" },
+          React.createElement(
+            "a",
+            { onClick: () => onSelectIssue && onSelectIssue(otherId), title },
+            otherId,
+            title ? ` — ${title}` : "",
+          ),
+          React.createElement(
+            "button",
+            {
+              className: "x",
+              title: "remove dependency",
+              onClick: () =>
+                dir === "depends"
+                  ? removeDep(issue.id, otherId)
+                  : removeDep(otherId, issue.id),
+              disabled: busy,
+            },
+            "×",
+          ),
+        );
+      };
+
+      const del = async () => {
+        if (!confirm(`Permanently delete ${issue.id}? This cannot be undone.`)) return;
+        setBusy(true);
+        setErr(null);
+        try {
+          const r = await fetch(`/beads/api/issue/${encodeURIComponent(issue.id)}?repo=${encodeURIComponent(repo)}`, {
+            method: "DELETE",
+          });
+          const j = await r.json();
+          if (j.error) throw new Error(j.error);
+          onDeleted();
+        } catch (e) {
+          setErr(String(e?.message ?? e));
+          setBusy(false);
+        }
+      };
+
+      return React.createElement(
+        "div",
+        { className: "detail" },
+        React.createElement("button", { className: "close-x", onClick: onClose, title: "Close panel" }, "×"),
+        React.createElement("div", { className: "id" }, issue.id),
+        editing
+          ? React.createElement("input", {
+              value: title,
+              onChange: (e) => setTitle(e.target.value),
+              placeholder: "Title",
+              style: { fontSize: 16, marginTop: 6 },
+            })
+          : React.createElement("h2", null, issue.title || "(no title)"),
+        React.createElement(
+          "div",
+          { className: "meta" },
+          React.createElement(
+            "span",
+            { style: { color: colorForStatus(issue.status) } },
+            issue.status || "open",
+          ),
+          React.createElement("span", null, issue.issue_type || "task"),
+          editing
+            ? React.createElement(
+                "select",
+                {
+                  value: priority,
+                  onChange: (e) => setPriority(e.target.value),
+                  style: { width: "auto" },
+                },
+                ...PRIORITIES.map((p) =>
+                  React.createElement("option", { key: p.v, value: p.v }, p.label),
+                ),
+              )
+            : React.createElement("span", null, `P${issue.priority ?? "?"}`),
+          issue.created_at &&
+            React.createElement("span", { title: "created" }, issue.created_at.slice(0, 10)),
+        ),
+        editing
+          ? React.createElement(
+              React.Fragment,
+              null,
+              React.createElement("label", null, "Description (markdown)"),
+              React.createElement("textarea", {
+                value: description,
+                onChange: (e) => setDescription(e.target.value),
+              }),
+              React.createElement("label", null, "Owner *"),
+              React.createElement(
+                "select",
+                { value: owner, onChange: (e) => setOwner(e.target.value) },
+                ...ownerOptions.map((o) =>
+                  React.createElement("option", { key: o, value: o }, o),
+                ),
+              ),
+              React.createElement(
+                "div",
+                { style: { display: "flex", gap: 12, marginTop: 4 } },
+                React.createElement(
+                  "div",
+                  { style: { flex: 1 } },
+                  React.createElement("label", null, "Status"),
+                  React.createElement(
+                    "select",
+                    { value: status, onChange: (e) => setStatus(e.target.value) },
+                    ...STATUSES.map((s) =>
+                      React.createElement("option", { key: s, value: s }, labelForStatus(s)),
+                    ),
+                  ),
+                ),
+                React.createElement(
+                  "div",
+                  { style: { flex: 1 } },
+                  React.createElement("label", null, "Type"),
+                  React.createElement(
+                    "select",
+                    { value: type, onChange: (e) => setType(e.target.value) },
+                    ...ISSUE_TYPES.map((t) =>
+                      React.createElement("option", { key: t, value: t }, t),
+                    ),
+                  ),
+                ),
+              ),
+              React.createElement("label", null, "Reference files (one path per line; optional)"),
+              React.createElement("textarea", {
+                value: referencesText,
+                onChange: (e) => setReferencesText(e.target.value),
+                placeholder: "MEMORY.md\nmemory/2026-04-30.md\ndocs/architecture.md",
+                style: { minHeight: 80 },
+              }),
+            )
+          : React.createElement(
+              React.Fragment,
+              null,
+              React.createElement(
+                "div",
+                { className: "meta", style: { marginTop: -4 } },
+                React.createElement(
+                  "span",
+                  { title: "owner", style: { background: "#0f172a", borderColor: "#1e3a8a" } },
+                  "👤 ",
+                  issue.assignee || "(no owner)",
+                ),
+                ...(issueRefs.length
+                  ? issueRefs.map((m) =>
+                      React.createElement(
+                        "span",
+                        { key: m, title: "reference file", style: { background: "#0f172a", borderColor: "#365314", color: "#bef264" } },
+                        "📜 ",
+                        m,
+                      ),
+                    )
+                  : [React.createElement("span", { key: "_none", style: { color: "#9ca3af" } }, "(no reference files)")]),
+              ),
+              React.createElement(
+                "div",
+                { className: "desc" },
+                issue.description || "(no description)",
+              ),
+            ),
+        err && React.createElement("div", { style: { color: "#fca5a5", fontSize: 12, marginTop: 8 } }, err),
+        busy && React.createElement("div", { className: "saving" }, "saving…"),
+        // Dependency editor: read-only lists with × removers.
+        // Adding a dependency is now done via drag-and-drop from the blue
+        // anchor on the selected node in the canvas (see node renderer above).
+        !editing &&
+          React.createElement(
+            "div",
+            { className: "deps" },
+            React.createElement("h3", null, `→ Depends on (${dependsOn.length})`),
+            dependsOn.length === 0
+              ? React.createElement("div", { className: "dep-empty" }, "(none)")
+              : dependsOn.map((e) => renderDepRow(e.to, "depends")),
+            React.createElement("h3", { style: { marginTop: 12 } }, `← Blocks (${blocks.length})`),
+            blocks.length === 0
+              ? React.createElement("div", { className: "dep-empty" }, "(none)")
+              : blocks.map((e) => renderDepRow(e.from, "blocks")),
+            React.createElement(
+              "div",
+              {
+                className: "dep-empty",
+                style: { marginTop: 10, fontStyle: "normal", color: "#9ca3af" },
+              },
+              "→ To add a dependency: drag the blue anchor on this node onto another node in the graph.",
+            ),
+          ),
+        React.createElement(
+          "div",
+          { className: "actions" },
+          editing
+            ? React.createElement(
+                React.Fragment,
+                null,
+                React.createElement(
+                  "button",
+                  { className: "primary", onClick: save, disabled: busy },
+                  "Save",
+                ),
+                React.createElement(
+                  "button",
+                  {
+                    onClick: () => {
+                      setEditing(false);
+                      setTitle(issue.title || "");
+                      setDescription(issue.description || "");
+                      setPriority(String(issue.priority ?? "2"));
+                      setOwner(issue.assignee || ownerOptions?.[0] || "any");
+                      setType(issue.issue_type || "task");
+                      setStatus(issue.status || "open");
+                      setReferencesText(referencesFromLabels(issue.labels).join("\n"));
+                    },
+                    disabled: busy,
+                  },
+                  "Cancel",
+                ),
+              )
+            : React.createElement(
+                React.Fragment,
+                null,
+                React.createElement(
+                  "button",
+                  { className: "primary", onClick: () => setEditing(true) },
+                  "Edit",
+                ),
+                React.createElement(
+                  "button",
+                  { onClick: closeOrReopen, disabled: busy },
+                  isClosed ? "Reopen" : "Close",
+                ),
+                React.createElement(
+                  "button",
+                  { className: "danger", onClick: del, disabled: busy },
+                  "Delete",
+                ),
+              ),
+        ),
+      );
+    }
+
+    function CreateModal({ repo, ownerOptions, onClose, onCreated }) {
+      const [title, setTitle] = useState("");
+      const [description, setDescription] = useState("");
+      const [type, setType] = useState("task");
+      const [priority, setPriority] = useState("2");
+      const [owner, setOwner] = useState(ownerOptions?.[0] || "any");
+      const [referencesText, setReferencesText] = useState("");
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+
+      const submit = async () => {
+        if (!title.trim()) return setErr("title is required");
+        if (!owner.trim()) return setErr("owner is required");
+        const references = parseReferencesText(referencesText);
+        setBusy(true);
+        setErr(null);
+        try {
+          const r = await fetch(`/beads/api/issues/create?repo=${encodeURIComponent(repo)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title,
+              description,
+              type,
+              priority,
+              owner: owner.trim(),
+              references,
+            }),
+          });
+          const j = await r.json();
+          if (j.error) throw new Error(j.error);
+          onCreated();
+        } catch (e) {
+          setErr(String(e?.message ?? e));
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      return React.createElement(
+        "div",
+        { className: "modal-bg", onClick: onClose },
+        React.createElement(
+          "div",
+          { className: "modal", onClick: (e) => e.stopPropagation() },
+          React.createElement("h2", null, `New issue in ${repo}`),
+          React.createElement("label", null, "Title"),
+          React.createElement("input", {
+            autoFocus: true,
+            value: title,
+            onChange: (e) => setTitle(e.target.value),
+            placeholder: "Short, descriptive title",
+          }),
+          React.createElement("label", null, "Description (markdown)"),
+          React.createElement("textarea", {
+            value: description,
+            onChange: (e) => setDescription(e.target.value),
+            placeholder: "Optional. Supports markdown.",
+          }),
+          React.createElement("label", null, "Owner * — who is responsible (agent or human)"),
+          React.createElement(
+            "select",
+            { value: owner, onChange: (e) => setOwner(e.target.value) },
+            ...ownerOptions.map((o) =>
+              React.createElement("option", { key: o, value: o }, o),
+            ),
+          ),
+          React.createElement("label", null, "Reference files — one path per line (optional; agents can backfill)"),
+          React.createElement("textarea", {
+            value: referencesText,
+            onChange: (e) => setReferencesText(e.target.value),
+            placeholder: "MEMORY.md\nmemory/2026-04-30.md\ndocs/architecture.md",
+            style: { minHeight: 80 },
+          }),
+          React.createElement(
+            "div",
+            { className: "row" },
+            React.createElement(
+              "div",
+              null,
+              React.createElement("label", null, "Type"),
+              React.createElement(
+                "select",
+                { value: type, onChange: (e) => setType(e.target.value) },
+                ...ISSUE_TYPES.map((t) =>
+                  React.createElement("option", { key: t, value: t }, t),
+                ),
+              ),
+            ),
+            React.createElement(
+              "div",
+              null,
+              React.createElement("label", null, "Priority"),
+              React.createElement(
+                "select",
+                { value: priority, onChange: (e) => setPriority(e.target.value) },
+                ...PRIORITIES.map((p) =>
+                  React.createElement("option", { key: p.v, value: p.v }, p.label),
+                ),
+              ),
+            ),
+          ),
+          err && React.createElement("div", { style: { color: "#fca5a5", fontSize: 12, marginTop: 8 } }, err),
+          React.createElement(
+            "div",
+            { className: "actions" },
+            React.createElement("button", { onClick: onClose, disabled: busy }, "Cancel"),
+            React.createElement(
+              "button",
+              { className: "primary", onClick: submit, disabled: busy },
+              busy ? "Creating…" : "Create",
+            ),
+          ),
+        ),
+      );
+    }
+
+    createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</body>
+</html>
