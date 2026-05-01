@@ -224,6 +224,119 @@
       const [syncTick, setSyncTick] = useState(0);
       const [recentlyChangedIds, setRecentlyChangedIds] = useState(() => new Set());
       const prevIssuesRef = useRef(new Map());
+
+      // Per-repo persisted view state (zoom + pan translate). Restored on
+      // repo switch / page reload so syncs don't disturb the view.
+      const VIEW_STORE_KEY = (repo) => `beads.view.v1.${repo}`;
+      const readSavedView = (repo) => {
+        if (!repo) return null;
+        try {
+          const raw = localStorage.getItem(VIEW_STORE_KEY(repo));
+          if (!raw) return null;
+          const v = JSON.parse(raw);
+          if (!v || typeof v !== "object") return null;
+          const zoom = Number(v.zoom);
+          const x = Number(v.x);
+          const y = Number(v.y);
+          return {
+            zoom: Number.isFinite(zoom) ? zoom : null,
+            x: Number.isFinite(x) ? x : null,
+            y: Number.isFinite(y) ? y : null,
+          };
+        } catch {
+          return null;
+        }
+      };
+      const writeSavedView = (repo, patch) => {
+        if (!repo) return;
+        try {
+          const cur = readSavedView(repo) || {};
+          const next = { ...cur, ...patch };
+          localStorage.setItem(VIEW_STORE_KEY(repo), JSON.stringify(next));
+        } catch { /* best-effort */ }
+      };
+      const [initialZoom, setInitialZoom] = useState(null);
+      const [initialPan, setInitialPan] = useState(null);
+      // When the repo changes, snapshot the saved view so the Canvas mounts
+      // with that initial zoom/pan and `fit` only fires on first-ever view.
+      useEffect(() => {
+        if (!selectedRepo) { setInitialZoom(null); setInitialPan(null); return; }
+        const v = readSavedView(selectedRepo);
+        setInitialZoom(v && Number.isFinite(v.zoom) ? v.zoom : null);
+        setInitialPan(v && Number.isFinite(v.x) && Number.isFinite(v.y) ? { x: v.x, y: v.y } : null);
+      }, [selectedRepo]);
+
+      // Reaflow renders an inner <g> under canvasRef.current.svgRef whose
+      // transform attribute contains "translate(x, y) scale(zoom)" applied
+      // by drag-pan. We piggy-back on that: a MutationObserver captures the
+      // current translate values whenever the user pans/zooms, persisting
+      // them per-repo. After mount with a saved pan, we apply it once.
+      useEffect(() => {
+        if (!selectedRepo) return undefined;
+        const wrap = canvasWrapRef.current;
+        if (!wrap) return undefined;
+        let cancelled = false;
+        let observer = null;
+        let saveTimer = null;
+        let appliedPan = false;
+        const findInnerG = () => wrap.querySelector("svg > g");
+        const parseTranslate = (transform) => {
+          if (typeof transform !== "string") return null;
+          const m = /translate\(\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/.exec(transform);
+          if (!m) return null;
+          return { x: parseFloat(m[1]), y: parseFloat(m[2]) };
+        };
+        const captureAndSave = () => {
+          const g = findInnerG();
+          if (!g) return;
+          const t = parseTranslate(g.getAttribute("transform"));
+          if (!t) return;
+          if (saveTimer) clearTimeout(saveTimer);
+          saveTimer = setTimeout(() => {
+            if (cancelled) return;
+            writeSavedView(selectedRepo, { x: t.x, y: t.y });
+          }, 250);
+        };
+        const tryApplyInitialPan = () => {
+          if (appliedPan || !initialPan) return false;
+          const g = findInnerG();
+          if (!g) return false;
+          const cur = g.getAttribute("transform") || "";
+          // Replace the translate(...) prefix; preserve any scale(...) suffix.
+          const scaleMatch = /scale\([^)]+\)/.exec(cur);
+          const scalePart = scaleMatch ? " " + scaleMatch[0] : "";
+          g.setAttribute(
+            "transform",
+            `translate(${initialPan.x}, ${initialPan.y})${scalePart}`,
+          );
+          appliedPan = true;
+          return true;
+        };
+        // Apply initial pan once the SVG group exists. Try a few times since
+        // reaflow lays out asynchronously.
+        const attachWhenReady = (attempts = 0) => {
+          if (cancelled) return;
+          const g = findInnerG();
+          if (!g) {
+            if (attempts < 30) setTimeout(() => attachWhenReady(attempts + 1), 100);
+            return;
+          }
+          tryApplyInitialPan();
+          observer = new MutationObserver(() => {
+            if (cancelled) return;
+            captureAndSave();
+          });
+          observer.observe(g, { attributes: true, attributeFilter: ["transform"] });
+        };
+        attachWhenReady();
+        return () => {
+          cancelled = true;
+          if (saveTimer) clearTimeout(saveTimer);
+          if (observer) observer.disconnect();
+        };
+        // Re-bind whenever the repo changes or when initialPan shifts (i.e.,
+        // after the saved-view snapshot for a new repo).
+      }, [selectedRepo, initialPan]);
       const canvasWrapRef = useRef(null);
       const canvasRef = useRef(null);
 
@@ -540,7 +653,7 @@
           "div",
           { className: "topbar" },
           React.createElement("h1", null, "🪡 Beads"),
-          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.35"),
+          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.36"),
           React.createElement(
             "select",
             {
@@ -688,11 +801,19 @@
                   loading ? "Loading…" : "No issues yet. Click + New issue to file one.",
                 )
               : React.createElement(Canvas, {
-                  key: `${selectedRepo}-${graphLayout.direction}-${issues.length}-${reaflowEdges.length}`,
+                  // Note: `issues.length` / `reaflowEdges.length` intentionally
+                  // omitted from the key. Including them remounts the Canvas
+                  // on every sync poll, which throws away the user's zoom
+                  // and pan. Reaflow happily diffs nodes/edges in place when
+                  // the same Canvas instance is kept.
+                  key: `${selectedRepo}-${graphLayout.direction}`,
                   ref: canvasRef,
                   nodes: reaflowNodes,
                   edges: reaflowEdges,
-                  fit: true,
+                  // Auto-fit only on the very first time we open this repo.
+                  // After a saved view exists, restore from localStorage.
+                  fit: initialZoom == null,
+                  zoom: initialZoom != null ? initialZoom : undefined,
                   pannable: true,
                   // Reaflow's scroll-pan wheel handler uses deltaY * -0.02,
                   // so one physical mouse notch can jump the entire zoom range.
@@ -706,6 +827,12 @@
                   maxWidth: graphLayout.maxWidth,
                   maxHeight: graphLayout.maxHeight,
                   selections: selectedId ? [selectedId] : [],
+                  onZoomChange: (z) => {
+                    if (!selectedRepo) return;
+                    const n = Number(z);
+                    if (!Number.isFinite(n)) return;
+                    writeSavedView(selectedRepo, { zoom: n });
+                  },
                   node: React.createElement(ReaNode, {
                     style: (node) => ({
                       fill: "#11131a",

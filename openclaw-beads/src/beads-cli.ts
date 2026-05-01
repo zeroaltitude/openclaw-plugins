@@ -176,6 +176,7 @@ export async function createIssue(
   }
   const out = await runBd(args, opts);
   const trimmed = stripWarnings(out);
+  await refreshExport(opts);
   // bd create --json returns the created issue
   try {
     const parsed = JSON.parse(trimmed);
@@ -244,6 +245,25 @@ export async function updateIssue(
       await runBd(labelArgs, opts);
     }
   }
+  await refreshExport(opts);
+}
+
+/**
+ * Refresh `.beads/issues.jsonl` after a write.
+ *
+ * The dashboard's fast path reads from this file. bd's auto-export is
+ * throttled (~60s) so without an explicit refresh, mutations made through
+ * the API can read stale state on the very next poll.
+ *
+ * Awaited so the HTTP response only returns after the cache is consistent.
+ * Best-effort: failures are swallowed; bd's own auto-export will catch up.
+ */
+export async function refreshExport(opts: BdRunOptions): Promise<void> {
+  try {
+    await runBd(["export", "-q", "-o", ".beads/issues.jsonl"], { ...opts, timeoutMs: 10_000 });
+  } catch {
+    /* best-effort; bd auto-export will catch up within ~60s */
+  }
 }
 
 /** Close an issue. */
@@ -251,16 +271,19 @@ export async function closeIssue(id: string, reason: string | undefined, opts: B
   const args = ["close", id];
   if (reason) args.push("--reason", reason);
   await runBd(args, opts);
+  await refreshExport(opts);
 }
 
 /** Reopen a closed issue. */
 export async function reopenIssue(id: string, opts: BdRunOptions): Promise<void> {
   await runBd(["reopen", id], opts);
+  await refreshExport(opts);
 }
 
 /** Permanently delete an issue. */
 export async function deleteIssue(id: string, opts: BdRunOptions): Promise<void> {
   await runBd(["delete", id, "--force"], opts);
+  await refreshExport(opts);
 }
 
 /** Set custom metadata fields on an issue. */
@@ -273,7 +296,10 @@ export async function setIssueMetadata(
   for (const [key, value] of Object.entries(metadata)) {
     args.push("--set-metadata", `${key}=${value}`);
   }
-  if (args.length > 2) await runBd(args, opts);
+  if (args.length > 2) {
+    await runBd(args, opts);
+    await refreshExport(opts);
+  }
 }
 
 /** List dependency-ready work using Beads' own ready-work semantics. */
@@ -298,11 +324,13 @@ export async function readyIssues(limit: number, opts: BdRunOptions): Promise<Bd
 export async function addDependency(child: string, parent: string, opts: BdRunOptions): Promise<void> {
   // bd dep add <blocked> <blocker> — i.e., child depends on parent.
   await runBd(["dep", "add", child, parent], opts);
+  await refreshExport(opts);
 }
 
 /** Remove a dependency edge. */
 export async function removeDependency(child: string, parent: string, opts: BdRunOptions): Promise<void> {
   await runBd(["dep", "remove", child, parent], opts);
+  await refreshExport(opts);
 }
 
 /**
@@ -370,14 +398,30 @@ interface DepRef {
 
 function collectEdgesFromIssueRecords(issues: BdIssue[]): BdEdge[] | null {
   let sawDependencyField = false;
+  let countAware = true;
+  let anyMissingArrayWithCount = false;
   const edges: BdEdge[] = [];
   for (const issue of issues) {
     if (hasDependencyField(issue)) sawDependencyField = true;
+    const count = (issue as any)?.dependency_count;
+    if (typeof count !== "number") {
+      countAware = false;
+    } else if (count > 0 && !hasDependencyField(issue)) {
+      // Export claims this issue has deps but didn't include the array;
+      // we can't trust the count alone in that case.
+      anyMissingArrayWithCount = true;
+    }
     for (const dep of collectDeps(issue)) {
       edges.push({ from: issue.id, to: dep.id, type: dep.type });
     }
   }
-  return sawDependencyField ? edges : null;
+  if (sawDependencyField) return edges;
+  // Treat dependency_count as a signal that the export is dep-aware.
+  // bd export omits the dependencies array when dependency_count is 0,
+  // so a repo where every issue has zero deps would otherwise fall through
+  // to an expensive `bd dep list` even though we already know the answer.
+  if (countAware && !anyMissingArrayWithCount) return edges;
+  return null;
 }
 
 function hasDependencyField(payload: any): boolean {
