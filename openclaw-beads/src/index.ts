@@ -558,18 +558,40 @@ export function activate(api: PluginApi): void {
               const issueIds = new Set(issues.map((issue) => issue.id));
               const edges = await listEdges(issues, { cwd: repo.path, bdBinary: cfg(api).bdBinary, timeoutMs: 5_000 });
               const behindIds = new Set(edges.filter((edge) => issueIds.has(edge.to)).map((edge) => edge.from));
-              const allIssues = behindIds.size
-                ? await listIssues({ cwd: repo.path, bdBinary: cfg(api).bdBinary })
-                : [];
+              // Always pull the full issue list so we can derive both 'behind'
+              // (dep-blocked by a ready issue) and 'stuck' (open issues in a
+              // non-actionable status like blocked / deferred / waiting_for_*).
+              const allIssues = await listIssues({ cwd: repo.path, bdBinary: cfg(api).bdBinary });
+              const isStuckStatus = (s: unknown): boolean => {
+                const v = String(s ?? "").toLowerCase();
+                if (v === "blocked" || v === "deferred") return true;
+                if (v.startsWith("waiting_") || v.startsWith("waiting-")) return true;
+                return false;
+              };
+              const isOpenIsh = (s: unknown): boolean => {
+                const v = String(s ?? "").toLowerCase();
+                return v !== "closed" && v !== "done" && v !== "resolved";
+              };
               const behind = allIssues
                 .filter((issue) => behindIds.has(issue.id) && !issueIds.has(issue.id))
                 .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
-              return { repo: repo.name, path: repo.path, issues, behind };
+              const behindIdSet = new Set(behind.map((i) => i.id));
+              const stuck = allIssues
+                .filter((issue) =>
+                  isOpenIsh(issue.status) &&
+                  isStuckStatus(issue.status) &&
+                  !issueIds.has(issue.id) &&
+                  !behindIdSet.has(issue.id),
+                )
+                .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
+              return { repo: repo.name, path: repo.path, issues, behind, stuck };
             } catch (err: any) {
               return {
                 repo: repo.name,
                 path: repo.path,
                 issues: [] as BdIssue[],
+                behind: [] as BdIssue[],
+                stuck: [] as BdIssue[],
                 error: String(err?.message ?? err).slice(0, 300),
               };
             }

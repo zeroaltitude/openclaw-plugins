@@ -88,6 +88,9 @@
     .active-section-title { margin-top: 2px; color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; text-align: left; }
     .active-section-title.behind { margin-top: 10px; color: #f59e0b; }
     .active-card.behind { opacity: 0.78; border-style: dashed; }
+    .active-section-title.stuck { margin-top: 10px; color: #c084fc; }
+    .active-card.stuck { opacity: 0.85; border-style: dotted; border-color: #6d28d9; }
+    .active-card.stuck .active-meta .stuck-status { color: #c4b5fd; font-weight: 600; }
     .active-repo { text-align: left; color: #93c5fd; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; padding: 6px 8px; border: 1px solid #1f2937; border-radius: 6px; background: #0c0d0f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .active-card { min-height: 112px; height: 100%; padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #0f1117; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
     .active-card:hover { border-color: #60a5fa; background: #111827; }
@@ -103,6 +106,11 @@
     .node-card.selected { outline: 2px solid #93c5fd; outline-offset: -2px; }
     .node-card.drop-valid { outline: 2px dashed #22c55e; outline-offset: -2px; background: #0a1f12; }
     .node-card.drop-invalid { outline: 2px dashed #4b5563; outline-offset: -2px; opacity: 0.4; }
+    @keyframes node-flash { 0% { box-shadow: 0 0 0 2px #fbbf24, 0 0 16px 4px rgba(251,191,36,0.55); } 100% { box-shadow: 0 0 0 0 transparent; } }
+    .node-card.changed { animation: node-flash 4s ease-out 1; }
+    .topbar .sync-pill { font-size: 11px; color: #9ca3af; padding: 2px 8px; border: 1px solid #1f2937; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, monospace; }
+    .topbar .sync-pill.fresh { color: #6ee7b7; border-color: #065f46; }
+    .topbar .sync-pill.stale { color: #fbbf24; border-color: #78350f; }
     .node-card .node-owner { font-size: 10px; color: #9ca3af; margin-top: 3px; font-family: ui-monospace, SFMono-Regular, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-card .node-owner.unset { color: #6b7280; font-style: italic; }
     .link-anchor {
@@ -208,6 +216,14 @@
       const [showActiveWork, setShowActiveWork] = useState(false);
       const [reloadKey, setReloadKey] = useState(0);
       const [showClosed, setShowClosed] = useState(false);
+      const [pollIntervalSec, setPollIntervalSec] = useState(() => {
+        const v = Number(localStorage.getItem("beads.pollIntervalSec"));
+        return Number.isFinite(v) && v >= 0 ? v : 15;
+      });
+      const [lastSyncedAt, setLastSyncedAt] = useState(null);
+      const [syncTick, setSyncTick] = useState(0);
+      const [recentlyChangedIds, setRecentlyChangedIds] = useState(() => new Set());
+      const prevIssuesRef = useRef(new Map());
       const canvasWrapRef = useRef(null);
       const canvasRef = useRef(null);
 
@@ -277,8 +293,36 @@
             const d = await fetch(`/beads/api/deps?repo=${encodeURIComponent(selectedRepo)}&ids=${encodeURIComponent(ids)}`).then((r) => r.json());
             if (d.error) throw new Error(d.error);
             if (cancelled) return;
+            // Detect status changes vs previous snapshot for the same repo
+            const prev = prevIssuesRef.current;
+            const changed = new Set();
+            for (const it of nextIssues) {
+              const before = prev.get(it.id);
+              if (before && String(before).toLowerCase() !== String(it.status || "").toLowerCase()) {
+                changed.add(it.id);
+              }
+            }
+            const nextMap = new Map();
+            for (const it of nextIssues) nextMap.set(it.id, it.status);
+            prevIssuesRef.current = nextMap;
             setIssues(nextIssues);
             setEdges(d.edges || []);
+            setLastSyncedAt(Date.now());
+            if (changed.size > 0) {
+              setRecentlyChangedIds((curr) => {
+                const merged = new Set(curr);
+                changed.forEach((id) => merged.add(id));
+                return merged;
+              });
+              // Clear highlight after the CSS animation completes (4s)
+              setTimeout(() => {
+                setRecentlyChangedIds((curr) => {
+                  const next = new Set(curr);
+                  changed.forEach((id) => next.delete(id));
+                  return next;
+                });
+              }, 4200);
+            }
           } catch (e) {
             if (!cancelled) setError(String(e?.message ?? e));
           } finally {
@@ -289,6 +333,62 @@
           cancelled = true;
         };
       }, [selectedRepo, reloadKey]);
+
+      // Reset prev-status snapshot when switching repos so we don't flash
+      // "changed" for the very first load of a different repo.
+      useEffect(() => {
+        prevIssuesRef.current = new Map();
+        setRecentlyChangedIds(new Set());
+      }, [selectedRepo]);
+
+      // Periodic auto-sync. Skips when interval is 0 (off) or tab hidden.
+      useEffect(() => {
+        if (!selectedRepo) return undefined;
+        if (!pollIntervalSec || pollIntervalSec <= 0) return undefined;
+        const tick = () => {
+          if (document.hidden) return;
+          setReloadKey((k) => k + 1);
+        };
+        const id = setInterval(tick, pollIntervalSec * 1000);
+        const onVis = () => { if (!document.hidden) tick(); };
+        document.addEventListener("visibilitychange", onVis);
+        return () => {
+          clearInterval(id);
+          document.removeEventListener("visibilitychange", onVis);
+        };
+      }, [selectedRepo, pollIntervalSec]);
+
+      // Tick once a second so the "synced Xs ago" pill stays current
+      // without forcing fetches.
+      useEffect(() => {
+        const id = setInterval(() => setSyncTick((t) => t + 1), 1000);
+        return () => clearInterval(id);
+      }, []);
+
+      useEffect(() => {
+        localStorage.setItem("beads.pollIntervalSec", String(pollIntervalSec));
+      }, [pollIntervalSec]);
+
+      const syncedAgoLabel = useMemo(() => {
+        if (!lastSyncedAt) return "never synced";
+        const ms = Date.now() - lastSyncedAt;
+        const s = Math.max(0, Math.floor(ms / 1000));
+        if (s < 5) return "just synced";
+        if (s < 60) return `synced ${s}s ago`;
+        const m = Math.floor(s / 60);
+        if (m < 60) return `synced ${m}m ago`;
+        const h = Math.floor(m / 60);
+        return `synced ${h}h ago`;
+        // syncTick triggers re-render so the label updates each second
+      }, [lastSyncedAt, syncTick]);
+
+      const syncFreshness = useMemo(() => {
+        if (!lastSyncedAt) return "";
+        const s = (Date.now() - lastSyncedAt) / 1000;
+        const window = pollIntervalSec > 0 ? pollIntervalSec * 2.5 : 60;
+        if (s <= window) return "fresh";
+        return "stale";
+      }, [lastSyncedAt, syncTick, pollIntervalSec]);
 
       const normalizeIssuePayload = (payload) => Array.isArray(payload) ? payload[0] : payload;
 
@@ -440,7 +540,7 @@
           "div",
           { className: "topbar" },
           React.createElement("h1", null, "🪡 Beads"),
-          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.33"),
+          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.35"),
           React.createElement(
             "select",
             {
@@ -474,6 +574,28 @@
             "show closed",
           ),
           loading && React.createElement("span", { className: "stat" }, "loading…"),
+          React.createElement(
+            "select",
+            {
+              value: String(pollIntervalSec),
+              title: "Auto-sync interval",
+              onChange: (e) => setPollIntervalSec(Number(e.target.value)),
+            },
+            React.createElement("option", { value: "0" }, "sync: off"),
+            React.createElement("option", { value: "5" }, "sync: 5s"),
+            React.createElement("option", { value: "15" }, "sync: 15s"),
+            React.createElement("option", { value: "60" }, "sync: 60s"),
+          ),
+          React.createElement(
+            "span",
+            {
+              className: "sync-pill" + (syncFreshness ? " " + syncFreshness : ""),
+              title: pollIntervalSec > 0 ? `Auto-syncs every ${pollIntervalSec}s (paused when tab hidden)` : "Auto-sync disabled",
+              onClick: () => setReloadKey((k) => k + 1),
+              style: { cursor: "pointer" },
+            },
+            syncedAgoLabel,
+          ),
           error &&
             React.createElement(
               "span",
@@ -613,7 +735,7 @@
                           "div",
                           {
                             xmlns: "http://www.w3.org/1999/xhtml",
-                            className: "node-card" + (sel ? " selected" : "") + dropClass,
+                            className: "node-card" + (sel ? " selected" : "") + dropClass + (recentlyChangedIds.has(issue.id) ? " changed" : ""),
                             style: { "--status-color": colorForStatus(issue.status) },
                             onClick: (e) => {
                               e.stopPropagation();
@@ -746,6 +868,7 @@
         // ── Active work modal ────────────────────────────────────────
         showActiveWork &&
           React.createElement(ActiveWorkModal, {
+            pollIntervalSec,
             onClose: () => setShowActiveWork(false),
             onOpenRepo: (repo) => {
               setSelectedRepo(repo);
@@ -769,25 +892,44 @@
       );
     }
 
-    function ActiveWorkModal({ onClose, onOpenRepo }) {
+    function ActiveWorkModal({ onClose, onOpenRepo, pollIntervalSec }) {
       const [data, setData] = useState(null);
       const [err, setErr] = useState(null);
+      const [tick, setTick] = useState(0);
 
       useEffect(() => {
         let cancelled = false;
-        fetch("/beads/api/ready?limit=4")
-          .then((r) => r.json())
-          .then((j) => {
-            if (j.error) throw new Error(j.error);
-            if (!cancelled) setData(j.repos || []);
-          })
-          .catch((e) => {
-            if (!cancelled) setErr(String(e?.message ?? e));
-          });
+        const load = () => {
+          fetch("/beads/api/ready?limit=4")
+            .then((r) => r.json())
+            .then((j) => {
+              if (j.error) throw new Error(j.error);
+              if (!cancelled) {
+                setData(j.repos || []);
+                setErr(null);
+              }
+            })
+            .catch((e) => {
+              if (!cancelled) setErr(String(e?.message ?? e));
+            });
+        };
+        load();
+        // Auto-refresh on the same cadence as the main view, so the
+        // dashboard stays current while the modal is open.
+        const intervalSec = Math.max(5, Number(pollIntervalSec) || 0);
+        let id = null;
+        if (intervalSec > 0) {
+          id = setInterval(() => {
+            if (document.hidden) return;
+            load();
+            setTick((t) => t + 1);
+          }, intervalSec * 1000);
+        }
         return () => {
           cancelled = true;
+          if (id) clearInterval(id);
         };
-      }, []);
+      }, [pollIntervalSec]);
 
       return React.createElement(
         "div",
@@ -811,10 +953,14 @@
                   ? data.map((entry) => {
                       const issues = entry.issues || [];
                       const behind = entry.behind || [];
+                      const stuck = entry.stuck || [];
+                      const totalSuffix = (behind.length || stuck.length)
+                        ? ` + ${behind.length + stuck.length}`
+                        : "";
                       return React.createElement(
                         "div",
                         { key: entry.repo, className: "active-col" },
-                        React.createElement("div", { className: "active-repo", title: entry.path || entry.repo }, `${entry.repo} (${issues.length}${behind.length ? ` + ${behind.length}` : ""})`),
+                        React.createElement("div", { className: "active-repo", title: entry.path || entry.repo }, `${entry.repo} (${issues.length}${totalSuffix})`),
                         React.createElement("div", { className: "active-section-title" }, "Ready now"),
                         issues.length
                           ? React.createElement(
@@ -842,6 +988,33 @@
                               { className: "active-card empty" },
                               entry.error ? `error: ${entry.error}` : "No ready work",
                             ),
+                        stuck.length
+                          ? React.createElement(
+                              React.Fragment,
+                              null,
+                              React.createElement("div", { className: "active-section-title stuck", title: "Open issues whose status is blocked, deferred, or waiting_for_*" }, "Stuck (blocked / deferred / waiting)"),
+                              React.createElement(
+                                "div",
+                                { className: "active-list" },
+                                ...stuck.map((issue) =>
+                                  React.createElement(
+                                    "div",
+                                    { key: issue.id, className: "active-card stuck", onClick: () => onOpenRepo(entry.repo) },
+                                    React.createElement("div", { className: "active-id" }, issue.id),
+                                    React.createElement("div", { className: "active-title" }, issue.title || "(no title)"),
+                                    React.createElement(
+                                      "div",
+                                      { className: "active-meta" },
+                                      React.createElement("span", { className: "stuck-status" }, issue.status || "open"),
+                                      React.createElement("span", null, issue.issue_type || issue.type || "task"),
+                                      React.createElement("span", null, `P${issue.priority ?? "?"}`),
+                                      React.createElement("span", null, `👤 ${issue.assignee || "(none)"}`),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            )
+                          : null,
                         behind.length
                           ? React.createElement(
                               React.Fragment,
