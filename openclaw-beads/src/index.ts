@@ -10,8 +10,10 @@
  * v0.1: read-only, single-repo focus, inline UI (no Vite build).
  */
 
+import { execFile } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
+import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +29,7 @@ import {
   addDependency,
   removeDependency,
   readyIssues,
+  setIssueMetadata,
   referencesFromLabels,
   type BdIssue,
   type BdRepo,
@@ -45,6 +48,20 @@ interface PluginApi {
   config?: Record<string, unknown>;
   logger: { info(...a: any[]): void; warn(...a: any[]): void; error(...a: any[]): void };
   on?: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
+  registerHook?: (
+    events: string | string[],
+    handler: (event: any) => any,
+    opts?: { name?: string; description?: string },
+  ) => void;
+  runtime?: {
+    system?: {
+      requestHeartbeatNow?: (opts?: {
+        reason?: string;
+        coalesceMs?: number;
+        heartbeat?: { target?: string };
+      }) => void;
+    };
+  };
 }
 
 interface BeadsPluginConfig {
@@ -56,10 +73,21 @@ interface BeadsPluginConfig {
     enabled?: boolean;
     readyLimitPerRepo?: number;
     includeUnassigned?: boolean;
+    startupWake?: boolean;
+    startupWakeTarget?: string;
+    startupWakeDelayMs?: number;
+  };
+  calendarSync?: {
+    enabled?: boolean;
+    account?: string;
+    calendarId?: string;
+    defaultTimedDurationMinutes?: number;
+    gogBinary?: string;
   };
 }
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
 
 function cfg(api: PluginApi): BeadsPluginConfig {
   return (api.pluginConfig ?? {}) as BeadsPluginConfig;
@@ -111,13 +139,13 @@ function issueAssignee(issue: BdIssue): string {
   return typeof raw === "string" ? raw.trim() : "";
 }
 
-function shouldIncludeReadyIssue(issue: BdIssue, agentId: string, includeUnassigned: boolean): boolean {
+export function shouldIncludeReadyIssue(issue: BdIssue, agentId: string, includeUnassigned: boolean): boolean {
   const owner = issueAssignee(issue);
   if (!owner) return includeUnassigned;
   return owner === "any" || owner === agentId;
 }
 
-function formatPlansAndTasksBlock(params: {
+export function formatPlansAndTasksBlock(params: {
   agentId: string;
   repos: Array<{ repo: BdRepo; issues: BdIssue[]; error?: string }>;
 }): string {
@@ -133,6 +161,7 @@ function formatPlansAndTasksBlock(params: {
   lines.push("- Never treat issues from repos whose configured repo name matches /test/i as ready work.");
   lines.push("- If you start meaningful work, mark the issue in_progress. If completed, close it. If waiting on the user, mark waiting_for_user. If waiting on an available agent/resource, mark waiting_for_available_agent. If blocked with no path forward, mark blocked. Keep state truthful.");
   lines.push("- If the user suggests future work, bugs, investigations, reminders, or other durable trackables, create/update Beads issues for them and include target_datetime metadata when timing is implied.");
+  lines.push("- If this turn was not triggered by direct user input (for example heartbeat, gateway startup/resume, cron wake, or other autonomous wake) and you take action on Beads work, explicitly reply with a concise summary of the Beads issue(s) touched and actions taken. If no action was taken, stay quiet unless there is a meaningful blocker or decision for the user.");
   lines.push("");
 
   const readyRepos = params.repos.filter((entry) => entry.issues.length > 0 || entry.error);
@@ -153,7 +182,11 @@ function formatPlansAndTasksBlock(params: {
           for (const ref of refs.slice(0, 8)) lines.push(`        <ref>${escapeXml(ref)}</ref>`);
           lines.push("      </references>");
         }
-        const target = (issue as any).target_datetime ?? (issue as any).targetDatetime;
+        const target =
+          (issue as any).target_datetime ??
+          (issue as any).targetDatetime ??
+          (issue as any).metadata?.target_datetime ??
+          (issue as any).due_at;
         if (target) lines.push(`      <target_datetime>${escapeXml(target)}</target_datetime>`);
         lines.push("    </issue>");
       }
@@ -163,6 +196,157 @@ function formatPlansAndTasksBlock(params: {
   }
   lines.push("</plans_and_tasks>");
   return lines.join("\n");
+}
+
+function unwrapIssue(payload: any): any {
+  return Array.isArray(payload) ? payload[0] : payload;
+}
+
+function targetDateTimeOf(issue: any): string {
+  const unwrapped = unwrapIssue(issue);
+  const raw =
+    unwrapped?.target_datetime ??
+    unwrapped?.targetDatetime ??
+    unwrapped?.metadata?.target_datetime ??
+    unwrapped?.due_at ??
+    "";
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+function calendarEventIdOf(issue: any): string {
+  const unwrapped = unwrapIssue(issue);
+  const raw = unwrapped?.metadata?.calendar_event_id ?? "";
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+function targetHasExplicitTime(rawTarget: string): boolean {
+  const value = rawTarget.trim().toLowerCase();
+  if (!value) return false;
+  // ISO/datetype with explicit time, e.g. 2026-05-02T09:00 or 2026-05-02 09:00.
+  if (/^\d{4}-\d{2}-\d{2}(?:t|\s+)\d{1,2}:\d{2}/u.test(value)) return true;
+  // Clock-ish natural language, e.g. "next monday at 3pm", "3:30pm".
+  if (/\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/u.test(value)) return true;
+  if (/\bat\s+\d{1,2}(?::\d{2})?\b/u.test(value)) return true;
+  // Relative hours/minutes imply a timed target; relative days/weeks do not.
+  if (/^\+\s*\d+\s*(?:h|hr|hrs|hour|hours|m|min|mins|minute|minutes)$/u.test(value)) return true;
+  return false;
+}
+
+function shouldCreateAllDayEvent(rawTarget: string): boolean {
+  const value = rawTarget.trim().toLowerCase();
+  if (!value) return false;
+  if (targetHasExplicitTime(value)) return false;
+  // Date-only ISO.
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(value)) return true;
+  // Relative day/week/month/year forms: +2d, +1w, +3 months.
+  if (/^\+\s*\d+\s*(?:d|day|days|w|week|weeks|mo|month|months|y|yr|year|years)$/u.test(value)) return true;
+  // Natural date phrases without clock.
+  if (/^(?:today|tomorrow|next\s+\w+|this\s+\w+)$/u.test(value)) return true;
+  return false;
+}
+
+function dateOnlyFromIssueTarget(issue: any, rawTarget: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(rawTarget.trim())) return rawTarget.trim();
+  const due = typeof issue?.due_at === "string" ? issue.due_at : "";
+  if (/^\d{4}-\d{2}-\d{2}/u.test(due)) return due.slice(0, 10);
+  return rawTarget.trim();
+}
+
+function addMinutesIso(iso: string, minutes: number): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso;
+  return new Date(date.getTime() + minutes * 60_000).toISOString();
+}
+
+function addOneDay(dateOnly: string): string {
+  const date = new Date(`${dateOnly}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime())) return dateOnly;
+  return new Date(date.getTime() + 24 * 60 * 60_000).toISOString().slice(0, 10);
+}
+
+function buildCalendarDescription(params: { repo: BdRepo; issue: any; target: string }): string {
+  const issue = unwrapIssue(params.issue);
+  const lines = [
+    `Beads issue: ${issue.id}`,
+    `Repo: ${params.repo.name}`,
+    `Status: ${issue.status ?? ""}`,
+    `Owner: ${issue.assignee ?? issue.owner ?? ""}`,
+    `Target: ${params.target}`,
+    "",
+    issue.description ? String(issue.description).slice(0, 1500) : "",
+  ];
+  return lines.join("\n").trim();
+}
+
+async function maybeCreateCalendarEvent(params: {
+  api: PluginApi;
+  repo: BdRepo;
+  issue: any;
+  previousIssue?: any;
+  opts: { cwd: string; bdBinary?: string };
+  reason: "create" | "target-added";
+}): Promise<void> {
+  const calendarSync = cfg(params.api).calendarSync ?? {};
+  if (calendarSync.enabled === false) return;
+  const issue = unwrapIssue(params.issue);
+  if (!issue?.id) return;
+  if (calendarEventIdOf(issue)) return;
+  if (params.previousIssue && targetDateTimeOf(params.previousIssue)) return;
+  const rawTarget = targetDateTimeOf(issue);
+  if (!rawTarget) return;
+
+  const account = calendarSync.account ?? "eddie@bighatbio.com";
+  const calendarId = calendarSync.calendarId ?? "primary";
+  const gogBinary = calendarSync.gogBinary ?? "gog";
+  const durationMinutes = Math.max(1, calendarSync.defaultTimedDurationMinutes ?? 30);
+  const allDay = shouldCreateAllDayEvent(rawTarget);
+  const allDayDate = allDay ? dateOnlyFromIssueTarget(issue, rawTarget) : "";
+  const from = allDay ? allDayDate : (issue.due_at ?? rawTarget);
+  const to = allDay ? addOneDay(allDayDate) : addMinutesIso(from, durationMinutes);
+  const summary = `[${params.repo.name}] ${issue.title ?? issue.id}`;
+  const description = buildCalendarDescription({ repo: params.repo, issue, target: rawTarget });
+  const args = [
+    "calendar",
+    "create",
+    calendarId,
+    "--account",
+    account,
+    "--summary",
+    summary,
+    "--from",
+    from,
+    "--to",
+    to,
+    "--description",
+    description,
+    "--send-updates",
+    "none",
+    "--no-input",
+    "--json",
+    "--private-prop",
+    `beads_issue_id=${issue.id}`,
+    "--private-prop",
+    `beads_repo=${params.repo.name}`,
+  ];
+  if (allDay) args.push("--all-day");
+  const { stdout } = await execFileAsync(gogBinary, args, {
+    timeout: 20_000,
+    maxBuffer: 1024 * 1024,
+  });
+  const parsed = JSON.parse(stdout.trim() || "{}");
+  const eventId = parsed.id ?? parsed.event?.id;
+  if (typeof eventId === "string" && eventId.trim()) {
+    await setIssueMetadata(
+      issue.id,
+      {
+        calendar_event_id: eventId.trim(),
+        calendar_id: calendarId,
+        calendar_account: account,
+        calendar_synced_at: new Date().toISOString(),
+      },
+      params.opts,
+    );
+  }
 }
 
 async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise<string | null> {
@@ -286,7 +470,24 @@ export function activate(api: PluginApi): void {
     );
   }
 
-
+  if (api.registerHook && api.runtime?.system?.requestHeartbeatNow) {
+    api.registerHook(
+      "gateway:startup",
+      () => {
+        const runLoop = cfg(api).runLoop;
+        if (runLoop?.enabled === false || runLoop?.startupWake === false) return;
+        api.runtime?.system?.requestHeartbeatNow?.({
+          reason: "beads:gateway-startup",
+          coalesceMs: runLoop?.startupWakeDelayMs ?? 1_000,
+          heartbeat: { target: runLoop?.startupWakeTarget ?? "last" },
+        });
+      },
+      {
+        name: "beads-gateway-startup-wake",
+        description: "Wake the agent loop after gateway startup so Beads ready work can be assessed.",
+      },
+    );
+  }
 
   const serveUiShell = async (_req: IncomingMessage, res: ServerResponse) => {
     const html = await loadUiShell();
@@ -318,6 +519,54 @@ export function activate(api: PluginApi): void {
       const repos = (cfg(api).repos ?? []).map((r) => ({ name: r.name, path: r.path }));
       const defaultRepo = repoByName(api, undefined)?.name;
       return sendJson(res, 200, { repos, defaultRepo, ownerOptions: ownerOptions(api) });
+    },
+  });
+
+  // --- GET /beads/api/ready?limit=1 ----------------------------------------
+  api.registerHttpRoute({
+    path: "/beads/api/ready",
+    auth: ROUTE_AUTH,
+    match: "exact",
+    handler: async (req, res) => {
+      const params = parseQuery(req.url ?? "");
+      const rawLimit = Number(params.get("limit") ?? "1");
+      const limit = Math.max(1, Math.min(10, Number.isFinite(rawLimit) ? rawLimit : 1));
+      const includeTest = params.get("includeTest") === "1" || params.get("includeTest") === "true";
+      const repos = (cfg(api).repos ?? []).filter((repo) => includeTest || !/test/i.test(repo.name));
+      try {
+        const results = await Promise.all(
+          repos.map(async (repo) => {
+            try {
+              const issues = await readyIssues(limit, {
+                cwd: repo.path,
+                bdBinary: cfg(api).bdBinary,
+                timeoutMs: 5_000,
+              });
+              const issueIds = new Set(issues.map((issue) => issue.id));
+              const edges = await listEdges(issues, { cwd: repo.path, bdBinary: cfg(api).bdBinary, timeoutMs: 5_000 });
+              const behindIds = new Set(edges.filter((edge) => issueIds.has(edge.to)).map((edge) => edge.from));
+              const allIssues = behindIds.size
+                ? await listIssues({ cwd: repo.path, bdBinary: cfg(api).bdBinary })
+                : [];
+              const behind = allIssues
+                .filter((issue) => behindIds.has(issue.id) && !issueIds.has(issue.id))
+                .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
+              return { repo: repo.name, path: repo.path, issues, behind };
+            } catch (err: any) {
+              return {
+                repo: repo.name,
+                path: repo.path,
+                issues: [] as BdIssue[],
+                error: String(err?.message ?? err).slice(0, 300),
+              };
+            }
+          }),
+        );
+        return sendJson(res, 200, { repos: results, limit });
+      } catch (err: any) {
+        log.warn(`[beads] /beads/api/ready failed:`, err?.message ?? err);
+        return sendJson(res, 500, { error: String(err?.message ?? err) });
+      }
     },
   });
 
@@ -367,8 +616,17 @@ export function activate(api: PluginApi): void {
         }
         if (method === "PATCH") {
           const body = (await readJsonBody(req)) as BdMutateInput;
+          const before = await showIssue(id, opts).catch(() => null);
           await updateIssue(id, body, opts);
           const detail = await showIssue(id, opts);
+          await maybeCreateCalendarEvent({
+            api,
+            repo,
+            issue: detail,
+            previousIssue: before,
+            opts,
+            reason: "target-added",
+          }).catch((err) => log.warn(`[beads] calendar sync after update failed for ${id}:`, err?.message ?? err));
           return sendJson(res, 200, { repo: repo.name, issue: detail });
         }
         if (method === "DELETE") {
@@ -450,11 +708,20 @@ export function activate(api: PluginApi): void {
         if (!body.owner || !body.owner.trim())
           return sendJson(res, 400, { error: "owner is required" });
         const references = (body.references ?? []).map((r) => r.trim()).filter(Boolean);
+        const opts = { cwd: repo.path, bdBinary: cfg(api).bdBinary };
         const issue = await createIssue(
           { ...body, owner: body.owner.trim(), references },
-          { cwd: repo.path, bdBinary: cfg(api).bdBinary },
+          opts,
         );
-        return sendJson(res, 200, { repo: repo.name, issue });
+        const detail = issue?.id ? await showIssue(issue.id, opts).catch(() => issue) : issue;
+        await maybeCreateCalendarEvent({
+          api,
+          repo,
+          issue: detail,
+          opts,
+          reason: "create",
+        }).catch((err) => log.warn(`[beads] calendar sync after create failed:`, err?.message ?? err));
+        return sendJson(res, 200, { repo: repo.name, issue: detail });
       } catch (err: any) {
         log.warn(`[beads] create failed:`, err?.message ?? err);
         return sendJson(res, 500, { error: String(err?.message ?? err) });

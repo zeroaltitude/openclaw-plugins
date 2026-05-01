@@ -15,10 +15,19 @@
         "items": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "path"],
+          "required": [
+            "name",
+            "path"
+          ],
           "properties": {
-            "name": { "type": "string", "description": "Display name (e.g., 'openclaw-vestige')" },
-            "path": { "type": "string", "description": "Absolute path to the repo containing .beads/" }
+            "name": {
+              "type": "string",
+              "description": "Display name (e.g., 'openclaw-vestige')"
+            },
+            "path": {
+              "type": "string",
+              "description": "Absolute path to the repo containing .beads/"
+            }
           }
         },
         "default": []
@@ -31,12 +40,79 @@
       "defaultRepo": {
         "type": "string",
         "description": "Repo name to load by default in the UI (must match a repos[].name)."
+      },
+      "calendarSync": {
+        "type": "object",
+        "description": "One-way Beads target_datetime/due_at to Google Calendar sync via gog.",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "account": {
+            "type": "string",
+            "default": "eddie@bighatbio.com"
+          },
+          "calendarId": {
+            "type": "string",
+            "default": "primary"
+          },
+          "defaultTimedDurationMinutes": {
+            "type": "number",
+            "default": 30
+          },
+          "gogBinary": {
+            "type": "string",
+            "default": "gog"
+          }
+        }
+      },
+      "runLoop": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "readyLimitPerRepo": {
+            "type": "number",
+            "default": 1
+          },
+          "includeUnassigned": {
+            "type": "boolean",
+            "default": false
+          },
+          "startupWake": {
+            "type": "boolean",
+            "default": true
+          },
+          "startupWakeTarget": {
+            "type": "string",
+            "default": "last"
+          },
+          "startupWakeDelayMs": {
+            "type": "number",
+            "default": 1000
+          }
+        }
       }
     }
   },
   "uiHints": {
-    "repos": { "label": "Beads Repos" },
-    "bdBinary": { "label": "bd Binary Path", "placeholder": "bd" },
-    "defaultRepo": { "label": "Default Repo Name" }
+    "repos": {
+      "label": "Beads Repos"
+    },
+    "bdBinary": {
+      "label": "bd Binary Path",
+      "placeholder": "bd"
+    },
+    "defaultRepo": {
+      "label": "Default Repo Name"
+    },
+    "calendarSync": {
+      "label": "Calendar Sync"
+    }
   }
 }

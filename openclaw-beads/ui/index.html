@@ -22,6 +22,8 @@
     .topbar .api-links a:hover { background: #1f2937; color: #dbeafe; }
     .topbar .new-btn { background: #1e40af; color: white; border: 1px solid #2563eb; border-radius: 6px; padding: 4px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
     .topbar .new-btn:hover { background: #2563eb; }
+    .topbar .work-btn { background: #0c0d0f; color: #bfdbfe; border: 1px solid #1e3a8a; border-radius: 6px; padding: 4px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
+    .topbar .work-btn:hover { background: #172554; color: #dbeafe; }
     .topbar .ver { font-size: 10px; color: #4b5563; font-family: ui-monospace, SFMono-Regular, monospace; padding: 2px 6px; border: 1px solid #1f2937; border-radius: 4px; }
 
     .err-banner { position: absolute; left: 16px; right: 16px; top: 60px; background: #1f0d0d; border: 1px solid #7f1d1d; border-radius: 6px; padding: 10px 14px; font-size: 12px; color: #fecaca; font-family: ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; z-index: 10; }
@@ -79,6 +81,22 @@
     .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
     .modal .actions button { padding: 8px 16px; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #e5e7eb; cursor: pointer; font-size: 13px; }
     .modal .actions .primary { background: #1e40af; border-color: #2563eb; }
+    .active-modal { min-width: min(1100px, 92vw); max-width: 92vw; }
+    .active-grid { min-height: 360px; display: flex; align-items: flex-start; justify-content: flex-start; gap: 16px; overflow-x: auto; padding: 12px 4px 4px; }
+    .active-col { width: 320px; min-width: 320px; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+    .active-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(112px, auto); gap: 8px; align-items: stretch; }
+    .active-section-title { margin-top: 2px; color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; text-align: left; }
+    .active-section-title.behind { margin-top: 10px; color: #f59e0b; }
+    .active-card.behind { opacity: 0.78; border-style: dashed; }
+    .active-repo { text-align: left; color: #93c5fd; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; padding: 6px 8px; border: 1px solid #1f2937; border-radius: 6px; background: #0c0d0f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .active-card { min-height: 112px; height: 100%; padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #0f1117; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
+    .active-card:hover { border-color: #60a5fa; background: #111827; }
+    .active-card.empty { cursor: default; color: #6b7280; justify-content: center; text-align: center; font-style: italic; }
+    .active-card.empty:hover { border-color: #374151; background: #0f1117; }
+    .active-id { color: #93c5fd; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .active-title { color: #e5e7eb; font-size: 11px; line-height: 1.25; min-height: 28px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .active-meta { display: flex; gap: 4px; flex-wrap: wrap; font-size: 9px; color: #9ca3af; }
+    .active-meta span { padding: 2px 6px; border: 1px solid #1f2937; border-radius: 4px; background: #0c0d0f; }
 
     .node-card { background: #11131a; border: 2px solid var(--status-color, #3b82f6); border-radius: 4px; padding: 5px 9px; height: 100%; display: flex; flex-direction: column; justify-content: center; cursor: pointer; pointer-events: auto; position: relative; }
     .node-card:hover { background: #1a1d27; box-shadow: 0 0 0 1px var(--status-color, #3b82f6); }
@@ -120,7 +138,7 @@
   <div id="root"><div class="empty">Loading…</div></div>
 
   <script type="module">
-    import React, { useEffect, useMemo, useState, useCallback } from "react";
+    import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
     import { createRoot } from "react-dom/client";
     import { Canvas, Node as ReaNode, Edge as ReaEdge } from "reaflow";
 
@@ -167,6 +185,8 @@
         .split(/[\n,]/)
         .map((s) => s.trim())
         .filter(Boolean);
+    const targetDateTimeOf = (issue) =>
+      issue?.target_datetime || issue?.targetDatetime || issue?.metadata?.target_datetime || issue?.due_at || "";
     const PRIORITIES = [
       { v: "0", label: "P0 (highest)" },
       { v: "1", label: "P1" },
@@ -185,8 +205,11 @@
       const [loading, setLoading] = useState(true);
       const [selectedId, setSelectedId] = useState(null);
       const [creating, setCreating] = useState(false);
+      const [showActiveWork, setShowActiveWork] = useState(false);
       const [reloadKey, setReloadKey] = useState(0);
       const [showClosed, setShowClosed] = useState(false);
+      const canvasWrapRef = useRef(null);
+      const canvasRef = useRef(null);
 
       useEffect(() => {
         fetch("/beads/api/repos")
@@ -215,6 +238,25 @@
         window.addEventListener("popstate", onPopState);
         return () => window.removeEventListener("popstate", onPopState);
       }, [repos]);
+
+      useEffect(() => {
+        const el = canvasWrapRef.current;
+        if (!el) return;
+        const onWheel = (event) => {
+          // Reaflow applies deltaY * -0.02 for wheel zoom in drag-pan mode,
+          // so a normal mouse notch can jump the whole graph. Capture and
+          // replace it with a capped, controlled zoom step.
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation?.();
+          const capped = Math.max(-80, Math.min(80, Math.abs(event.deltaY)));
+          const step = capped * 0.00075; // max 0.06 per wheel event
+          if (event.deltaY > 0) canvasRef.current?.zoomOut?.(-step);
+          else if (event.deltaY < 0) canvasRef.current?.zoomIn?.(step);
+        };
+        el.addEventListener("wheel", onWheel, { capture: true, passive: false });
+        return () => el.removeEventListener("wheel", onWheel, { capture: true });
+      }, []);
 
       useEffect(() => {
         if (!selectedRepo) return;
@@ -385,7 +427,7 @@
           "div",
           { className: "topbar" },
           React.createElement("h1", null, "🪡 Beads"),
-          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.20"),
+          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.32"),
           React.createElement(
             "select",
             {
@@ -426,6 +468,14 @@
               "error — see banner",
             ),
           React.createElement("span", { className: "spacer" }),
+          React.createElement(
+            "button",
+            {
+              className: "work-btn",
+              onClick: () => setShowActiveWork(true),
+            },
+            "Active work",
+          ),
           React.createElement(
             "button",
             {
@@ -495,7 +545,7 @@
           { className: "main" },
           React.createElement(
             "div",
-            { className: "canvas-wrap" },
+            { className: "canvas-wrap", ref: canvasWrapRef },
             reaflowNodes.length === 0
               ? React.createElement(
                   "div",
@@ -504,6 +554,7 @@
                 )
               : React.createElement(Canvas, {
                   key: `${selectedRepo}-${graphLayout.direction}-${issues.length}-${reaflowEdges.length}`,
+                  ref: canvasRef,
                   nodes: reaflowNodes,
                   edges: reaflowEdges,
                   fit: true,
@@ -677,6 +728,18 @@
             }),
         ),
 
+        // ── Active work modal ────────────────────────────────────────
+        showActiveWork &&
+          React.createElement(ActiveWorkModal, {
+            onClose: () => setShowActiveWork(false),
+            onOpenRepo: (repo) => {
+              setSelectedRepo(repo);
+              setSelectedId(null);
+              window.history.pushState(null, "", urlForRepo(repo));
+              setShowActiveWork(false);
+            },
+          }),
+
         // ── Create modal ─────────────────────────────────────────────
         creating &&
           React.createElement(CreateModal, {
@@ -691,6 +754,119 @@
       );
     }
 
+    function ActiveWorkModal({ onClose, onOpenRepo }) {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState(null);
+
+      useEffect(() => {
+        let cancelled = false;
+        fetch("/beads/api/ready?limit=4")
+          .then((r) => r.json())
+          .then((j) => {
+            if (j.error) throw new Error(j.error);
+            if (!cancelled) setData(j.repos || []);
+          })
+          .catch((e) => {
+            if (!cancelled) setErr(String(e?.message ?? e));
+          });
+        return () => {
+          cancelled = true;
+        };
+      }, []);
+
+      return React.createElement(
+        "div",
+        { className: "modal-bg", onClick: onClose },
+        React.createElement(
+          "div",
+          { className: "modal active-modal", onClick: (e) => e.stopPropagation() },
+          React.createElement("h2", null, "Active work"),
+          React.createElement(
+            "div",
+            { style: { color: "#9ca3af", fontSize: 12, marginBottom: 8 } },
+            "Ready issues per configured repo. Click a card to switch to that repo.",
+          ),
+          err && React.createElement("div", { style: { color: "#fca5a5", fontSize: 12 } }, err),
+          !data
+            ? React.createElement("div", { className: "empty" }, "Loading active work…")
+            : React.createElement(
+                "div",
+                { className: "active-grid" },
+                ...(data.length
+                  ? data.map((entry) => {
+                      const issues = entry.issues || [];
+                      const behind = entry.behind || [];
+                      return React.createElement(
+                        "div",
+                        { key: entry.repo, className: "active-col" },
+                        React.createElement("div", { className: "active-repo", title: entry.path || entry.repo }, `${entry.repo} (${issues.length}${behind.length ? ` + ${behind.length}` : ""})`),
+                        React.createElement("div", { className: "active-section-title" }, "Ready now"),
+                        issues.length
+                          ? React.createElement(
+                              "div",
+                              { className: "active-list" },
+                              ...issues.map((issue) =>
+                                React.createElement(
+                                  "div",
+                                  { key: issue.id, className: "active-card", onClick: () => onOpenRepo(entry.repo) },
+                                  React.createElement("div", { className: "active-id" }, issue.id),
+                                  React.createElement("div", { className: "active-title" }, issue.title || "(no title)"),
+                                  React.createElement(
+                                    "div",
+                                    { className: "active-meta" },
+                                    React.createElement("span", null, issue.status || "open"),
+                                    React.createElement("span", null, issue.issue_type || issue.type || "task"),
+                                    React.createElement("span", null, `P${issue.priority ?? "?"}`),
+                                    React.createElement("span", null, `👤 ${issue.assignee || "(none)"}`),
+                                  ),
+                                ),
+                              ),
+                            )
+                          : React.createElement(
+                              "div",
+                              { className: "active-card empty" },
+                              entry.error ? `error: ${entry.error}` : "No ready work",
+                            ),
+                        behind.length
+                          ? React.createElement(
+                              React.Fragment,
+                              null,
+                              React.createElement("div", { className: "active-section-title behind" }, "Blocked behind ready"),
+                              React.createElement(
+                                "div",
+                                { className: "active-list" },
+                                ...behind.map((issue) =>
+                                  React.createElement(
+                                    "div",
+                                    { key: issue.id, className: "active-card behind", onClick: () => onOpenRepo(entry.repo) },
+                                    React.createElement("div", { className: "active-id" }, issue.id),
+                                    React.createElement("div", { className: "active-title" }, issue.title || "(no title)"),
+                                    React.createElement(
+                                      "div",
+                                      { className: "active-meta" },
+                                      React.createElement("span", null, issue.status || "open"),
+                                      React.createElement("span", null, issue.issue_type || issue.type || "task"),
+                                      React.createElement("span", null, `P${issue.priority ?? "?"}`),
+                                      React.createElement("span", null, `👤 ${issue.assignee || "(none)"}`),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            )
+                          : null,
+                      );
+                    })
+                  : [React.createElement("div", { key: "none", className: "empty" }, "No configured non-test repos")]),
+              ),
+          React.createElement(
+            "div",
+            { className: "actions" },
+            React.createElement("button", { onClick: onClose }, "Close"),
+          ),
+        ),
+      );
+    }
+
     function DetailPanel({ repo, issue, allIssues, edges, ownerOptions, onClose, onChanged, onDeleted, onSelectIssue }) {
       const [editing, setEditing] = useState(false);
       const [title, setTitle] = useState(issue.title || "");
@@ -701,6 +877,7 @@
       const [status, setStatus] = useState(issue.status || "open");
       const issueRefs = referencesFromLabels(issue.labels);
       const [referencesText, setReferencesText] = useState(issueRefs.join("\n"));
+      const [targetDatetime, setTargetDatetime] = useState(targetDateTimeOf(issue));
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState(null);
 
@@ -724,6 +901,7 @@
               type,
               status,
               references,
+              target_datetime: targetDatetime.trim(),
             }),
           });
           const j = await r.json();
@@ -865,6 +1043,8 @@
             : React.createElement("span", null, `P${issue.priority ?? "?"}`),
           issue.created_at &&
             React.createElement("span", { title: "created" }, issue.created_at.slice(0, 10)),
+          targetDateTimeOf(issue) &&
+            React.createElement("span", { title: "target datetime" }, `🎯 ${String(targetDateTimeOf(issue)).slice(0, 16)}`),
         ),
         editing
           ? React.createElement(
@@ -911,6 +1091,12 @@
                   ),
                 ),
               ),
+              React.createElement("label", null, "Target datetime (optional; ISO or bd due syntax)"),
+              React.createElement("input", {
+                value: targetDatetime,
+                onChange: (e) => setTargetDatetime(e.target.value),
+                placeholder: "2026-05-02T09:00:00-07:00 or +1d or next monday",
+              }),
               React.createElement("label", null, "Reference files (one path per line; optional)"),
               React.createElement("textarea", {
                 value: referencesText,
@@ -931,6 +1117,13 @@
                   "👤 ",
                   issue.assignee || "(no owner)",
                 ),
+                targetDateTimeOf(issue) &&
+                  React.createElement(
+                    "span",
+                    { title: "target datetime", style: { background: "#1f172a", borderColor: "#7c3aed", color: "#ddd6fe" } },
+                    "🎯 ",
+                    targetDateTimeOf(issue),
+                  ),
                 ...(issueRefs.length
                   ? issueRefs.map((m) =>
                       React.createElement(
@@ -942,6 +1135,13 @@
                     )
                   : [React.createElement("span", { key: "_none", style: { color: "#9ca3af" } }, "(no reference files)")]),
               ),
+              targetDateTimeOf(issue) &&
+                React.createElement(
+                  "div",
+                  { className: "desc", style: { marginBottom: 10, maxHeight: "none" } },
+                  React.createElement("strong", null, "Target datetime: "),
+                  targetDateTimeOf(issue),
+                ),
               React.createElement(
                 "div",
                 { className: "desc" },
@@ -998,6 +1198,7 @@
                       setType(issue.issue_type || "task");
                       setStatus(issue.status || "open");
                       setReferencesText(referencesFromLabels(issue.labels).join("\n"));
+                      setTargetDatetime(targetDateTimeOf(issue));
                     },
                     disabled: busy,
                   },
@@ -1034,6 +1235,7 @@
       const [priority, setPriority] = useState("2");
       const [owner, setOwner] = useState(ownerOptions?.[0] || "any");
       const [referencesText, setReferencesText] = useState("");
+      const [targetDatetime, setTargetDatetime] = useState("");
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState(null);
 
@@ -1054,6 +1256,7 @@
               priority,
               owner: owner.trim(),
               references,
+              target_datetime: targetDatetime.trim(),
             }),
           });
           const j = await r.json();
@@ -1094,6 +1297,12 @@
               React.createElement("option", { key: o, value: o }, o),
             ),
           ),
+          React.createElement("label", null, "Target datetime (optional; ISO or bd due syntax)"),
+          React.createElement("input", {
+            value: targetDatetime,
+            onChange: (e) => setTargetDatetime(e.target.value),
+            placeholder: "2026-05-02T09:00:00-07:00 or +1d or next monday",
+          }),
           React.createElement("label", null, "Reference files — one path per line (optional; agents can backfill)"),
           React.createElement("textarea", {
             value: referencesText,

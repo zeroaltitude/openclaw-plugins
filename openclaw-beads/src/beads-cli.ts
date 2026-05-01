@@ -22,6 +22,8 @@ export interface BdMutateInput {
   owner?: string;
   /** Reference file paths relevant for context. Stored as labels `ref:<path>`. Optional. */
   references?: string[];
+  /** Calendarable target/deadline. Stored as bd due_at plus metadata.target_datetime. */
+  target_datetime?: string;
 }
 
 export const REFERENCE_LABEL_PREFIX = "ref:";
@@ -164,6 +166,10 @@ export async function createIssue(
   if (input.priority !== undefined && input.priority !== null && input.priority !== "")
     args.push("--priority", String(input.priority));
   if (input.owner) args.push("--assignee", input.owner);
+  if (input.target_datetime) {
+    args.push("--due", input.target_datetime);
+    args.push("--metadata", JSON.stringify({ target_datetime: input.target_datetime }));
+  }
   // bd create takes labels via repeated --label
   for (const r of input.references ?? []) {
     if (r && r.trim()) args.push("--label", `${REFERENCE_LABEL_PREFIX}${r.trim()}`);
@@ -194,6 +200,12 @@ export async function updateIssue(
   if (patch.status !== undefined && patch.status !== "") args.push("--status", patch.status);
   if (patch.type !== undefined && patch.type !== "") args.push("--type", patch.type);
   if (patch.owner !== undefined) args.push("--assignee", patch.owner);
+  if (patch.target_datetime !== undefined) {
+    const target = patch.target_datetime.trim();
+    args.push("--due", target);
+    if (target) args.push("--set-metadata", `target_datetime=${target}`);
+    else args.push("--unset-metadata", "target_datetime");
+  }
   if (args.length > 2) await runBd(args, opts);
 
   // Reference labels are reconciled separately because bd's update CLI uses
@@ -243,6 +255,19 @@ export async function reopenIssue(id: string, opts: BdRunOptions): Promise<void>
 /** Permanently delete an issue. */
 export async function deleteIssue(id: string, opts: BdRunOptions): Promise<void> {
   await runBd(["delete", id, "--force"], opts);
+}
+
+/** Set custom metadata fields on an issue. */
+export async function setIssueMetadata(
+  id: string,
+  metadata: Record<string, string>,
+  opts: BdRunOptions,
+): Promise<void> {
+  const args = ["update", id];
+  for (const [key, value] of Object.entries(metadata)) {
+    args.push("--set-metadata", `${key}=${value}`);
+  }
+  if (args.length > 2) await runBd(args, opts);
 }
 
 /** List dependency-ready work using Beads' own ready-work semantics. */
