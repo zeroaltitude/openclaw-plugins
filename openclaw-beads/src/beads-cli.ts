@@ -204,7 +204,13 @@ export async function updateIssue(
     const target = patch.target_datetime.trim();
     args.push("--due", target);
     if (target) args.push("--set-metadata", `target_datetime=${target}`);
-    else args.push("--unset-metadata", "target_datetime");
+    else {
+      args.push("--unset-metadata", "target_datetime");
+      args.push("--unset-metadata", "calendar_event_id");
+      args.push("--unset-metadata", "calendar_id");
+      args.push("--unset-metadata", "calendar_account");
+      args.push("--unset-metadata", "calendar_synced_at");
+    }
   }
   if (args.length > 2) await runBd(args, opts);
 

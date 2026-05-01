@@ -278,6 +278,19 @@ function buildCalendarDescription(params: { repo: BdRepo; issue: any; target: st
   return lines.join("\n").trim();
 }
 
+function scheduleCalendarEventCreate(params: {
+  api: PluginApi;
+  repo: BdRepo;
+  issue: any;
+  previousIssue?: any;
+  opts: { cwd: string; bdBinary?: string };
+  reason: "create" | "target-added";
+}): void {
+  void maybeCreateCalendarEvent(params).catch((err) =>
+    params.api.logger.warn(`[beads] calendar sync ${params.reason} failed for ${unwrapIssue(params.issue)?.id ?? "unknown"}:`, err?.message ?? err),
+  );
+}
+
 async function maybeCreateCalendarEvent(params: {
   api: PluginApi;
   repo: BdRepo;
@@ -619,14 +632,14 @@ export function activate(api: PluginApi): void {
           const before = await showIssue(id, opts).catch(() => null);
           await updateIssue(id, body, opts);
           const detail = await showIssue(id, opts);
-          await maybeCreateCalendarEvent({
+          scheduleCalendarEventCreate({
             api,
             repo,
             issue: detail,
             previousIssue: before,
             opts,
             reason: "target-added",
-          }).catch((err) => log.warn(`[beads] calendar sync after update failed for ${id}:`, err?.message ?? err));
+          });
           return sendJson(res, 200, { repo: repo.name, issue: detail });
         }
         if (method === "DELETE") {
@@ -714,13 +727,13 @@ export function activate(api: PluginApi): void {
           opts,
         );
         const detail = issue?.id ? await showIssue(issue.id, opts).catch(() => issue) : issue;
-        await maybeCreateCalendarEvent({
+        scheduleCalendarEventCreate({
           api,
           repo,
           issue: detail,
           opts,
           reason: "create",
-        }).catch((err) => log.warn(`[beads] calendar sync after create failed:`, err?.message ?? err));
+        });
         return sendJson(res, 200, { repo: repo.name, issue: detail });
       } catch (err: any) {
         log.warn(`[beads] create failed:`, err?.message ?? err);

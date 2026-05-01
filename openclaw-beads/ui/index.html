@@ -290,6 +290,19 @@
         };
       }, [selectedRepo, reloadKey]);
 
+      const normalizeIssuePayload = (payload) => Array.isArray(payload) ? payload[0] : payload;
+
+      const applyIssueUpdate = (payload) => {
+        const next = normalizeIssuePayload(payload);
+        if (!next?.id) return;
+        setIssues((prev) => prev.map((issue) => (issue.id === next.id ? next : issue)));
+      };
+
+      const removeIssueLocal = (id) => {
+        setIssues((prev) => prev.filter((issue) => issue.id !== id));
+        setEdges((prev) => prev.filter((edge) => edge.from !== id && edge.to !== id));
+      };
+
       const refresh = () => setReloadKey((k) => k + 1);
 
       const visibleIssues = useMemo(
@@ -427,7 +440,7 @@
           "div",
           { className: "topbar" },
           React.createElement("h1", null, "🪡 Beads"),
-          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.32"),
+          React.createElement("span", { className: "ver", title: "Plugin UI build" }, "v0.1.33"),
           React.createElement(
             "select",
             {
@@ -717,10 +730,12 @@
               edges: edges,
               onClose: () => setSelectedId(null),
               ownerOptions: ownerOptions,
-              onChanged: () => {
+              onChanged: (updatedIssue) => {
+                if (updatedIssue) applyIssueUpdate(updatedIssue);
                 refresh();
               },
-              onDeleted: () => {
+              onDeleted: (id) => {
+                if (id) removeIssueLocal(id);
                 setSelectedId(null);
                 refresh();
               },
@@ -907,7 +922,7 @@
           const j = await r.json();
           if (j.error) throw new Error(j.error);
           setEditing(false);
-          onChanged();
+          onChanged(j.issue);
         } catch (e) {
           setErr(String(e?.message ?? e));
         } finally {
@@ -927,7 +942,7 @@
           });
           const j = await r.json();
           if (j.error) throw new Error(j.error);
-          onChanged();
+          onChanged(j.issue);
         } catch (e) {
           setErr(String(e?.message ?? e));
         } finally {
@@ -999,7 +1014,7 @@
           });
           const j = await r.json();
           if (j.error) throw new Error(j.error);
-          onDeleted();
+          onDeleted(issue.id);
         } catch (e) {
           setErr(String(e?.message ?? e));
           setBusy(false);
