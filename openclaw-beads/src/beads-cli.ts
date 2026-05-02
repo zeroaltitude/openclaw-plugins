@@ -110,7 +110,7 @@ async function runBd(args: string[], opts: BdRunOptions): Promise<string> {
 export async function listIssues(opts: BdRunOptions): Promise<BdIssue[]> {
   // Fast path: Beads auto-exports a JSONL cache after writes. It contains
   // the same issue records plus dependency arrays, and avoids spawning bd.
-  const exported = await listIssuesFromExport(opts.cwd).catch(() => null);
+  const exported = await readIssuesJsonl(opts.cwd).catch(() => null);
   if (exported) return exported;
 
   const out = await runBd(["list", "--all", "--json"], opts);
@@ -126,20 +126,54 @@ export async function listIssues(opts: BdRunOptions): Promise<BdIssue[]> {
   }
 }
 
-async function listIssuesFromExport(cwd: string): Promise<BdIssue[] | null> {
+/**
+ * Read every issue record from `.beads/issues.jsonl`.
+ *
+ * This is the single source of truth for every read fast path in the
+ * plugin (list/ready/show). Returns null when the cache file is missing
+ * or unparseable so callers can fall back to spawning `bd`.
+ *
+ * Exceptions to the fast path (still require a `bd` spawn):
+ *   - All write paths (create/update/close/reopen/delete/dep add/dep
+ *     remove/set-metadata/export) — bd is the only safe writer to the
+ *     Dolt-backed store.
+ *   - bd's `ready` semantics that aren't surfaced in the JSONL: the
+ *     ephemeral (wisp) flag and the molecule "hooked" flag aren't
+ *     recorded as top-level fields, so the fast path can't filter
+ *     them. Current callers don't use those filters; document for
+ *     review if that changes.
+ */
+export async function readIssuesJsonl(cwd: string): Promise<BdIssue[] | null> {
   const path = join(cwd, ".beads", "issues.jsonl");
-  const text = await readFile(path, "utf8");
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
   const issues: BdIssue[] = [];
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const parsed = JSON.parse(trimmed);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      // One bad line invalidates the fast path — fall back to bd.
+      return null;
+    }
     if (parsed && (parsed._type === undefined || parsed._type === "issue") && typeof parsed.id === "string") {
       issues.push(parsed as BdIssue);
     }
   }
   return issues;
 }
+
+/** Back-compat alias retained in case downstream code imports it. */
+async function listIssuesFromExport(cwd: string): Promise<BdIssue[] | null> {
+  return readIssuesJsonl(cwd);
+}
+void listIssuesFromExport;
 
 function stripWarnings(stdout: string): string {
   // bd writes "Warning: ...\nRun: ...\n" preamble to stdout when permissions are off.
@@ -148,8 +182,29 @@ function stripWarnings(stdout: string): string {
   return lines.join("\n").trim();
 }
 
-/** Fetch a single issue's full detail (description, comments, etc.) */
-export async function showIssue(id: string, opts: BdRunOptions): Promise<any> {
+/** Fetch a single issue's full detail (description, comments, etc.).
+ *
+ * Fast path reads `.beads/issues.jsonl`. Pass `forceFresh: true` when the
+ * caller has just mutated the issue and needs the post-write state
+ * authoritatively (e.g. label reconciliation inside updateIssue). The
+ * JSONL is refreshed via `refreshExport()` after every write but the bd
+ * CLI is still the only authoritative source for sub-second post-write
+ * reads.
+ */
+export async function showIssue(
+  id: string,
+  opts: BdRunOptions,
+  showOpts: { forceFresh?: boolean } = {},
+): Promise<any> {
+  if (!showOpts.forceFresh) {
+    const issues = await readIssuesJsonl(opts.cwd).catch(() => null);
+    if (issues) {
+      const match = issues.find((issue) => issue.id === id);
+      if (match) return match;
+      // Issue not in the export. Could be ephemeral/wisp or freshly created
+      // before the next refresh. Fall through to bd.
+    }
+  }
   const out = await runBd(["show", id, "--json"], opts);
   const trimmed = stripWarnings(out);
   return JSON.parse(trimmed);
@@ -218,7 +273,9 @@ export async function updateIssue(
   // Reference labels are reconciled separately because bd's update CLI uses
   // additive --add-label / --remove-label rather than replacing the full set.
   if (patch.references !== undefined) {
-    const current = await showIssue(id, opts).catch(() => null);
+    // forceFresh: we just wrote above and need authoritative live labels,
+    // not the JSONL snapshot which may briefly lag.
+    const current = await showIssue(id, opts, { forceFresh: true }).catch(() => null);
     const currentRefs = new Set(referencesFromLabels(current?.labels));
     const desiredRefs = new Set((patch.references ?? []).map((r) => r.trim()).filter(Boolean));
     const toAdd: string[] = [];
@@ -302,9 +359,29 @@ export async function setIssueMetadata(
   }
 }
 
-/** List dependency-ready work using Beads' own ready-work semantics. */
+/** List dependency-ready work using Beads' own ready-work semantics.
+ *
+ * Fast path: compute readiness from `.beads/issues.jsonl` so the prompt-block
+ * builder doesn't fork `bd` per repo on every cache miss. Falls back to
+ * `bd ready --json` when the JSONL is missing/unparseable, when any issue
+ * record is missing the `dependency_count` signal we use to detect
+ * dep-aware exports, or when a blocker reference can't be resolved
+ * locally (defensive: lets bd's authoritative GetReadyWork API decide).
+ *
+ * Exceptions — the JSONL fast path does NOT replicate these bd `ready`
+ * filters because the data isn't surfaced in the export:
+ *   - ephemeral (wisp) issues are not flagged as a top-level field
+ *   - molecule "hooked" state is not flagged as a top-level field
+ * Current callers don't pass those filters; if a caller starts using them
+ * we should either extend the JSONL exporter or force the bd fallback for
+ * that call.
+ */
 export async function readyIssues(limit: number, opts: BdRunOptions): Promise<BdIssue[]> {
-  const out = await runBd(["ready", "--json", "--limit", String(Math.max(1, limit))], {
+  const safeLimit = Math.max(1, limit);
+  const fast = await readyIssuesFromExport(opts.cwd, safeLimit).catch(() => null);
+  if (fast) return fast;
+
+  const out = await runBd(["ready", "--json", "--limit", String(safeLimit)], {
     ...opts,
     timeoutMs: opts.timeoutMs ?? 5_000,
   });
@@ -318,6 +395,102 @@ export async function readyIssues(limit: number, opts: BdRunOptions): Promise<Bd
   } catch {
     throw new Error(`bd ready returned non-JSON output: ${trimmed.slice(0, 200)}`);
   }
+}
+
+/** Compute ready issues from the JSONL export, mirroring `bd ready` semantics:
+ *  - status === "open" (excludes in_progress / blocked / deferred / closed)
+ *  - defer_until missing or already in the past
+ *  - every entry in `dependencies` resolves to a closed issue
+ *  - sorted by priority asc, then created_at asc (matches bd default)
+ *  - capped to `limit`
+ *
+ *  Returns null when the JSONL is missing, unparseable, or doesn't carry
+ *  enough metadata to safely answer (e.g. a blocker isn't in the export,
+ *  or the export predates `dependency_count` and we can't tell whether
+ *  zero-dep issues actually have hidden blockers).
+ */
+export async function readyIssuesFromExport(
+  cwd: string,
+  limit: number,
+): Promise<BdIssue[] | null> {
+  const issues = await readIssuesJsonl(cwd);
+  if (!issues) return null;
+
+  const byId = new Map<string, BdIssue>();
+  for (const issue of issues) byId.set(issue.id, issue);
+
+  // The exporter started writing dependency_count later in bd's life. If
+  // we don't see it on any record, we can't safely declare an issue
+  // unblocked from the JSONL alone — fall back to bd.
+  let sawDependencyCount = false;
+  for (const issue of issues) {
+    if (typeof (issue as any).dependency_count === "number") {
+      sawDependencyCount = true;
+      break;
+    }
+  }
+  if (!sawDependencyCount) return null;
+
+  const now = Date.now();
+  const ready: BdIssue[] = [];
+  for (const issue of issues) {
+    if ((issue as any).status !== "open") continue;
+
+    const deferUntil = (issue as any).defer_until ?? (issue as any).deferUntil;
+    if (typeof deferUntil === "string" && deferUntil) {
+      const t = Date.parse(deferUntil);
+      if (Number.isFinite(t) && t > now) continue;
+    }
+
+    const depCount = Number((issue as any).dependency_count ?? 0);
+    if (depCount > 0) {
+      const deps = collectDeps(issue);
+      if (!deps.length) {
+        // Export claims this issue has deps but didn't include the array.
+        // Can't confirm readiness locally — bail.
+        return null;
+      }
+      let blocked = false;
+      for (const dep of deps) {
+        const target = byId.get(dep.id);
+        if (!target) {
+          // Unknown blocker (cross-repo? exported before target?). Be
+          // conservative and let bd decide for this whole repo.
+          return null;
+        }
+        if ((target as any).status !== "closed") {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) continue;
+    }
+
+    ready.push(issue);
+  }
+
+  ready.sort(compareReadyIssues);
+  return ready.slice(0, limit);
+}
+
+function compareReadyIssues(a: BdIssue, b: BdIssue): number {
+  const pa = priorityRank((a as any).priority);
+  const pb = priorityRank((b as any).priority);
+  if (pa !== pb) return pa - pb;
+  const ca = String((a as any).created_at ?? "");
+  const cb = String((b as any).created_at ?? "");
+  if (ca && cb && ca !== cb) return ca < cb ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function priorityRank(raw: unknown): number {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+  // Treat missing priority as lowest urgency.
+  return Number.MAX_SAFE_INTEGER;
 }
 
 /** Add a dependency edge: `child` depends on `parent` (child is blocked by parent). */
