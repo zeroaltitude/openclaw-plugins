@@ -139,6 +139,17 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   Read: "trusted",
   Edit: "trusted",
   Write: "trusted",
+  // dir_list / dir_fetch / file_fetch / file_write: read or write to paired
+  // nodes the owner has provisioned. All four are policy-gated by
+  // gateway.nodes.allowCommands plus per-node allowReadPaths/allowWritePaths;
+  // unconfigured calls are denied. Treating their output as untrusted by
+  // default poisons agent heartbeat watermarks (see
+  // provenance:agent:<id>:<channel>:heartbeat) without protecting anything
+  // the policy layer hasn't already authorized.
+  dir_list: "trusted",
+  dir_fetch: "trusted",
+  file_fetch: "trusted",
+  file_write: "trusted",
   exec: "trusted",
   process: "trusted",
   tts: "trusted",
@@ -179,6 +190,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   vestige_explore_connections: "trusted", // graph traversal of local memory
   vestige_predict: "trusted", // prediction from local memory state
   vestige_session_context: "trusted", // combined session init from local memory
+  vestige_backup: "trusted", // local SQLite VACUUM INTO; output is path/status
 
   // ── External sources ──────────────────────────────────────────────
   message: "external", // channel messages contain external content

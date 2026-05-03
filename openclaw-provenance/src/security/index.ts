@@ -821,6 +821,191 @@ export function registerSecurityHooks(
     },
   });
 
+  // --- /trust-status command (read-only inspector) ---
+  // Lists every persisted watermark with level, reason, age, and reset count.
+  // Optional arg filters by sessionKey substring match (e.g. "narcissus",
+  // "agent:tank", "agent:narcissus:cron"). Output is grouped by agent id and
+  // marks heartbeat keys explicitly.
+  api.registerCommand?.({
+    name: "trust-status",
+    description:
+      "Show persisted taint watermarks. Usage: /trust-status [agentOrPrefix]",
+    acceptsArgs: true,
+    requireAuth: true,
+    handler: (ctx: any) => {
+      const filter = ((ctx.args ?? "") as string).trim();
+      const all = watermarkStore.listAll();
+      const entries = Object.entries(all).filter(([key]) =>
+        filter ? key.includes(filter) : true,
+      );
+
+      if (!entries.length) {
+        return {
+          text: filter
+            ? `No taint watermarks match \`${filter}\`.`
+            : "No taint watermarks set. All sessions start trusted.",
+        };
+      }
+
+      // Group by agent id (first "agent:<id>:..." segment); fall back to
+      // "(other)" for keys that don't follow the agent: prefix convention.
+      const groups = new Map<string, Array<[string, any]>>();
+      for (const [key, entry] of entries) {
+        const m = key.match(/^agent:([^:]+):/);
+        const agent = m ? m[1] : "(other)";
+        if (!groups.has(agent)) groups.set(agent, []);
+        groups.get(agent)!.push([key, entry]);
+      }
+
+      const now = Date.now();
+      const fmtAge = (iso: string): string => {
+        const t = Date.parse(iso);
+        if (!Number.isFinite(t)) return "?";
+        const ms = Math.max(0, now - t);
+        const s = Math.floor(ms / 1000);
+        if (s < 60) return `${s}s`;
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m}m`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `${h}h${m % 60}m`;
+        const d = Math.floor(h / 24);
+        return `${d}d${h % 24}h`;
+      };
+
+      const levelEmoji: Record<string, string> = {
+        trusted: "\ud83d\udfe2",
+        shared: "\ud83d\udfe1",
+        external: "\ud83d\udfe0",
+        untrusted: "\ud83d\udd34",
+      };
+
+      const lines: string[] = [];
+      lines.push(
+        `Persisted taint watermarks (${entries.length} entr${entries.length === 1 ? "y" : "ies"}${filter ? `, filter: \`${filter}\`` : ""}):`,
+      );
+      lines.push("");
+
+      const sortedAgents = Array.from(groups.keys()).sort();
+      for (const agent of sortedAgents) {
+        lines.push(`**${agent}**`);
+        const items = groups.get(agent)!.sort(([a], [b]) => a.localeCompare(b));
+        for (const [key, entry] of items) {
+          const isHeartbeat = key.endsWith(":heartbeat");
+          const tag = isHeartbeat ? " [heartbeat]" : "";
+          const emoji = levelEmoji[entry.level] ?? "\u26aa";
+          const age = fmtAge(entry.escalatedAt);
+          const resetCount = Array.isArray(entry.resetHistory)
+            ? entry.resetHistory.length
+            : 0;
+          const resetNote = resetCount > 0 ? ` resets=${resetCount}\u00b7` : "";
+          lines.push(`  ${emoji} \`${key}\`${tag}`);
+          lines.push(
+            `      level=${entry.level} \u00b7 age=${age} \u00b7${resetNote} reason: ${entry.reason}`,
+          );
+        }
+        lines.push("");
+      }
+
+      lines.push(
+        "Clear specific keys with `/reset-trust-key <sessionKeyOrPrefix>` or all with `/reset-trust`.",
+      );
+
+      return { text: lines.join("\n") };
+    },
+  });
+
+  // --- /reset-trust-key command (surgical clear) ---
+  // Clears watermarks matching a literal sessionKey OR a substring/glob.
+  // Mirrors the per-key sequence used by /reset-trust but limits the blast
+  // radius. Refuses to silently include the caller's own session unless the
+  // arg matches it exactly (so prefix typos don't nuke the live session).
+  api.registerCommand?.({
+    name: "reset-trust-key",
+    description:
+      "Clear taint watermarks for matching sessionKey(s). Usage: /reset-trust-key <sessionKeyOrPrefix>",
+    acceptsArgs: true,
+    requireAuth: true,
+    handler: (ctx: any) => {
+      const rawArg = ((ctx.args ?? "") as string).trim();
+      if (!rawArg) {
+        return {
+          text:
+            "Usage: `/reset-trust-key <sessionKeyOrPrefix>`\n" +
+            "Examples:\n" +
+            "  `/reset-trust-key agent:narcissus:main:heartbeat` \u2014 exact key\n" +
+            "  `/reset-trust-key agent:narcissus` \u2014 every narcissus key\n" +
+            "  `/reset-trust-key :heartbeat` \u2014 every heartbeat key across agents\n" +
+            "Tip: list current keys with `/trust-status`.",
+        };
+      }
+
+      const callerSessionKey = (
+        ctx.sessionKey ??
+        ctx.session?.key ??
+        deriveSessionKeyFromCommandContext(ctx) ??
+        ""
+      ) as string;
+
+      const all = watermarkStore.listAll();
+      const allKeys = Object.keys(all);
+
+      // Match strategy: exact key wins; otherwise substring (the simple
+      // form covers prefix, suffix, and middle matches without needing a
+      // glob parser).
+      const exactMatch = allKeys.includes(rawArg) ? [rawArg] : [];
+      const substringMatches = exactMatch.length
+        ? exactMatch
+        : allKeys.filter((k) => k.includes(rawArg));
+
+      // Safety: don't sweep the caller's own session unless they typed it
+      // exactly. Prevents `/reset-trust-key agent:tank` from clearing a
+      // running tank session as a side effect.
+      const matches = substringMatches.filter((k) => {
+        if (!callerSessionKey || k !== callerSessionKey) return true;
+        return rawArg === callerSessionKey;
+      });
+      const skippedSelf = substringMatches.length !== matches.length;
+
+      if (!matches.length) {
+        const note = skippedSelf
+          ? " (caller session was the only match; pass the exact sessionKey to include it)"
+          : "";
+        return {
+          text: `No watermarks match \`${rawArg}\`.${note}`,
+        };
+      }
+
+      const cleared: Array<{ key: string; priorLevel: string }> = [];
+      for (const key of matches) {
+        const priorLevel = all[key]?.level ?? "unknown";
+        watermarkStore.clear(key);
+        blockedToolsBySession.delete(key);
+        approvalStore.clearAll(key);
+        store.discardActive(key);
+        cleared.push({ key, priorLevel });
+        logger.info(
+          `[provenance:${shortKey(key)}] \ud83d\udd04 TRUST_RESET (key command): cleared watermark (was ${priorLevel}) \u2192 trusted`,
+        );
+      }
+      watermarkStore.flush();
+
+      const lines: string[] = [];
+      lines.push(
+        `\u2705 Cleared ${cleared.length} watermark${cleared.length === 1 ? "" : "s"}:`,
+      );
+      for (const c of cleared) {
+        lines.push(`  \u2022 \`${c.key}\` (was ${c.priorLevel})`);
+      }
+      if (skippedSelf) {
+        lines.push("");
+        lines.push(
+          `_Skipped caller session \`${callerSessionKey}\`; pass the full sessionKey to include it._`,
+        );
+      }
+      return { text: lines.join("\n") };
+    },
+  });
+
   // --- /approve-exec command (deterministic, pre-loop approval — replaces .approve in LLM context) ---
   // Grants tool approval for the current session. Runs before the agent loop.
   // Usage: /approve-exec <tool|all> [session|<N>m|<N>h]
