@@ -2030,38 +2030,16 @@ export function registerSecurityHooks(
       if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return undefined;
       if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return undefined;
 
-      // Two paths to footer data:
-      //   (1) agent_end already staged finalTaintBySession (preferred path,
-      //       includes uriTaintRecords for the sources summary).
-      //   (2) agent_end hasn't completed yet — it fires fire-and-forget
-      //       (`void hookRunner.runAgentEnd(...)`) from the agent harness,
-      //       so message_sending can race ahead of it. We must NOT depend
-      //       on staging; compute from live state as a fallback. Without
-      //       this fallback the footer alternates per-turn based on which
-      //       async path wins the microtask race.
-      let final = finalTaintBySession.get(sessionKey);
-      let consumed = false;
-      if (final) {
-        consumed = true;
-      } else {
-        const graph = store.getActive(sessionKey);
-        const watermark = watermarkStore.getLevel(sessionKey);
-        const endLevel: TrustLevel = graph?.maxTaint ?? watermark?.level ?? "trusted";
-        const endReason = graph
-          ? buildTaintReason(graph, watermark?.reason)
-          : watermark?.reason ?? "unknown";
-        const turnStart = turnStartTaintBySession.get(sessionKey);
-        final = {
-          startLevel: turnStart?.level ?? "trusted",
-          startReason: turnStart?.reason ?? "unknown",
-          endLevel,
-          endReason,
-          impactedTool: lastImpactedToolBySession.get(sessionKey) ?? "none",
-          // URI summary is only populated by agent_end's full graph walk;
-          // omit it on the fallback path rather than racing on a partial graph.
-          uriTaintRecords: [],
-        };
-      }
+      // The footer is only emitted on the final assistant reply for the
+      // turn. agent_end stages finalTaintBySession synchronously (the
+      // agent_end hook runner invokes handlers synchronously inside its
+      // wrapping async fn, so by the time deliverOutboundPayloads gets
+      // here for the final reply, staging is already done). Intermediate
+      // sends — mid-turn message:send tool calls, streamed thinking-loop
+      // chunks — have no staged data, so they get no footer.
+      // (See openclaw-provenance-rh3.)
+      const final = finalTaintBySession.get(sessionKey);
+      if (!final) return undefined;
 
       const taintEmoji = (level: string) =>
         level === "trusted" ? "🟢"
@@ -2076,9 +2054,7 @@ export function registerSecurityHooks(
         `\`${taintEmoji(final.startLevel)} ${final.startLevel} (${truncate(final.startReason, 60)}) → ` +
         `${taintEmoji(final.endLevel)} ${final.endLevel} (${truncate(final.endReason, 60)}) | ` +
         `impacted: ${final.impactedTool}${uriPart}\``;
-      // Only delete if we consumed a staged entry. On the fallback path
-      // there's nothing to delete; agent_end will overwrite shortly.
-      if (consumed) finalTaintBySession.delete(sessionKey);
+      finalTaintBySession.delete(sessionKey);
       return { content: content + "\n" + footer };
     }),
   );
@@ -2094,31 +2070,10 @@ export function registerSecurityHooks(
       const toolName = event.toolName;
       const toolNameLower = toolName.toLowerCase();
 
-      // developerMode: inject taint header into outbound message tool sends
-      if (developerMode && toolNameLower === "message" && event.params?.action === "send" && event.params?.message) {
-        const graph = store.getActive(sessionKey);
-        const watermark = watermarkStore.getLevel(sessionKey);
-        const taintLevel = graph?.maxTaint ?? watermark?.level ?? "trusted";
-        const taintReason = graph
-          ? buildTaintReason(graph, watermark?.reason)
-          : watermark?.reason ?? "unknown";
-
-        const turnStart = turnStartTaintBySession.get(sessionKey);
-        const startLevel = turnStart?.level ?? "trusted";
-        const startReason = turnStart?.reason ?? "unknown";
-        const lastImpacted = lastImpactedToolBySession.get(sessionKey) ?? "none";
-
-        const taintEmoji = (level: string) =>
-          level === "trusted" ? "🟢"
-            : level === "shared" ? "🟡"
-              : level === "external" ? "🟠"
-                : "🔴";
-
-        const footer = `\`${taintEmoji(startLevel)} ${startLevel} (${truncate(startReason, 60)}) → ${taintEmoji(taintLevel)} ${taintLevel} (${truncate(taintReason, 60)}) | impacted: ${lastImpacted}\``;
-        return {
-          params: { ...event.params, message: event.params.message + "\n" + footer },
-        };
-      }
+      // (Removed: developerMode taint footer for message:send tool calls.
+      //  The footer is owned by message_sending on the final assistant
+      //  reply only, so mid-turn message tool sends and streamed updates
+      //  stay footer-free. See openclaw-provenance-rh3.)
 
       // Memory file write protection
       if (graph && (toolNameLower === "write" || toolNameLower === "edit")) {
