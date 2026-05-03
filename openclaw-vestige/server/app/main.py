@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OpenClaw Vestige Bridge",
     description="HTTP bridge to the Vestige cognitive memory MCP server",
-    version="0.3.0",
+    version="0.3.1",
     lifespan=lifespan,
 )
 app.add_middleware(BearerAuthMiddleware)
