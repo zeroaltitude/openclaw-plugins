@@ -1720,6 +1720,15 @@ export function registerSecurityHooks(
         : `sender: ${identity?.senderName ?? identity?.senderId ?? "unknown"}`;
       turnStartTaintBySession.set(sessionKey, { level: effectiveTaint, reason: startReason });
 
+      // Defensive clear: drop any final-taint snapshot left over from a
+      // previous turn before this turn produces outbound messages. Without
+      // this, if the previous turn's final message_sending failed to fire
+      // (or fired with a different sessionKey, or was skipped because the
+      // payload was non-text), the stale entry would be consumed by THIS
+      // turn's first interim message_sending and the developer-mode footer
+      // would attach to the wrong message. See openclaw-provenance-rh3.
+      finalTaintBySession.delete(sessionKey);
+
       logger.info(`[provenance:${sk}] ── Turn Start ──`);
       logger.info(
         `[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`,

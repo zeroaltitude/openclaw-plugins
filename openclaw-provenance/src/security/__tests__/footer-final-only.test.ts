@@ -155,6 +155,52 @@ describe("Developer-mode trust footer fires only on final reply", () => {
     expect(noReply?.content).toBeUndefined();
   });
 
+  it("clears stale staged final-taint at turn start (no carry-over to next turn's first interim send)", () => {
+    const api = makeApi(tmpDir);
+    registerSecurityHooks(api, makeLogger(), {
+      workspaceDir: tmpDir,
+      verbose: false,
+      developerMode: true,
+    });
+
+    const ctx = { sessionKey: "agent:tank:discord:tank:direct:5", workspaceDir: tmpDir };
+
+    // Turn N: a real reply turn. agent_end stages finalTaintBySession.
+    // Simulate the previous turn's final message_sending NOT consuming
+    // the staged entry (could happen if delivery fired with a different
+    // sessionKey, was skipped for a non-text payload, etc.).
+    api.fire(
+      "before_prompt_build",
+      { prompt: "prev turn", messages: [{ role: "user", content: "prev turn" }] },
+      ctx,
+    );
+    api.fire(
+      "agent_end",
+      {
+        messages: [{ role: "assistant", content: "prev reply" }],
+        success: true,
+        durationMs: 0,
+      },
+      ctx,
+    );
+    // No message_sending fires for that turn — staged entry remains.
+
+    // Turn N+1 starts. before_prompt_build must clear the stale snapshot.
+    api.fire(
+      "before_prompt_build",
+      { prompt: "new turn", messages: [{ role: "user", content: "new turn" }] },
+      ctx,
+    );
+
+    // First interim outbound of the new turn must NOT carry a footer.
+    const firstInterim = api.fire(
+      "message_sending",
+      { content: "Found a real suspect.", to: "user", metadata: { channel: "discord" } },
+      ctx,
+    );
+    expect(firstInterim?.content).toBeUndefined();
+  });
+
   it("does not append a footer to before_tool_call message:send params (mid-turn)", () => {
     const api = makeApi(tmpDir);
     registerSecurityHooks(api, makeLogger(), {
