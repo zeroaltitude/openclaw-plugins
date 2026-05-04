@@ -839,11 +839,17 @@ export function activate(api: PluginApi): void {
           const results = await Promise.all(
             repos.map(async (repo) => {
               try {
-                const issues = await readyIssues(limit, {
+                // Pull a generous slice for accurate totals; render-side
+                // pagination still happens via `limit`. Without this the
+                // project-header count would always be capped at `limit`
+                // even when the repo has many more ready issues.
+                const allReady = await readyIssues(500, {
                   cwd: repo.path,
                   bdBinary: cfg(api).bdBinary,
                   timeoutMs: 5_000,
                 });
+                const totalReady = allReady.length;
+                const issues = allReady.slice(0, limit);
                 const issueIds = new Set(issues.map((issue) => issue.id));
                 const edges = await listEdges(issues, { cwd: repo.path, bdBinary: cfg(api).bdBinary, timeoutMs: 5_000 });
                 const behindIds = new Set(edges.filter((edge) => issueIds.has(edge.to)).map((edge) => edge.from));
@@ -873,12 +879,20 @@ export function activate(api: PluginApi): void {
                     !behindIdSet.has(issue.id),
                   )
                   .sort((a, b) => Number(a.priority ?? 2) - Number(b.priority ?? 2));
-                return { repo: repo.name, path: repo.path, issues, behind, stuck };
+                return {
+                  repo: repo.name,
+                  path: repo.path,
+                  issues,
+                  totalReady,
+                  behind,
+                  stuck,
+                };
               } catch (err: any) {
                 return {
                   repo: repo.name,
                   path: repo.path,
                   issues: [] as BdIssue[],
+                  totalReady: 0,
                   behind: [] as BdIssue[],
                   stuck: [] as BdIssue[],
                   error: String(err?.message ?? err).slice(0, 300),

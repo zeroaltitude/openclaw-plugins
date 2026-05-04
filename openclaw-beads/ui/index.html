@@ -1115,6 +1115,14 @@
                     const stuck  = entry.stuck  || [];
                     const behind = entry.behind || [];
                     const blocked = [...stuck, ...behind];
+                    // totalReady is the full ready-now count from the
+                    // server; `ready.length` is what we can render in this
+                    // pass (capped by API limit). Show the total in the
+                    // project header so the number hints there's more.
+                    const totalReady = Number.isFinite(entry.totalReady)
+                      ? entry.totalReady
+                      : ready.length;
+                    const readyOverflow = Math.max(0, totalReady - ready.length);
                     const totalSuffix = blocked.length ? ` + ${blocked.length}` : "";
 
                     const renderCard = (issue, extraClass = "") =>
@@ -1150,19 +1158,37 @@
                         React.createElement(
                           "div",
                           { className: "active-repo", title: entry.path || entry.repo },
-                          `${entry.repo} (${ready.length}${totalSuffix})`,
+                          `${entry.repo} (${totalReady}${totalSuffix})`,
                         ),
                       ),
                       // Row 2: active (ready-now) issues
                       React.createElement(
                         "div",
                         { key: `active-${entry.repo}`, className: "active-cell row-active" },
-                        React.createElement("div", { className: "active-row-label" }, `Active (${ready.length})`),
+                        React.createElement(
+                          "div",
+                          { className: "active-row-label" },
+                          readyOverflow > 0
+                            ? `Active (${ready.length} of ${totalReady})`
+                            : `Active (${totalReady})`,
+                        ),
                         ready.length
                           ? React.createElement(
                               "div",
                               { className: "active-list" },
                               ...ready.map((issue) => renderCard(issue)),
+                              readyOverflow > 0
+                                ? React.createElement(
+                                    "div",
+                                    {
+                                      key: `more-${entry.repo}`,
+                                      className: "active-card empty",
+                                      onClick: () => onOpenRepo(entry.repo),
+                                      style: { cursor: "pointer", fontStyle: "normal" },
+                                    },
+                                    `+ ${readyOverflow} more — open repo →`,
+                                  )
+                                : null,
                             )
                           : React.createElement(
                               "div",
