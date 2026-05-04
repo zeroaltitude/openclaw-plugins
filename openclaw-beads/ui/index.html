@@ -839,6 +839,13 @@
                   ref: canvasRef,
                   nodes: reaflowNodes,
                   edges: reaflowEdges,
+                  // Disable Reaflow's mount swoop / fade-in on first paint and
+                  // on repo switches. Reaflow's inner <motion.g> animates
+                  // translate/scale/opacity from 0 → final on every fresh
+                  // mount; with this off the canvas snaps straight to the
+                  // computed layout. Per-node and per-edge spring transitions
+                  // also become instant.
+                  animated: false,
                   // Auto-fit only on the very first time we open this repo.
                   // After a saved view exists, restore from localStorage.
                   fit: initialZoom == null,
