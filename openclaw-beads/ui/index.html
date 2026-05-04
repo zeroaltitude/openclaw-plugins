@@ -82,16 +82,37 @@
     .modal .actions button { padding: 8px 16px; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #e5e7eb; cursor: pointer; font-size: 13px; }
     .modal .actions .primary { background: #1e40af; border-color: #2563eb; }
     .active-modal { min-width: min(1100px, 92vw); max-width: 92vw; }
-    .active-grid { min-height: 360px; display: flex; align-items: flex-start; justify-content: flex-start; gap: 16px; overflow-x: auto; padding: 12px 4px 4px; }
-    .active-col { width: 320px; min-width: 320px; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
-    .active-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(112px, auto); gap: 8px; align-items: stretch; }
+    /* Three-row grid: project header / active / blocked. Columns are repos.
+       Each row gets a subtle tinted background to separate the lanes;
+       cells inside each row align horizontally across all repos. */
+    .active-grid {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 280px;
+      grid-template-rows:
+        [project] auto
+        [active] minmax(140px, auto)
+        [blocked] minmax(140px, auto);
+      gap: 6px 8px;
+      overflow-x: auto;
+      padding: 8px 4px 4px;
+      align-items: stretch;
+    }
+    /* Per-row background tints — applied via cell decorators since CSS Grid
+       can't paint a row directly without subgrid in widely-shipping browsers. */
+    .active-cell { padding: 8px; border-radius: 6px; border: 1px solid #1f2937; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .active-cell.row-project  { background: rgba( 96, 165, 250, 0.08); border-color: rgba( 96, 165, 250, 0.20); }
+    .active-cell.row-active   { background: rgba( 34, 197,  94, 0.07); border-color: rgba( 34, 197,  94, 0.20); }
+    .active-cell.row-blocked  { background: rgba(239,  68,  68, 0.06); border-color: rgba(239,  68,  68, 0.18); }
+    .active-row-label { font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
+    .active-list { display: flex; flex-direction: column; gap: 6px; }
     .active-section-title { margin-top: 2px; color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; text-align: left; }
-    .active-section-title.behind { margin-top: 10px; color: #f59e0b; }
+    .active-section-title.behind { color: #f59e0b; }
     .active-card.behind { opacity: 0.78; border-style: dashed; }
-    .active-section-title.stuck { margin-top: 10px; color: #c084fc; }
+    .active-section-title.stuck { color: #c084fc; }
     .active-card.stuck { opacity: 0.85; border-style: dotted; border-color: #6d28d9; }
     .active-card.stuck .active-meta .stuck-status { color: #c4b5fd; font-weight: 600; }
-    .active-repo { text-align: left; color: #93c5fd; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; padding: 6px 8px; border: 1px solid #1f2937; border-radius: 6px; background: #0c0d0f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .active-repo { text-align: left; color: #93c5fd; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; padding: 4px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .active-card { min-height: 112px; height: 100%; padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #0f1117; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
     .active-card:hover { border-color: #60a5fa; background: #111827; }
     .active-card.empty { cursor: default; color: #6b7280; justify-content: center; text-align: center; font-style: italic; }
@@ -387,16 +408,23 @@
         return () => el.removeEventListener("wheel", onWheel, { capture: true });
       }, []);
 
+      // Track which repo's data is currently in `issues`/`edges` so we can
+      // tell repo-switches apart from auto-sync polls. On a repo switch we
+      // must clear immediately (otherwise Reaflow relayouts the previous
+      // repo's graph under the new repo's key); on a sync poll we must NOT
+      // clear, or the canvas swoops/refits every cycle. (openclaw-beads-2dx)
+      const loadedRepoRef = useRef(null);
       useEffect(() => {
         if (!selectedRepo) return;
         let cancelled = false;
         setLoading(true);
         setError(null);
-        // Clear immediately so Reaflow doesn't relayout the previous repo's
-        // graph under the new repo key while the new data is still loading.
-        setIssues([]);
-        setEdges([]);
-        setSelectedId(null);
+        const repoChanged = loadedRepoRef.current !== selectedRepo;
+        if (repoChanged) {
+          setIssues([]);
+          setEdges([]);
+          setSelectedId(null);
+        }
         (async () => {
           try {
             const i = await fetch(`/beads/api/issues?repo=${encodeURIComponent(selectedRepo)}`).then((r) => r.json());
@@ -421,6 +449,7 @@
             setIssues(nextIssues);
             setEdges(d.edges || []);
             setLastSyncedAt(Date.now());
+            loadedRepoRef.current = selectedRepo;
             if (changed.size > 0) {
               setRecentlyChangedIds((curr) => {
                 const merged = new Set(curr);
@@ -1073,106 +1102,99 @@
           err && React.createElement("div", { style: { color: "#fca5a5", fontSize: 12 } }, err),
           !data
             ? React.createElement("div", { className: "empty" }, "Loading active work…")
-            : React.createElement(
-                "div",
-                { className: "active-grid" },
-                ...(data.length
-                  ? data.map((entry) => {
-                      const issues = entry.issues || [];
-                      const behind = entry.behind || [];
-                      const stuck = entry.stuck || [];
-                      const totalSuffix = (behind.length || stuck.length)
-                        ? ` + ${behind.length + stuck.length}`
-                        : "";
-                      return React.createElement(
+            : !data.length
+              ? React.createElement("div", { className: "empty" }, "No configured non-test repos")
+              : React.createElement(
+                  "div",
+                  { className: "active-grid" },
+                  // Row-major emission: for each repo we push three cells in
+                  // grid-auto-flow: column order — project header, active row,
+                  // blocked row — so cells line up horizontally per row.
+                  ...data.flatMap((entry) => {
+                    const ready  = entry.issues || [];
+                    const stuck  = entry.stuck  || [];
+                    const behind = entry.behind || [];
+                    const blocked = [...stuck, ...behind];
+                    const totalSuffix = blocked.length ? ` + ${blocked.length}` : "";
+
+                    const renderCard = (issue, extraClass = "") =>
+                      React.createElement(
                         "div",
-                        { key: entry.repo, className: "active-col" },
-                        React.createElement("div", { className: "active-repo", title: entry.path || entry.repo }, `${entry.repo} (${issues.length}${totalSuffix})`),
-                        React.createElement("div", { className: "active-section-title" }, "Ready now"),
-                        issues.length
+                        {
+                          key: issue.id,
+                          className: "active-card" + (extraClass ? " " + extraClass : ""),
+                          onClick: () => onOpenRepo(entry.repo),
+                        },
+                        React.createElement("div", { className: "active-id" }, issue.id),
+                        React.createElement("div", { className: "active-title" }, issue.title || "(no title)"),
+                        React.createElement(
+                          "div",
+                          { className: "active-meta" },
+                          React.createElement(
+                            "span",
+                            { className: extraClass === "stuck" ? "stuck-status" : null },
+                            issue.status || "open",
+                          ),
+                          React.createElement("span", null, issue.issue_type || issue.type || "task"),
+                          React.createElement("span", null, `P${issue.priority ?? "?"}`),
+                          React.createElement("span", null, `👤 ${issue.assignee || "(none)"}`),
+                        ),
+                      );
+
+                    return [
+                      // Row 1: project header
+                      React.createElement(
+                        "div",
+                        { key: `proj-${entry.repo}`, className: "active-cell row-project", title: entry.path || entry.repo },
+                        React.createElement("div", { className: "active-row-label" }, "Project"),
+                        React.createElement(
+                          "div",
+                          { className: "active-repo", title: entry.path || entry.repo },
+                          `${entry.repo} (${ready.length}${totalSuffix})`,
+                        ),
+                      ),
+                      // Row 2: active (ready-now) issues
+                      React.createElement(
+                        "div",
+                        { key: `active-${entry.repo}`, className: "active-cell row-active" },
+                        React.createElement("div", { className: "active-row-label" }, `Active (${ready.length})`),
+                        ready.length
                           ? React.createElement(
                               "div",
                               { className: "active-list" },
-                              ...issues.map((issue) =>
-                                React.createElement(
-                                  "div",
-                                  { key: issue.id, className: "active-card", onClick: () => onOpenRepo(entry.repo) },
-                                  React.createElement("div", { className: "active-id" }, issue.id),
-                                  React.createElement("div", { className: "active-title" }, issue.title || "(no title)"),
-                                  React.createElement(
-                                    "div",
-                                    { className: "active-meta" },
-                                    React.createElement("span", null, issue.status || "open"),
-                                    React.createElement("span", null, issue.issue_type || issue.type || "task"),
-                                    React.createElement("span", null, `P${issue.priority ?? "?"}`),
-                                    React.createElement("span", null, `👤 ${issue.assignee || "(none)"}`),
-                                  ),
-                                ),
-                              ),
+                              ...ready.map((issue) => renderCard(issue)),
                             )
                           : React.createElement(
                               "div",
                               { className: "active-card empty" },
                               entry.error ? `error: ${entry.error}` : "No ready work",
                             ),
-                        stuck.length
+                      ),
+                      // Row 3: blocked = stuck + behind, combined and tagged
+                      React.createElement(
+                        "div",
+                        { key: `blocked-${entry.repo}`, className: "active-cell row-blocked" },
+                        React.createElement(
+                          "div",
+                          { className: "active-row-label" },
+                          `Blocked (${blocked.length})`,
+                        ),
+                        blocked.length
                           ? React.createElement(
-                              React.Fragment,
-                              null,
-                              React.createElement("div", { className: "active-section-title stuck", title: "Open issues whose status is blocked, deferred, or waiting_for_*" }, "Stuck (blocked / deferred / waiting)"),
-                              React.createElement(
-                                "div",
-                                { className: "active-list" },
-                                ...stuck.map((issue) =>
-                                  React.createElement(
-                                    "div",
-                                    { key: issue.id, className: "active-card stuck", onClick: () => onOpenRepo(entry.repo) },
-                                    React.createElement("div", { className: "active-id" }, issue.id),
-                                    React.createElement("div", { className: "active-title" }, issue.title || "(no title)"),
-                                    React.createElement(
-                                      "div",
-                                      { className: "active-meta" },
-                                      React.createElement("span", { className: "stuck-status" }, issue.status || "open"),
-                                      React.createElement("span", null, issue.issue_type || issue.type || "task"),
-                                      React.createElement("span", null, `P${issue.priority ?? "?"}`),
-                                      React.createElement("span", null, `👤 ${issue.assignee || "(none)"}`),
-                                    ),
-                                  ),
-                                ),
-                              ),
+                              "div",
+                              { className: "active-list" },
+                              ...stuck.map((issue) => renderCard(issue, "stuck")),
+                              ...behind.map((issue) => renderCard(issue, "behind")),
                             )
-                          : null,
-                        behind.length
-                          ? React.createElement(
-                              React.Fragment,
-                              null,
-                              React.createElement("div", { className: "active-section-title behind" }, "Blocked behind ready"),
-                              React.createElement(
-                                "div",
-                                { className: "active-list" },
-                                ...behind.map((issue) =>
-                                  React.createElement(
-                                    "div",
-                                    { key: issue.id, className: "active-card behind", onClick: () => onOpenRepo(entry.repo) },
-                                    React.createElement("div", { className: "active-id" }, issue.id),
-                                    React.createElement("div", { className: "active-title" }, issue.title || "(no title)"),
-                                    React.createElement(
-                                      "div",
-                                      { className: "active-meta" },
-                                      React.createElement("span", null, issue.status || "open"),
-                                      React.createElement("span", null, issue.issue_type || issue.type || "task"),
-                                      React.createElement("span", null, `P${issue.priority ?? "?"}`),
-                                      React.createElement("span", null, `👤 ${issue.assignee || "(none)"}`),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            )
-                          : null,
-                      );
-                    })
-                  : [React.createElement("div", { key: "none", className: "empty" }, "No configured non-test repos")]),
-              ),
+                          : React.createElement(
+                              "div",
+                              { className: "active-card empty" },
+                              "—",
+                            ),
+                      ),
+                    ];
+                  }),
+                ),
           React.createElement(
             "div",
             { className: "actions" },
