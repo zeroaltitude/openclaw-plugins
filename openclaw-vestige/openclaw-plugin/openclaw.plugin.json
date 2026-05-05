@@ -5,6 +5,22 @@
   "description": "Shared cognitive memory for OpenClaw agents powered by Vestige — FSRS-6 spaced repetition, dual-strength memory, and prediction error gating.",
   "author": "BigHat Biosciences",
   "main": "dist/index.js",
+  "contracts": {
+    "tools": [
+      "vestige_search",
+      "vestige_ingest",
+      "vestige_smart_ingest",
+      "vestige_promote",
+      "vestige_demote",
+      "vestige_dream",
+      "vestige_consolidate",
+      "vestige_backup",
+      "vestige_session_context",
+      "vestige_explore_connections",
+      "vestige_predict",
+      "vestige_importance_score"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
