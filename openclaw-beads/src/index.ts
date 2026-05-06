@@ -206,6 +206,7 @@ export function formatPlansAndTasksBlock(params: {
   lines.push("- Ignore issues assigned to another owner. You may act on issues assigned to you or to any.");
   lines.push("- Never treat issues from repos whose configured repo name matches /test/i as ready work.");
   lines.push("- If you start meaningful work, mark the issue in_progress. If completed, close it. If waiting on the user, mark waiting_for_user. If waiting on an available agent/resource, mark waiting_for_available_agent. If blocked with no path forward, mark blocked. Keep state truthful.");
+  lines.push("- An `in_progress` issue listed below is active work you (or a previous turn) already claimed. Resume it; do NOT restart it as if it were a fresh `open` issue. If a single `in_progress` issue represents a long-running multi-turn loop (e.g. cyclical PR review), advance it as far as the current turn allows, leave it `in_progress`, and let the next heartbeat pick up where you left off.");
   lines.push("- If the user suggests future work, bugs, investigations, reminders, or other durable trackables, create/update Beads issues for them and include target_datetime metadata when timing is implied.");
   lines.push("- If this turn was not triggered by direct user input (for example heartbeat, gateway startup/resume, cron wake, or other autonomous wake) and you take action on Beads work, explicitly reply with a concise summary of the Beads issue(s) touched and actions taken. If no action was taken, stay quiet unless there is a meaningful blocker or decision for the user.");
   lines.push("");
@@ -432,6 +433,13 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
             cwd: repo.path,
             bdBinary: config.bdBinary,
             timeoutMs: 4_000,
+            // Include `in_progress` issues so the heartbeat surface shows
+            // active work the agent has already claimed (cyclical loops,
+            // multi-turn fixes). Without this, an `in_progress` issue
+            // disappears from `<ready_issues>` after it's claimed and any
+            // heartbeat that lands while no `open` work exists will idle
+            // even though the agent has work to resume.
+            includeInProgress: true,
           });
           const issues = ready
             .filter((issue) => shouldIncludeReadyIssue(issue, agentId, includeUnassigned))

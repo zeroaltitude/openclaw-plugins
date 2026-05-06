@@ -376,9 +376,30 @@ export async function setIssueMetadata(
  * we should either extend the JSONL exporter or force the bd fallback for
  * that call.
  */
-export async function readyIssues(limit: number, opts: BdRunOptions): Promise<BdIssue[]> {
+/** Options for {@link readyIssues}. */
+export type ReadyIssuesOptions = BdRunOptions & {
+  /**
+   * When true, also include issues with `status === "in_progress"` in the
+   * returned list. These are issues an agent has already claimed and is
+   * actively driving — they're "active work" from the agent's perspective
+   * even though `bd ready` (and the strict JSONL fast path) excludes them
+   * to avoid double-claiming. Use this for surfaces that should show "work
+   * I should keep advancing" (e.g. heartbeat injection, cyclical-loop
+   * resumption) rather than "work I should claim next."
+   *
+   * Defaults to false to preserve strict `bd ready` semantics for callers
+   * that want unstarted work only (e.g. dashboards that count ready work
+   * separately from in-flight work).
+   */
+  includeInProgress?: boolean;
+};
+
+export async function readyIssues(limit: number, opts: ReadyIssuesOptions): Promise<BdIssue[]> {
   const safeLimit = Math.max(1, limit);
-  const fast = await readyIssuesFromExport(opts.cwd, safeLimit).catch(() => null);
+  const includeInProgress = opts.includeInProgress === true;
+  const fast = await readyIssuesFromExport(opts.cwd, safeLimit, { includeInProgress }).catch(
+    () => null,
+  );
   if (fast) return fast;
 
   const out = await runBd(["ready", "--json", "--limit", String(safeLimit)], {
@@ -386,16 +407,54 @@ export async function readyIssues(limit: number, opts: BdRunOptions): Promise<Bd
     timeoutMs: opts.timeoutMs ?? 5_000,
   });
   const trimmed = stripWarnings(out);
-  if (!trimmed) return [];
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) return parsed as BdIssue[];
-    if (parsed && Array.isArray((parsed as any).issues)) return (parsed as any).issues as BdIssue[];
-    return [];
-  } catch {
-    throw new Error(`bd ready returned non-JSON output: ${trimmed.slice(0, 200)}`);
+  let bdReady: BdIssue[] = [];
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) bdReady = parsed as BdIssue[];
+      else if (parsed && Array.isArray((parsed as any).issues))
+        bdReady = (parsed as any).issues as BdIssue[];
+    } catch {
+      throw new Error(`bd ready returned non-JSON output: ${trimmed.slice(0, 200)}`);
+    }
   }
+  if (!includeInProgress) return bdReady;
+
+  // The bd CLI's `ready` command intentionally excludes in_progress (it's
+  // designed for "what to claim next"). When the caller asked for active
+  // work that includes in-flight items, supplement the bd-ready output
+  // with a separate `bd list --status in_progress` pass and merge.
+  const ipOut = await runBd(["list", "--status", "in_progress", "--json"], {
+    ...opts,
+    timeoutMs: opts.timeoutMs ?? 5_000,
+  });
+  const ipTrimmed = stripWarnings(ipOut);
+  let inProgress: BdIssue[] = [];
+  if (ipTrimmed) {
+    try {
+      const parsed = JSON.parse(ipTrimmed);
+      if (Array.isArray(parsed)) inProgress = parsed as BdIssue[];
+      else if (parsed && Array.isArray((parsed as any).issues))
+        inProgress = (parsed as any).issues as BdIssue[];
+    } catch {
+      // Ignore parse failures here — better to return the strict-ready set
+      // than to throw and lose all of it.
+    }
+  }
+  const seen = new Set(bdReady.map((i) => i.id));
+  const merged = [...bdReady];
+  for (const issue of inProgress) {
+    if (!seen.has(issue.id)) merged.push(issue);
+  }
+  merged.sort(compareReadyIssues);
+  return merged.slice(0, safeLimit);
 }
+
+/** Options for {@link readyIssuesFromExport}. */
+export type ReadyIssuesFromExportOptions = {
+  /** See {@link ReadyIssuesOptions.includeInProgress}. */
+  includeInProgress?: boolean;
+};
 
 /** Compute ready issues from the JSONL export, mirroring `bd ready` semantics:
  *  - status === "open" (excludes in_progress / blocked / deferred / closed)
@@ -403,6 +462,14 @@ export async function readyIssues(limit: number, opts: BdRunOptions): Promise<Bd
  *  - every entry in `dependencies` resolves to a closed issue
  *  - sorted by priority asc, then created_at asc (matches bd default)
  *  - capped to `limit`
+ *
+ *  Pass `{ includeInProgress: true }` to additionally include
+ *  `status === "in_progress"` entries in the result. In-progress issues
+ *  are emitted alongside ready issues without the dependency-resolution
+ *  filter (they're already started, blocker bookkeeping doesn't apply
+ *  retroactively) and without the defer_until filter. The strict
+ *  `bd ready` fast-path semantics are preserved when this option is
+ *  unset (the default).
  *
  *  Returns null when the JSONL is missing, unparseable, or doesn't carry
  *  enough metadata to safely answer (e.g. a blocker isn't in the export,
@@ -412,6 +479,7 @@ export async function readyIssues(limit: number, opts: BdRunOptions): Promise<Bd
 export async function readyIssuesFromExport(
   cwd: string,
   limit: number,
+  opts: ReadyIssuesFromExportOptions = {},
 ): Promise<BdIssue[] | null> {
   const issues = await readIssuesJsonl(cwd);
   if (!issues) return null;
@@ -431,10 +499,21 @@ export async function readyIssuesFromExport(
   }
   if (!sawDependencyCount) return null;
 
+  const includeInProgress = opts.includeInProgress === true;
   const now = Date.now();
   const ready: BdIssue[] = [];
   for (const issue of issues) {
-    if ((issue as any).status !== "open") continue;
+    const status = (issue as any).status;
+
+    // Strict ready path: only `open` issues, with full defer + dependency
+    // checks applied. In-progress issues take a separate, simpler path
+    // below (they're already claimed, so blocker / defer bookkeeping is
+    // not retroactively meaningful for them).
+    if (status === "in_progress") {
+      if (includeInProgress) ready.push(issue);
+      continue;
+    }
+    if (status !== "open") continue;
 
     const deferUntil = (issue as any).defer_until ?? (issue as any).deferUntil;
     if (typeof deferUntil === "string" && deferUntil) {

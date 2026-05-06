@@ -85,6 +85,46 @@ describe('JSONL fast path', () => {
     assert.deepEqual(ready.map((i) => i.id), ['r-1', 'r-6']);
   });
 
+  it('readyIssuesFromExport with includeInProgress merges in_progress alongside open', async () => {
+    const ready = await readyIssuesFromExport(repo, 10, { includeInProgress: true });
+    assert.ok(Array.isArray(ready));
+    const ids = ready.map((i) => i.id);
+    // r-1 (open p0), r-4 (in_progress p0), r-6 (open p1), r-2 (open p2), r-8 (open p3).
+    // r-4 sorts among the p0s by created_at; the fixture omits r-4.created_at
+    // so it falls to id-order tiebreak, placing r-4 after r-1.
+    // Still excludes: r-3 (closed), r-5 (blocked by open), r-7 (deferred future).
+    assert.deepEqual(ids, ['r-1', 'r-4', 'r-6', 'r-2', 'r-8']);
+  });
+
+  it('readyIssuesFromExport with includeInProgress does NOT apply defer / blocker checks to in_progress', async () => {
+    // Even an in_progress issue with a future defer_until or an unresolved
+    // blocker must surface, because it has already been claimed: defer and
+    // blocker filters are about "safe to start", not "safe to keep going".
+    const ipRepo = await mkdtemp(join(tmpdir(), 'beads-ip-'));
+    try {
+      await mkdir(join(ipRepo, '.beads'), { recursive: true });
+      const recs = [
+        {
+          _type: 'issue', id: 'ip-1', status: 'in_progress', priority: 0,
+          dependency_count: 1,
+          dependencies: [{ issue_id: 'ip-1', depends_on_id: 'ip-2', type: 'blocks' }],
+          defer_until: '3000-01-01T00:00:00Z',
+        },
+        { _type: 'issue', id: 'ip-2', status: 'open', priority: 0, dependency_count: 0 },
+      ];
+      await writeFile(
+        join(ipRepo, '.beads', 'issues.jsonl'),
+        recs.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      );
+      const ready = await readyIssuesFromExport(ipRepo, 10, { includeInProgress: true });
+      assert.ok(Array.isArray(ready));
+      const ids = ready.map((i) => i.id).sort();
+      assert.deepEqual(ids, ['ip-1', 'ip-2']);
+    } finally {
+      await rm(ipRepo, { recursive: true, force: true });
+    }
+  });
+
   it('readyIssuesFromExport returns null when dependency_count is missing on every record', async () => {
     const noDepRepo = await mkdtemp(join(tmpdir(), 'beads-nodep-'));
     try {
