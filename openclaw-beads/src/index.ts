@@ -118,6 +118,24 @@ interface BeadsPluginConfig {
     /** Sessions older than this are skipped on resume. Default: 24h. */
     resumeMaxAgeMs?: number;
     /**
+     * Minimum spacing in milliseconds between consecutive resume wakes
+     * targeting the SAME agent. Wakes for different agents fire concurrently
+     * with no spacing. Default: 15000 ms (15 s).
+     *
+     * Background: each session-targeted resume wake stamps the heartbeat
+     * runner's per-agent flood-guard ledger
+     * (heartbeat-cooldown.ts: DEFAULT_FLOOD_THRESHOLD=5 wakes per
+     * DEFAULT_FLOOD_WINDOW_MS=60000 ms). Firing >=5 resume wakes for the same
+     * agent within 60 s permanently jams that agent's heartbeat loop until
+     * the next gateway restart. 15 s spacing keeps any 60 s window at <=4
+     * wakes (4 wakes at t=0,15,30,45,60: only 4 entries are in window when
+     * checked at t=60 because windowStart=0 is treated as inclusive).
+     *
+     * Set to 0 to disable spacing (legacy behavior; will trip the flood
+     * guard with >=5 sessions on one agent).
+     */
+    resumeWakeIntervalMs?: number;
+    /**
      * Override the workspace directory used for session discovery.
      * Default: $HOME/.openclaw (the standard OpenClaw layout).
      */
@@ -730,6 +748,7 @@ export function activate(api: PluginApi): void {
             ? ((event as any).workspaceDir as string)
             : join(homedir(), ".openclaw"));
         const maxAgeMs = runLoop?.resumeMaxAgeMs ?? 24 * 60 * 60 * 1_000;
+        const wakeIntervalMs = Math.max(0, runLoop?.resumeWakeIntervalMs ?? 15_000);
         // Run async after the hook returns; failures are best-effort.
         void (async () => {
           try {
@@ -745,6 +764,14 @@ export function activate(api: PluginApi): void {
             log.info(
               `[beads] resume-after-restart: ${sessions.length} interrupted session(s) found`,
             );
+
+            // Step 1: enqueue the per-session system event for ALL sessions
+            // up front. This is cheap (in-memory queue write) and ensures the
+            // resume signal is durably staged before any wake fires, so even
+            // if the gateway crashes mid-stagger the events are still queued
+            // and will be picked up by the next organic activity on each
+            // session.
+            const enqueued: Array<{ s: InterruptedSession; accepted: boolean }> = [];
             for (const s of sessions) {
               const text = buildResumeSystemEvent(s);
               try {
@@ -761,23 +788,59 @@ export function activate(api: PluginApi): void {
                   contextKey: "cron:beads-resume-after-restart",
                   trusted: true,
                 });
-                api.runtime?.system?.requestHeartbeatNow?.({
-                  reason: "cron:beads-resume-after-restart",
-                  sessionKey: s.sessionKey,
-                  agentId: s.agentId,
-                  coalesceMs: 500,
-                });
-                log.info(
-                  `[beads]   ↪ woke ${s.agentId}/${s.sessionKey} (reason=${s.reason}` +
-                    (s.pendingToolCall ? ` tool=${s.pendingToolCall.name}` : "") +
-                    `) accepted=${accepted}`,
-                );
+                enqueued.push({ s, accepted });
               } catch (err: any) {
                 log.warn(
-                  `[beads]   ↪ failed to wake ${s.agentId}/${s.sessionKey}: ${err?.message ?? err}`,
+                  `[beads]   ↪ failed to enqueue resume event for ${s.agentId}/${s.sessionKey}: ${err?.message ?? err}`,
                 );
               }
             }
+
+            // Step 2: group by agentId and stagger wakes within each agent
+            // group so we never exceed the heartbeat-runner flood guard
+            // (>=5 wakes per 60 s on the same agent → permanent loop jam).
+            // Different agents are dispatched concurrently with no spacing.
+            const byAgent = new Map<string, Array<{ s: InterruptedSession; accepted: boolean }>>();
+            for (const entry of enqueued) {
+              const list = byAgent.get(entry.s.agentId);
+              if (list) list.push(entry);
+              else byAgent.set(entry.s.agentId, [entry]);
+            }
+            if (byAgent.size === 0) return;
+            const sleep = (ms: number) =>
+              ms > 0 ? new Promise<void>((r) => setTimeout(r, ms).unref?.()) : Promise.resolve();
+            await Promise.all(
+              Array.from(byAgent.entries()).map(async ([agentId, group]) => {
+                if (group.length > 1 && wakeIntervalMs > 0) {
+                  log.info(
+                    `[beads] resume-after-restart: staggering ${group.length} wakes for agent ${agentId} at ${wakeIntervalMs}ms intervals`,
+                  );
+                }
+                for (let i = 0; i < group.length; i++) {
+                  const { s, accepted } = group[i]!;
+                  if (i > 0 && wakeIntervalMs > 0) {
+                    await sleep(wakeIntervalMs);
+                  }
+                  try {
+                    api.runtime?.system?.requestHeartbeatNow?.({
+                      reason: "cron:beads-resume-after-restart",
+                      sessionKey: s.sessionKey,
+                      agentId: s.agentId,
+                      coalesceMs: 500,
+                    });
+                    log.info(
+                      `[beads]   ↪ woke ${s.agentId}/${s.sessionKey} (reason=${s.reason}` +
+                        (s.pendingToolCall ? ` tool=${s.pendingToolCall.name}` : "") +
+                        `) accepted=${accepted}`,
+                    );
+                  } catch (err: any) {
+                    log.warn(
+                      `[beads]   ↪ failed to wake ${s.agentId}/${s.sessionKey}: ${err?.message ?? err}`,
+                    );
+                  }
+                }
+              }),
+            );
           } catch (err: any) {
             log.warn(`[beads] resume-after-restart failed: ${err?.message ?? err}`);
           }
