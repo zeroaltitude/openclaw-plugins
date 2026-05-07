@@ -851,10 +851,20 @@ export function activate(api: PluginApi): void {
                 // pagination still happens via `limit`. Without this the
                 // project-header count would always be capped at `limit`
                 // even when the repo has many more ready issues.
+                //
+                // Include in_progress issues (openclaw-beads-3yb): the
+                // active work dashboard is meant to surface ANY active work
+                // across agents, and an in_progress issue is the most
+                // actively-worked state there is. Without this flag, claimed
+                // multi-turn work (cyclical loops, claimed bugs, in-flight
+                // refactors) silently disappears from the dashboard the
+                // moment any agent moves it past `open`, which is
+                // counterintuitive for a view called "active work."
                 const allReady = await readyIssues(500, {
                   cwd: repo.path,
                   bdBinary: cfg(api).bdBinary,
                   timeoutMs: 5_000,
+                  includeInProgress: true,
                 });
                 const totalReady = allReady.length;
                 const issues = allReady.slice(0, limit);
