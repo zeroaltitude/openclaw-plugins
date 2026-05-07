@@ -816,18 +816,28 @@ export function activate(api: PluginApi): void {
                     `[beads] resume-after-restart: staggering ${group.length} wakes for agent ${agentId} at ${wakeIntervalMs}ms intervals`,
                   );
                 }
+                const groupStart = Date.now();
                 for (let i = 0; i < group.length; i++) {
                   const { s, accepted } = group[i]!;
                   if (i > 0 && wakeIntervalMs > 0) {
                     await sleep(wakeIntervalMs);
                   }
                   try {
+                    const callTs = Date.now();
                     api.runtime?.system?.requestHeartbeatNow?.({
                       reason: "cron:beads-resume-after-restart",
                       sessionKey: s.sessionKey,
                       agentId: s.agentId,
                       coalesceMs: 500,
                     });
+                    // ALWAYS-ON instrumentation (openclaw-tak): per-wake call
+                    // timing for the resume-after-restart loop. Pairs with
+                    // core-side [hb-instrument] WAKE-REQ to attribute every
+                    // pre-flood wake to a specific source.
+                    log.warn(
+                      `[beads-instrument] resume-wake fired agentId=${s.agentId} sessionKey=${s.sessionKey} ` +
+                        `loopElapsedMs=${callTs - groupStart} index=${i}/${group.length}`,
+                    );
                     log.info(
                       `[beads]   ↪ woke ${s.agentId}/${s.sessionKey} (reason=${s.reason}` +
                         (s.pendingToolCall ? ` tool=${s.pendingToolCall.name}` : "") +
@@ -839,6 +849,12 @@ export function activate(api: PluginApi): void {
                     );
                   }
                 }
+                // ALWAYS-ON instrumentation (openclaw-tak): mark loop end
+                // so we can verify the loop actually completed and identify
+                // post-loop wake activity attributable to other sources.
+                log.warn(
+                  `[beads-instrument] resume-wake-loop done agentId=${agentId} totalMs=${Date.now() - groupStart} wakeCount=${group.length}`,
+                );
               }),
             );
           } catch (err: any) {
