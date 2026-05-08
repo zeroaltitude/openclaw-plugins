@@ -12,8 +12,7 @@
 
 import { execFile } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readFile, readdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
@@ -37,6 +36,11 @@ import {
   type BdRepo,
   type BdMutateInput,
 } from "./beads-cli.js";
+import {
+  buildSessionMap,
+  defaultSessionMapCachePath,
+  writeSessionMapCache,
+} from "./session-map.js";
 import { TtlCache } from "./ttl-cache.js";
 
 export { TtlCache } from "./ttl-cache.js";
@@ -107,34 +111,18 @@ interface BeadsPluginConfig {
      */
     readyApiCacheTtlMs?: number;
     /**
-     * Per-session resume after gateway restart. When the gateway boots, the
-     * plugin walks `~/.openclaw/agents/*\/sessions/sessions.json`, identifies
-     * sessions whose last assistant turn was interrupted (tool call without
-     * matching tool result), and injects an explicit "interrupted by gateway
-     * restart, please continue" system event into each, then heartbeat-wakes
-     * those sessions individually. Default: enabled.
+     * On gateway:startup, build an issue↔session mapping (Phase 1) and
+     * fire one broadcast heartbeat wake (Phase 2). The mapping is written
+     * to a JSON cache file for prompt-build consumers to read.
+     * Default: enabled. See bead openclaw-beads-vkm.
      */
-    resumeInterruptedSessions?: boolean;
-    /** Sessions older than this are skipped on resume. Default: 24h. */
-    resumeMaxAgeMs?: number;
+    startupSessionMapping?: boolean;
     /**
-     * Minimum spacing in milliseconds between consecutive resume wakes
-     * targeting the SAME agent. Wakes for different agents fire concurrently
-     * with no spacing. Default: 15000 ms (15 s).
-     *
-     * Background: each session-targeted resume wake stamps the heartbeat
-     * runner's per-agent flood-guard ledger
-     * (heartbeat-cooldown.ts: DEFAULT_FLOOD_THRESHOLD=5 wakes per
-     * DEFAULT_FLOOD_WINDOW_MS=60000 ms). Firing >=5 resume wakes for the same
-     * agent within 60 s permanently jams that agent's heartbeat loop until
-     * the next gateway restart. 15 s spacing keeps any 60 s window at <=4
-     * wakes (4 wakes at t=0,15,30,45,60: only 4 entries are in window when
-     * checked at t=60 because windowStart=0 is treated as inclusive).
-     *
-     * Set to 0 to disable spacing (legacy behavior; will trip the flood
-     * guard with >=5 sessions on one agent).
+     * Recency window in milliseconds for sessions considered as candidates
+     * for issue↔session binding. Sessions older than this are ignored.
+     * Default: 3_600_000 (1 hour).
      */
-    resumeWakeIntervalMs?: number;
+    sessionMappingRecencyMs?: number;
     /**
      * Override the workspace directory used for session discovery.
      * Default: $HOME/.openclaw (the standard OpenClaw layout).
@@ -545,160 +533,6 @@ const FALLBACK_UI = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Beads — UI shell missing</title></head>
 <body><h1>UI shell not found</h1><p>Looked for ui/index.html alongside the plugin. Ship one or rebuild.</p></body></html>`;
 
-/**
- * A session that was mid-action when the gateway shut down. The plugin
- * surfaces these on `gateway:startup` and re-drives them per-session so a
- * Discord/Slack chat that was in the middle of a tool call doesn't sit
- * silently after a restart waiting for the user to nudge.
- */
-export interface InterruptedSession {
-  agentId: string;
-  sessionKey: string;
-  sessionId: string;
-  sessionFile: string;
-  lastInteractionAt: number;
-  abortedLastRun: boolean;
-  /** Last incomplete tool call, if any (assistant tool_use without matching tool_result). */
-  pendingToolCall?: { name: string; toolUseId?: string };
-  /** Recent user message text for context when re-driving. */
-  lastUserText?: string;
-  reason: "abortedLastRun" | "unmatchedToolCall" | "both";
-}
-
-async function readJsonSafe(path: string): Promise<any | null> {
-  try {
-    const text = await readFile(path, "utf8");
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-async function inspectSessionTail(sessionFile: string): Promise<{
-  pendingToolCall?: { name: string; toolUseId?: string };
-  lastUserText?: string;
-}> {
-  let text: string;
-  try {
-    text = await readFile(sessionFile, "utf8");
-  } catch {
-    return {};
-  }
-  const lines = text.split("\n").filter(Boolean);
-  // Walk backward looking for the last assistant message and the most recent
-  // user message. If the assistant's last content block is a toolCall and we
-  // don't find a corresponding toolResult after it, the turn was interrupted.
-  let pendingToolCall: { name: string; toolUseId?: string } | undefined;
-  const seenToolResults = new Set<string>();
-  let lastUserText: string | undefined;
-  for (let i = lines.length - 1; i >= 0 && i >= lines.length - 50; i--) {
-    let rec: any;
-    try {
-      rec = JSON.parse(lines[i]);
-    } catch {
-      continue;
-    }
-    if (rec?.type !== "message" || !rec?.message) continue;
-    const msg = rec.message;
-    const content: any[] = Array.isArray(msg?.content) ? msg.content : [];
-    if (msg.role === "user") {
-      for (const c of content) {
-        if (c?.type === "toolResult" && typeof c.toolUseId === "string") {
-          seenToolResults.add(c.toolUseId);
-        }
-        if (c?.type === "text" && typeof c.text === "string" && !lastUserText) {
-          lastUserText = c.text.slice(0, 600);
-        }
-      }
-      // Plain string content fallback
-      if (!lastUserText && typeof msg.content === "string") {
-        lastUserText = msg.content.slice(0, 600);
-      }
-      continue;
-    }
-    if (msg.role === "assistant" && !pendingToolCall) {
-      // Look at the assistant's last content block(s) for an unmatched toolCall.
-      for (let j = content.length - 1; j >= 0; j--) {
-        const c = content[j];
-        if (c?.type === "toolCall" && typeof c.id === "string" && !seenToolResults.has(c.id)) {
-          pendingToolCall = { name: typeof c.name === "string" ? c.name : "unknown", toolUseId: c.id };
-          break;
-        }
-      }
-    }
-  }
-  return { pendingToolCall, lastUserText };
-}
-
-async function discoverInterruptedSessions(
-  workspaceDir: string,
-  maxAgeMs: number,
-  log: PluginApi["logger"],
-): Promise<InterruptedSession[]> {
-  const agentsDir = join(workspaceDir, "agents");
-  if (!existsSync(agentsDir)) return [];
-  let agentEntries: string[] = [];
-  try {
-    agentEntries = await readdir(agentsDir);
-  } catch (err: any) {
-    log.warn(`[beads] resume-discovery: cannot read ${agentsDir}: ${err?.message ?? err}`);
-    return [];
-  }
-  const cutoffTs = Date.now() - maxAgeMs;
-  const out: InterruptedSession[] = [];
-  for (const agentId of agentEntries) {
-    const sessionsJson = join(agentsDir, agentId, "sessions", "sessions.json");
-    const store = await readJsonSafe(sessionsJson);
-    if (!store || typeof store !== "object") continue;
-    for (const [sessionKey, entry] of Object.entries(store as Record<string, any>)) {
-      if (!entry || typeof entry !== "object") continue;
-      const lastInteractionAt = Number((entry as any).lastInteractionAt) || 0;
-      if (lastInteractionAt < cutoffTs) continue;
-      const sessionFile: string | undefined = (entry as any).sessionFile;
-      const sessionId: string | undefined = (entry as any).sessionId;
-      if (!sessionFile || !sessionId) continue;
-      const aborted = Boolean((entry as any).abortedLastRun);
-      const tail = await inspectSessionTail(sessionFile);
-      const hasPending = !!tail.pendingToolCall;
-      if (!aborted && !hasPending) continue;
-      out.push({
-        agentId,
-        sessionKey,
-        sessionId,
-        sessionFile,
-        lastInteractionAt,
-        abortedLastRun: aborted,
-        pendingToolCall: tail.pendingToolCall,
-        lastUserText: tail.lastUserText,
-        reason: aborted && hasPending ? "both" : aborted ? "abortedLastRun" : "unmatchedToolCall",
-      });
-    }
-  }
-  // Most recent first so noisy logs surface the user's last action.
-  out.sort((a, b) => b.lastInteractionAt - a.lastInteractionAt);
-  return out;
-}
-
-function buildResumeSystemEvent(s: InterruptedSession): string {
-  const lines: string[] = [];
-  lines.push(
-    "⏸️ Your previous turn was interrupted by an OpenClaw gateway restart and the in-flight tool call did not complete.",
-  );
-  if (s.pendingToolCall) {
-    lines.push(
-      `Last tool call: \`${s.pendingToolCall.name}\`${s.pendingToolCall.toolUseId ? ` (id ${s.pendingToolCall.toolUseId})` : ""}.`,
-    );
-  }
-  if (s.lastUserText) {
-    lines.push("Recent user request (truncated):");
-    lines.push("> " + s.lastUserText.replace(/\n+/g, " ").slice(0, 500));
-  }
-  lines.push(
-    "Verify the actual state of any side effects that may have completed (file writes, git, services, external APIs), then either retry the interrupted action or report a clear blocker. If the work is now done, briefly confirm and stop.",
-  );
-  return lines.join("\n\n");
-}
-
 export function activate(api: PluginApi): void {
   const log = api.logger;
 
@@ -725,147 +559,70 @@ export function activate(api: PluginApi): void {
       (event) => {
         const runLoop = cfg(api).runLoop;
         if (runLoop?.enabled === false || runLoop?.startupWake === false) return;
+        if (runLoop?.startupSessionMapping === false) {
+          // Mapping disabled by config: fall back to legacy single-broadcast
+          // wake only, and skip discovery entirely.
+          api.runtime?.system?.requestHeartbeatNow?.({
+            reason: "beads:gateway-startup",
+            coalesceMs: runLoop?.startupWakeDelayMs ?? 1_000,
+            heartbeat: { target: runLoop?.startupWakeTarget ?? "last" },
+          });
+          return;
+        }
 
-        // Phase 1 (legacy): accelerate the next heartbeat tick so any
-        // configured ready-work scan happens promptly.
-        api.runtime?.system?.requestHeartbeatNow?.({
-          reason: "beads:gateway-startup",
-          coalesceMs: runLoop?.startupWakeDelayMs ?? 1_000,
-          heartbeat: { target: runLoop?.startupWakeTarget ?? "last" },
-        });
-
-        // Phase 2: per-session resume of any chat that was mid-tool-call when
-        // the gateway died. Scan the on-disk session stores, identify the
-        // affected sessions, inject a context-rich "interrupted by restart"
-        // system event into each, and wake them individually so they don't
-        // sit silently waiting for the user to nudge.
-        if (runLoop?.resumeInterruptedSessions === false) return;
-        const enqueueSystemEvent = api.runtime?.system?.enqueueSystemEvent;
-        if (!enqueueSystemEvent) return;
         const workspaceDir =
           runLoop?.workspaceDir ||
           (typeof event === "object" && event && typeof (event as any).workspaceDir === "string"
             ? ((event as any).workspaceDir as string)
             : join(homedir(), ".openclaw"));
-        const maxAgeMs = runLoop?.resumeMaxAgeMs ?? 24 * 60 * 60 * 1_000;
-        const wakeIntervalMs = Math.max(0, runLoop?.resumeWakeIntervalMs ?? 15_000);
-        // Run async after the hook returns; failures are best-effort.
+        const recencyMs = Math.max(0, runLoop?.sessionMappingRecencyMs ?? 60 * 60 * 1_000);
+        const repos = cfg(api).repos ?? [];
+        const bdBinary = cfg(api).bdBinary;
+        // Run Phase 1 (build issue↔session map) async, then Phase 2 (single
+        // broadcast wake) after Phase 1 finishes. The hook handler returns
+        // immediately so it never blocks gateway boot. Failures are
+        // best-effort: the heartbeat still happens even if mapping fails.
         void (async () => {
+          const phaseStart = Date.now();
           try {
-            const sessions = await discoverInterruptedSessions(
+            const map = await buildSessionMap({
               workspaceDir,
-              maxAgeMs,
-              api.logger,
-            );
-            if (!sessions.length) {
-              log.info(`[beads] resume-after-restart: no interrupted sessions found`);
-              return;
+              repos,
+              recencyMs,
+              bdBinary,
+            });
+            const cachePath = defaultSessionMapCachePath(homedir());
+            try {
+              await writeSessionMapCache(cachePath, map);
+            } catch (err: any) {
+              log.warn(`[beads] gateway-startup: cache write failed: ${err?.message ?? err}`);
             }
+            const explicit = map.bindings.filter((b) => b.source === "explicit").length;
+            const heuristic = map.bindings.filter((b) => b.source === "heuristic").length;
             log.info(
-              `[beads] resume-after-restart: ${sessions.length} interrupted session(s) found`,
-            );
-
-            // Step 1: enqueue the per-session system event for ALL sessions
-            // up front. This is cheap (in-memory queue write) and ensures the
-            // resume signal is durably staged before any wake fires, so even
-            // if the gateway crashes mid-stagger the events are still queued
-            // and will be picked up by the next organic activity on each
-            // session.
-            const enqueued: Array<{ s: InterruptedSession; accepted: boolean }> = [];
-            for (const s of sessions) {
-              const text = buildResumeSystemEvent(s);
-              try {
-                // contextKey starting with `cron:` flags the event for the
-                // delivery-aware cron-event prompt path in the heartbeat
-                // runner (heartbeat-runner.ts: hasTaggedCronEvents). Reason
-                // starting with `cron:` independently sets isCronEventReason,
-                // which forces preflight to inspect pending events. Together
-                // these route the run through buildCronEventPrompt with
-                // deliverToUser=true so the model relays the resume signal
-                // back on the bound channel instead of staying silent.
-                const accepted = enqueueSystemEvent(text, {
-                  sessionKey: s.sessionKey,
-                  contextKey: "cron:beads-resume-after-restart",
-                  trusted: true,
-                });
-                enqueued.push({ s, accepted });
-              } catch (err: any) {
-                log.warn(
-                  `[beads]   ↪ failed to enqueue resume event for ${s.agentId}/${s.sessionKey}: ${err?.message ?? err}`,
-                );
-              }
-            }
-
-            // Step 2: group by agentId and stagger wakes within each agent
-            // group so we never exceed the heartbeat-runner flood guard
-            // (>=5 wakes per 60 s on the same agent → permanent loop jam).
-            // Different agents are dispatched concurrently with no spacing.
-            const byAgent = new Map<string, Array<{ s: InterruptedSession; accepted: boolean }>>();
-            for (const entry of enqueued) {
-              const list = byAgent.get(entry.s.agentId);
-              if (list) list.push(entry);
-              else byAgent.set(entry.s.agentId, [entry]);
-            }
-            if (byAgent.size === 0) return;
-            const sleep = (ms: number) =>
-              ms > 0 ? new Promise<void>((r) => setTimeout(r, ms).unref?.()) : Promise.resolve();
-            await Promise.all(
-              Array.from(byAgent.entries()).map(async ([agentId, group]) => {
-                if (group.length > 1 && wakeIntervalMs > 0) {
-                  log.info(
-                    `[beads] resume-after-restart: staggering ${group.length} wakes for agent ${agentId} at ${wakeIntervalMs}ms intervals`,
-                  );
-                }
-                const groupStart = Date.now();
-                for (let i = 0; i < group.length; i++) {
-                  const { s, accepted } = group[i]!;
-                  if (i > 0 && wakeIntervalMs > 0) {
-                    await sleep(wakeIntervalMs);
-                  }
-                  try {
-                    const callTs = Date.now();
-                    api.runtime?.system?.requestHeartbeatNow?.({
-                      reason: "cron:beads-resume-after-restart",
-                      sessionKey: s.sessionKey,
-                      agentId: s.agentId,
-                      coalesceMs: 500,
-                    });
-                    // ALWAYS-ON instrumentation (openclaw-tak): per-wake call
-                    // timing for the resume-after-restart loop. Pairs with
-                    // core-side [hb-instrument] WAKE-REQ to attribute every
-                    // pre-flood wake to a specific source.
-                    log.warn(
-                      `[beads-instrument] resume-wake fired agentId=${s.agentId} sessionKey=${s.sessionKey} ` +
-                        `loopElapsedMs=${callTs - groupStart} index=${i}/${group.length}`,
-                    );
-                    log.info(
-                      `[beads]   ↪ woke ${s.agentId}/${s.sessionKey} (reason=${s.reason}` +
-                        (s.pendingToolCall ? ` tool=${s.pendingToolCall.name}` : "") +
-                        `) accepted=${accepted}`,
-                    );
-                  } catch (err: any) {
-                    log.warn(
-                      `[beads]   ↪ failed to wake ${s.agentId}/${s.sessionKey}: ${err?.message ?? err}`,
-                    );
-                  }
-                }
-                // ALWAYS-ON instrumentation (openclaw-tak): mark loop end
-                // so we can verify the loop actually completed and identify
-                // post-loop wake activity attributable to other sources.
-                log.warn(
-                  `[beads-instrument] resume-wake-loop done agentId=${agentId} totalMs=${Date.now() - groupStart} wakeCount=${group.length}`,
-                );
-              }),
+              `[beads] gateway-startup: built session-map with ${map.bindings.length} bindings ` +
+                `(${explicit} explicit, ${heuristic} heuristic, ${map.unbound.length} unbound) ` +
+                `across ${new Set(map.bindings.map((b) => b.agentId)).size} agents in ${Date.now() - phaseStart}ms`,
             );
           } catch (err: any) {
-            log.warn(`[beads] resume-after-restart failed: ${err?.message ?? err}`);
+            log.warn(`[beads] gateway-startup: session-map build failed: ${err?.message ?? err}`);
           }
+          // Phase 2: single broadcast heartbeat wake. No agentId, no
+          // sessionKey: the runner's broadcast loop fans out to each agent's
+          // default session, where prompt-build will pick up the now-current
+          // <plans_and_tasks> block (and, in future PRs, the session-map
+          // cache for routing).
+          api.runtime?.system?.requestHeartbeatNow?.({
+            reason: "beads:gateway-startup",
+            coalesceMs: runLoop?.startupWakeDelayMs ?? 1_000,
+            heartbeat: { target: runLoop?.startupWakeTarget ?? "last" },
+          });
         })();
       },
       {
         name: "beads-gateway-startup-wake",
         description:
-          "Wake the agent loop after gateway startup; per-session resume any chat that was mid-tool-call.",
+          "On gateway startup: build issue↔session mapping cache, then fire one broadcast heartbeat wake.",
       },
     );
   }
