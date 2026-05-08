@@ -231,7 +231,7 @@ describe("session-map: buildSessionMap (integration)", () => {
         JSON.stringify({ id: "tst-001", title: "ignored", status: "open", assignee: "tank" }),
       );
 
-      const map = await buildSessionMap({
+      const result = await buildSessionMap({
         workspaceDir: tmp,
         repos: [
           { name: "foo", path: repoDir, default: true },
@@ -240,6 +240,11 @@ describe("session-map: buildSessionMap (integration)", () => {
         recencyMs: 60_000,
         nowMs: 10_000,
       });
+      const map = result.cache;
+      assert.ok(result.timings, "timings populated");
+      assert.equal(typeof result.timings.totalMs, "number");
+      assert.equal(typeof result.timings.readIssuesMs, "number");
+      assert.ok(Array.isArray(result.timings.slowestRepos));
 
       // Exactly the bindings we expect:
       const tankBindings = map.bindings.filter((b) => b.agentId === "tank");

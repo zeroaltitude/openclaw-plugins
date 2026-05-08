@@ -578,45 +578,63 @@ export function activate(api: PluginApi): void {
         const recencyMs = Math.max(0, runLoop?.sessionMappingRecencyMs ?? 60 * 60 * 1_000);
         const repos = cfg(api).repos ?? [];
         const bdBinary = cfg(api).bdBinary;
-        // Run Phase 1 (build issue↔session map) async, then Phase 2 (single
-        // broadcast wake) after Phase 1 finishes. The hook handler returns
-        // immediately so it never blocks gateway boot. Failures are
-        // best-effort: the heartbeat still happens even if mapping fails.
+        // PHASE 1 first (synchronously, immediately): single broadcast
+        // heartbeat wake. Fires before any expensive work so it beats the
+        // restart-sentinel path's MIN_WAKE_SPACING_MS=30000 window and
+        // produces visible per-agent stamps. The heartbeat: target="last"
+        // semantics mean each agent's most-recently-used session gets
+        // poked, where prompt-build will pick up the soon-to-be-fresh
+        // session-map cache.
+        const wakeT0 = Date.now();
+        api.runtime?.system?.requestHeartbeatNow?.({
+          reason: "beads:gateway-startup",
+          coalesceMs: runLoop?.startupWakeDelayMs ?? 1_000,
+          heartbeat: { target: runLoop?.startupWakeTarget ?? "last" },
+        });
+        log.info(
+          `[beads] gateway-startup: broadcast wake requested in ${Date.now() - wakeT0}ms ` +
+            `(coalesceMs=${runLoop?.startupWakeDelayMs ?? 1_000}, target=${runLoop?.startupWakeTarget ?? "last"})`,
+        );
+
+        // PHASE 2 (async, non-blocking): build the issue↔session map and
+        // persist it. The hook handler returns immediately so it never
+        // blocks gateway boot. Failures are best-effort: the heartbeat
+        // already fired above, so the agents are awake regardless.
         void (async () => {
           const phaseStart = Date.now();
           try {
-            const map = await buildSessionMap({
+            const { cache, timings } = await buildSessionMap({
               workspaceDir,
               repos,
               recencyMs,
               bdBinary,
             });
+            const cacheT0 = Date.now();
             const cachePath = defaultSessionMapCachePath(homedir());
+            let cacheWriteMs = 0;
             try {
-              await writeSessionMapCache(cachePath, map);
+              await writeSessionMapCache(cachePath, cache);
+              cacheWriteMs = Date.now() - cacheT0;
             } catch (err: any) {
               log.warn(`[beads] gateway-startup: cache write failed: ${err?.message ?? err}`);
             }
-            const explicit = map.bindings.filter((b) => b.source === "explicit").length;
-            const heuristic = map.bindings.filter((b) => b.source === "heuristic").length;
+            const explicit = cache.bindings.filter((b) => b.source === "explicit").length;
+            const heuristic = cache.bindings.filter((b) => b.source === "heuristic").length;
             log.info(
-              `[beads] gateway-startup: built session-map with ${map.bindings.length} bindings ` +
-                `(${explicit} explicit, ${heuristic} heuristic, ${map.unbound.length} unbound) ` +
-                `across ${new Set(map.bindings.map((b) => b.agentId)).size} agents in ${Date.now() - phaseStart}ms`,
+              `[beads] gateway-startup: built session-map with ${cache.bindings.length} bindings ` +
+                `(${explicit} explicit, ${heuristic} heuristic, ${cache.unbound.length} unbound) ` +
+                `across ${new Set(cache.bindings.map((b) => b.agentId)).size} agents in ${Date.now() - phaseStart}ms ` +
+                `(listAgents=${timings.listAgentsMs}ms readSessions=${timings.readSessionsMs}ms ` +
+                `readIssues=${timings.readIssuesMs}ms bind=${timings.bindAndWriteMs}ms ` +
+                `cacheWrite=${cacheWriteMs}ms) ` +
+                `slowestRepos=[${timings.slowestRepos.map((r) => `${r.name}:${r.ms}ms`).join(", ")}]` +
+                (timings.reposWithoutJsonl.length > 0
+                  ? ` reposWithoutJsonl=[${timings.reposWithoutJsonl.join(", ")}]`
+                  : ""),
             );
           } catch (err: any) {
             log.warn(`[beads] gateway-startup: session-map build failed: ${err?.message ?? err}`);
           }
-          // Phase 2: single broadcast heartbeat wake. No agentId, no
-          // sessionKey: the runner's broadcast loop fans out to each agent's
-          // default session, where prompt-build will pick up the now-current
-          // <plans_and_tasks> block (and, in future PRs, the session-map
-          // cache for routing).
-          api.runtime?.system?.requestHeartbeatNow?.({
-            reason: "beads:gateway-startup",
-            coalesceMs: runLoop?.startupWakeDelayMs ?? 1_000,
-            heartbeat: { target: runLoop?.startupWakeTarget ?? "last" },
-          });
         })();
       },
       {

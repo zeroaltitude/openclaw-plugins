@@ -28,7 +28,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { BdIssue, BdRepo } from "./beads-cli.js";
-import { listIssues } from "./beads-cli.js";
+import { readIssuesJsonl } from "./beads-cli.js";
 
 /** Surfaces we consider "live human channels" for heuristic matching. */
 export const LIVE_CHANNEL_SURFACES = new Set<string>([
@@ -220,39 +220,81 @@ export interface BuildSessionMapOptions {
   skipTestRepos?: boolean;
 }
 
+export interface SessionMapTimings {
+  /** Time to enumerate agent dirs. */
+  listAgentsMs: number;
+  /** Time to read all sessions.json index files. */
+  readSessionsMs: number;
+  /** Time to read all .beads/issues.jsonl files (parallel). */
+  readIssuesMs: number;
+  /** Time to compute bindings + write cache. */
+  bindAndWriteMs: number;
+  /** Wall-clock total. */
+  totalMs: number;
+  /** Per-repo issue read times (ms), sorted slowest first. */
+  slowestRepos: Array<{ name: string; ms: number }>;
+  /** Repos whose .beads/issues.jsonl is missing (skipped on fast path). */
+  reposWithoutJsonl: string[];
+}
+
 /**
  * Walk all configured repos × all known agents, build the issue↔session map.
+ *
+ * Returns the cache plus per-phase timings so callers can log where time is
+ * being spent during gateway:startup.
  */
 export async function buildSessionMap(
   opts: BuildSessionMapOptions,
-): Promise<SessionMapCache> {
-  const nowMs = opts.nowMs ?? Date.now();
+): Promise<{ cache: SessionMapCache; timings: SessionMapTimings }> {
+  const startedAt = Date.now();
+  const nowMs = opts.nowMs ?? startedAt;
   const skipTest = opts.skipTestRepos ?? true;
   const reposToScan = skipTest
     ? opts.repos.filter((r) => !/test/i.test(r.name))
     : opts.repos;
 
+  const t0 = Date.now();
   const agents = await listKnownAgents(opts.workspaceDir);
-  // Cache sessions per agent so we read sessions.json once.
-  const sessionsByAgent = new Map<string, SessionEntry[]>();
-  for (const agentId of agents) {
-    sessionsByAgent.set(
+  const listAgentsMs = Date.now() - t0;
+
+  // Read all agents' sessions.json in parallel — independent files.
+  const t1 = Date.now();
+  const sessionsEntries = await Promise.all(
+    agents.map(async (agentId) => [
       agentId,
       await readRecentAgentSessions(opts.workspaceDir, agentId, opts.recencyMs, nowMs),
-    );
-  }
+    ] as const),
+  );
+  const sessionsByAgent = new Map<string, SessionEntry[]>(sessionsEntries);
+  const readSessionsMs = Date.now() - t1;
 
+  // Read all repos' issues.jsonl in parallel — independent files.
+  // Fast path only: this runs on every gateway restart, so we never spawn
+  // `bd` here. Repos without a JSONL cache get an empty issue list and a
+  // log warning (likely never exported by the bd CLI — expected for repos
+  // not yet adopted into the workflow).
+  const t2 = Date.now();
+  const repoTimings: Array<{ name: string; ms: number; missingJsonl?: boolean }> = [];
+  const repoIssues = await Promise.all(
+    reposToScan.map(async (repo) => {
+      const rt = Date.now();
+      const exported = await readIssuesJsonl(repo.path).catch(() => null);
+      const issues: BdIssue[] = exported ?? [];
+      repoTimings.push({
+        name: repo.name,
+        ms: Date.now() - rt,
+        missingJsonl: exported === null,
+      });
+      return { repo, issues };
+    }),
+  );
+  const readIssuesMs = Date.now() - t2;
+
+  // Compute bindings.
+  const t3 = Date.now();
   const bindings: IssueSessionBinding[] = [];
   const unbound: SessionMapCache["unbound"] = [];
-
-  for (const repo of reposToScan) {
-    let issues: BdIssue[] = [];
-    try {
-      issues = await listIssues({ cwd: repo.path, bdBinary: opts.bdBinary });
-    } catch {
-      // Repo unreadable: nothing to bind.
-      continue;
-    }
+  for (const { repo, issues } of repoIssues) {
     const active = issues.filter(isActiveIssue);
     for (const agentId of agents) {
       const candidates = sessionsByAgent.get(agentId) ?? [];
@@ -281,13 +323,28 @@ export async function buildSessionMap(
       }
     }
   }
+  const bindAndWriteMs = Date.now() - t3;
 
-  return {
+  const cache: SessionMapCache = {
     generatedAt: new Date(nowMs).toISOString(),
     recencyMs: opts.recencyMs,
     bindings,
     unbound,
   };
+  const reposWithoutJsonl = repoTimings.filter((r) => r.missingJsonl).map((r) => r.name);
+  const timings: SessionMapTimings = {
+    listAgentsMs,
+    readSessionsMs,
+    readIssuesMs,
+    bindAndWriteMs,
+    totalMs: Date.now() - startedAt,
+    slowestRepos: repoTimings
+      .map(({ name, ms }) => ({ name, ms }))
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 3),
+    reposWithoutJsonl,
+  };
+  return { cache, timings };
 }
 
 /** Default cache file path. */
