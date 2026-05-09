@@ -1,47 +1,47 @@
 /**
  * before_prompt_build hook handler — Memory Retrieval (Vestige)
  *
- * Migrated from before_llm_call. Mainline removed before_llm_call as part
- * of Vincent's split hook model; the supported mutating prompt-policy hook
- * is now `before_prompt_build`. Concrete differences from the old hook:
+ * REDESIGN (openclaw-vestige-5fq, 2026-05-08):
+ * Replaces the per-turn DeBERTa NLI zero-shot pass with layered referent
+ * extraction. The NLI scorer was (a) a CPU spike on the gateway main
+ * thread on every user turn and (b) the wrong abstraction: topic
+ * classification told us *what kind of thing* the user was discussing,
+ * but the search query was then polluted with the topic label (e.g.
+ * "PR"), dragging dense retrieval toward the centroid of every PR
+ * memory. We want memories about the *specific referent*, not the
+ * category.
  *
- *   - Event payload is `{ prompt, messages }` only (no `systemPrompt`,
- *     `tools`, or `iteration` fields). System prompt is read from
- *     messages[0] when needed for sub-agent detection. Iteration filter
- *     is dropped — `before_prompt_build` fires once per turn (not per
- *     model-call iteration), so the original first-iteration-only guard
- *     is implicit.
- *
- *   - Result is `{ prependContext?, prependSystemContext?, appendSystemContext?, systemPrompt? }`.
- *     We use `prependContext` to inject recalled memories — it is prefixed
- *     to the user prompt for the model, and is per-turn (no accumulation
- *     in conversation history). This eliminates the strip-old-memory-
- *     blocks pass that was needed when the old handler injected a
- *     synthetic system message into `messages`.
- *
- *   - `.forget` command UX is reduced: we can no longer rewrite the user
- *     message in-place. We still demote matching memories and surface a
- *     short acknowledgement via prependContext so the LLM has the
- *     context, but the literal `.forget X` text remains visible. Moving
- *     that command to an `inbound_claim` hook is a future cleanup.
+ * New stack (see ./referent/):
+ *   1. Cheap salience gate (length + trivial-pattern check) — replaces
+ *      the NLI gate. Sub-millisecond, zero CPU.
+ *   2. Regex layer        — structured ids (URLs, beads ids, paths, SHAs)
+ *   3. Gazetteer layer    — auto-derived proper nouns (repos, plugins,
+ *                           agents) from on-disk sources, refreshed via
+ *                           fs.watch.
+ *   4. KeyBERT layer      — novel n-grams via sentence-embedding cosine
+ *                           similarity. Lazy-loaded (~25MB MiniLM model).
  *
  * Architecture (unchanged):
  *   1. Detect active-memory sub-agent (skip — never recurse)
  *   2. Extract latest user message
- *   3. Score concepts via local NLI zero-shot classifier
- *   4. If salient → search Vestige → return prependContext with memories
+ *   3. Cheap salience gate
+ *   4. Layered referent extraction (regex + gazetteer + keybert in parallel)
+ *   5. Build search query: userMessage.slice(0,200) + space-joined unique referents
+ *   6. Vestige hybrid search → prepend memories via prependContext
  *
- * Latency budget: blocks time-to-first-token. Target: <500ms.
+ * Latency budget: blocks time-to-first-token. Target: <500ms steady
+ * state. First-call cost includes ~25MB embedding model download.
  */
 
-import {
-  scoreConcepts,
-  hasSalientConcepts,
-  getSalientLabels,
-  DEFAULT_CONCEPT_LABELS,
-  type ConceptScore,
-} from "./nli-scorer.js";
 import { addToWindow } from "./sliding-window.js";
+import {
+  extractReferents,
+  buildSearchQuery,
+  pickMemoryTag,
+  shouldSearchMemory,
+  ensureGazetteerForWorkspace,
+  type ExtractedReferent,
+} from "./referent/index.js";
 
 // ── Types (matching mainline OpenClaw plugin hook signatures) ──────────
 
@@ -69,10 +69,6 @@ interface AgentContext {
   sessionId?: string;
   workspaceDir?: string;
   messageProvider?: string;
-  // Identity fields (senderId/senderIsOwner/etc.) intentionally omitted —
-  // mainline does not populate them on the agent hookCtx; identity-bearing
-  // hooks are inbound_claim / message_received / subagent_spawned. Vestige
-  // does not need identity for retrieval.
 }
 
 interface Logger {
@@ -86,14 +82,22 @@ const noopLogger: Logger = { info() {}, warn() {}, error() {} };
 interface BeforePromptBuildConfig {
   vestigeServerUrl: string;
   vestigeAuthToken?: string;
-  /** Concept labels for NLI scoring (defaults provided) */
+  /**
+   * Concept labels are no longer used (NLI scorer removed from this hook).
+   * Field retained on the config interface for backward compatibility but
+   * intentionally ignored. Will be removed in a future major.
+   */
   conceptLabels?: string[];
-  /** Minimum NLI score to consider a concept salient (default: 0.3) */
+  /** Backward-compat alias — also ignored. */
   saliencyThreshold?: number;
   /** Max memories to inject (default: 5) */
   maxMemories?: number;
   /** Max tokens to spend on injected memories (default: 1000) */
   maxMemoryTokens?: number;
+  /** Disable KeyBERT layer (e.g. low-mem environments). Default: enabled. */
+  disableKeybert?: boolean;
+  /** Maximum referents to send to the search query (default: 8) */
+  maxReferents?: number;
   /** Logger for debug output */
   logger?: Logger;
 }
@@ -106,9 +110,6 @@ const MEMORY_BLOCK_END = "<!-- /vestige:recalled-memories -->";
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function extractSystemPromptFromMessages(messages: AgentMessage[]): string {
-  // Conventionally the system prompt sits at index 0 with role "system".
-  // Some surfaces may put it later, so scan from the front for the first
-  // system message.
   for (const msg of messages) {
     if (msg.role !== "system") continue;
     const content = msg.content;
@@ -124,8 +125,6 @@ function extractSystemPromptFromMessages(messages: AgentMessage[]): string {
 }
 
 function extractUserMessage(prompt: string, messages: AgentMessage[]): string | null {
-  // Prefer the explicit `prompt` field — that's the current turn's input.
-  // Fall back to scanning messages for the latest user role.
   if (prompt && prompt.trim().length > 0) return prompt;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "user") {
@@ -223,12 +222,9 @@ async function searchVestige(
 // ── Handler ────────────────────────────────────────────────────────────
 
 export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) {
-  // Merge user-provided labels with defaults (additive, deduplicated)
-  const conceptLabels = config.conceptLabels
-    ? [...new Set([...DEFAULT_CONCEPT_LABELS, ...config.conceptLabels])]
-    : DEFAULT_CONCEPT_LABELS;
-  const threshold = config.saliencyThreshold ?? 0.3;
   const log = config.logger ?? noopLogger;
+  const enableKeybert = !config.disableKeybert;
+  const maxReferents = config.maxReferents ?? 8;
 
   return async (
     event: BeforePromptBuildEvent,
@@ -249,8 +245,6 @@ export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) 
     }
 
     // ── .forget command: demote matching memories, acknowledge via prependContext ──
-    // (UX is reduced from the old in-place message rewrite; promotion to
-    // an inbound_claim hook is the proper home and is a future cleanup.)
     if (userMessage.trim().toLowerCase().startsWith(".forget ")) {
       const query = userMessage.trim().slice(".forget ".length).trim();
       if (query.length > 0) {
@@ -279,9 +273,6 @@ export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) 
     }
 
     // ── Sub-agent detection: skip when running inside active-memory sub-agent ──
-    // The active-memory plugin spawns memory-search sub-agents with a
-    // recognisable system prompt prefix. Firing Vestige there would
-    // recurse and burn the sub-agent's latency budget.
     const systemPromptText = extractSystemPromptFromMessages(event.messages);
     if (systemPromptText.includes("You are a memory search agent.")) {
       log.info(`[vestige] skipping — inside active-memory sub-agent`);
@@ -292,33 +283,43 @@ export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) 
       `[vestige] userMessage (${userMessage.length} chars): "${userMessage.slice(0, 80)}..."`,
     );
 
-    // Add to sliding window for outbound saliency scoring later
+    // Track for outbound saliency scoring (llm_output uses NLI on the
+    // user→assistant exchange; that's a separate hook, untouched).
     addToWindow(sessionKey, { role: "user", content: userMessage, agentId });
 
-    // Score concepts via local NLI classifier
-    let scores: ConceptScore[];
+    // ── Cheap salience gate ───────────────────────────────────────────
+    if (!shouldSearchMemory(userMessage)) {
+      log.info(`[vestige] skipping — cheap salience gate (trivial/short message)`);
+      return;
+    }
+
+    // ── Referent extraction (regex + gazetteer + keybert in parallel) ──
+    const gazetteer = ensureGazetteerForWorkspace(ctx.workspaceDir);
+    let refs: ExtractedReferent[] = [];
     try {
-      const nliT0 = Date.now();
-      scores = await scoreConcepts(userMessage, conceptLabels);
+      const extT0 = Date.now();
+      refs = await extractReferents(userMessage, {
+        gazetteer,
+        enableKeybert,
+        maxReferents,
+      });
       log.info(
-        `[vestige] NLI scored in ${Date.now() - nliT0}ms — top: ${scores
-          .slice(0, 3)
-          .map((s) => `${s.label}=${s.score.toFixed(3)}`)
+        `[vestige] referents extracted in ${Date.now() - extT0}ms (${refs.length}): ${refs
+          .map((r) => `${r.source}:${r.value}`)
+          .slice(0, 6)
           .join(", ")}`,
       );
     } catch (err) {
-      log.error(`[vestige] NLI scorer failed:`, err);
-      return;
+      log.warn(`[vestige] referent extractor failed (continuing without):`, err);
     }
 
-    if (!hasSalientConcepts(scores, threshold)) {
-      log.info(`[vestige] no salient concepts above threshold=${threshold} — skipping retrieval`);
-      return;
-    }
+    // TODO(openclaw-vestige-5fq): optional NER fallback if KeyBERT recall
+    // disappoints in production. Layered escalation: only run NER if the
+    // combined regex+gazetteer+keybert haul came back empty *and* the
+    // message is long enough to plausibly contain a named entity.
 
-    const salientLabels = getSalientLabels(scores, threshold);
-    log.info(`[vestige] salient labels: ${salientLabels.join(", ")}`);
-    const query = `${userMessage.slice(0, 200)} ${salientLabels.join(" ")}`.trim();
+    const query = buildSearchQuery(userMessage, refs);
+    log.info(`[vestige] search query: "${query.slice(0, 120)}${query.length > 120 ? "…" : ""}"`);
 
     const maxMemories = config.maxMemories ?? 5;
     const searchT0 = Date.now();
@@ -341,12 +342,12 @@ export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) 
     const memoryLines: string[] = [];
     let tokenCount = 0;
 
-    const topLabel = salientLabels[0] ?? "memory";
+    const tag = pickMemoryTag(refs);
 
     for (const result of results) {
       const tokens = estimateTokens(result.content);
       if (tokenCount + tokens > maxTokens) break;
-      memoryLines.push(`• [${topLabel}] ${result.content}`);
+      memoryLines.push(`• [${tag}] ${result.content}`);
       tokenCount += tokens;
     }
 

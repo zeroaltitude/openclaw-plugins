@@ -8,7 +8,7 @@
  * and takes a few seconds; subsequent calls are ~50-200ms depending on text length.
  */
 
-// @ts-expect-error — @xenova/transformers has no TS types
+// @ts-ignore — @xenova/transformers has no TS types
 import { pipeline, env } from "@xenova/transformers";
 
 // ── Config ─────────────────────────────────────────────────────────────
