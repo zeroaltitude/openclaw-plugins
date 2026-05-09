@@ -106,6 +106,18 @@ interface BeforePromptBuildConfig {
   disableKeybert?: boolean;
   /** Maximum referents to send to the search query (default: 8) */
   maxReferents?: number;
+  /**
+   * Enable per-referent fan-out search alongside the message-anchored
+   * search (default: true). Each prioritized referent gets its own
+   * /api/search call; results are merged and deduped by memory id.
+   * Tracked: openclaw-vestige-wf9.
+   */
+  enableReferentFanout?: boolean;
+  /**
+   * Max number of referents to fan-out search on (default: 4). Referents
+   * are prioritized regex > gazetteer > keybert.
+   */
+  maxFanoutReferents?: number;
   /** Logger for debug output */
   logger?: Logger;
 }
@@ -348,15 +360,71 @@ export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) 
     log.info(`[vestige] search query: "${query.slice(0, 120)}${query.length > 120 ? "…" : ""}"`);
 
     const maxMemories = config.maxMemories ?? 5;
+    const enableFanout = config.enableReferentFanout !== false;
+    const maxFanoutReferents = config.maxFanoutReferents ?? 4;
+
+    // Build the fan-out target list: prefer regex > gazetteer > keybert
+    // referents, dedup by lowercased value. Skip if fan-out disabled or
+    // we have no referents.
+    const fanoutTargets: string[] = [];
+    if (enableFanout && refs.length > 0) {
+      const priority = (r: ExtractedReferent) =>
+        r.source === "regex" ? 0 : r.source === "gazetteer" ? 1 : 2;
+      const sorted = [...refs].sort((a, b) => priority(a) - priority(b));
+      const seen = new Set<string>();
+      for (const r of sorted) {
+        const v = r.value.trim();
+        if (v.length < 2) continue;
+        const lv = v.toLowerCase();
+        if (seen.has(lv)) continue;
+        seen.add(lv);
+        fanoutTargets.push(v);
+        if (fanoutTargets.length >= maxFanoutReferents) break;
+      }
+    }
+
     const searchT0 = Date.now();
-    const results = await searchVestige(
-      config.vestigeServerUrl,
-      config.vestigeAuthToken,
-      query,
-      agentId,
-      maxMemories,
+    // Run the message-anchored search and the per-referent fan-out
+    // searches in parallel. Wallclock is dominated by the slowest call,
+    // not the sum.
+    const allCalls: Array<Promise<{ tag: string; results: Array<{ content: string; combinedScore?: number; id: string }> }>> = [];
+    allCalls.push(
+      searchVestige(config.vestigeServerUrl, config.vestigeAuthToken, query, agentId, maxMemories).then(
+        (r) => ({ tag: "anchor", results: r as any }),
+      ),
     );
-    log.info(`[vestige] search returned ${results.length} results in ${Date.now() - searchT0}ms`);
+    for (const target of fanoutTargets) {
+      allCalls.push(
+        searchVestige(config.vestigeServerUrl, config.vestigeAuthToken, target, agentId, 3).then(
+          (r) => ({ tag: `ref:${target}`, results: r as any }),
+        ),
+      );
+    }
+    const settled = await Promise.allSettled(allCalls);
+
+    // Merge: dedup by memory id, keep entry with max combinedScore.
+    const merged = new Map<string, { content: string; combinedScore: number; id: string; surfacedBy: string }>();
+    for (const s of settled) {
+      if (s.status !== "fulfilled") continue;
+      const { tag, results: batch } = s.value;
+      for (const item of batch) {
+        const id = item.id;
+        if (!id) continue;
+        const score = (item as any).combinedScore ?? 0;
+        const prev = merged.get(id);
+        if (!prev || score > prev.combinedScore) {
+          merged.set(id, { content: item.content, combinedScore: score, id, surfacedBy: prev?.surfacedBy ?? tag });
+        }
+      }
+    }
+    // Sort by combinedScore desc and cap.
+    const results = Array.from(merged.values())
+      .sort((a, b) => b.combinedScore - a.combinedScore)
+      .slice(0, maxMemories);
+
+    log.info(
+      `[vestige] fan-out search: anchor + ${fanoutTargets.length} referent calls (${fanoutTargets.map((t) => `"${t}"`).join(", ")}) → ${merged.size} unique → top ${results.length} in ${Date.now() - searchT0}ms`,
+    );
 
     if (results.length === 0) {
       log.info(`[vestige] no memories found — skipping injection`);
