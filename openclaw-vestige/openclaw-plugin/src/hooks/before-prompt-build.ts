@@ -34,6 +34,7 @@
  */
 
 import { addToWindow } from "./sliding-window.js";
+import { stripPromptEnvelope } from "./strip-envelope.js";
 import {
   extractReferents,
   buildSearchQuery,
@@ -244,11 +245,29 @@ export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) 
 
     const agentId = ctx.agentId ?? "unknown";
     const sessionKey = ctx.sessionKey ?? "__unknown__";
-    const userMessage = extractUserMessage(event.prompt, event.messages);
+    const userMessageRaw = extractUserMessage(event.prompt, event.messages);
 
-    if (!userMessage || userMessage.length < 5) {
+    if (!userMessageRaw || userMessageRaw.length < 5) {
       log.info(`[vestige] skipping — userMessage too short or missing`);
       return;
+    }
+
+    // Strip channel envelope/metadata before any downstream processing
+    // (salience gate, referent extraction, embedding query). The envelope
+    // is boilerplate that drowns the actual content in a 200-char query
+    // slice and pulls cosine matches toward Slack-shape memories instead
+    // of content matches. Tracked: openclaw-vestige-tjh.
+    const userMessage = stripPromptEnvelope(userMessageRaw);
+    if (!userMessage || userMessage.length < 5) {
+      log.info(
+        `[vestige] skipping — stripped userMessage too short (raw=${userMessageRaw.length} stripped=${userMessage.length})`,
+      );
+      return;
+    }
+    if (userMessage.length !== userMessageRaw.length) {
+      log.info(
+        `[vestige] envelope stripped: ${userMessageRaw.length} → ${userMessage.length} chars`,
+      );
     }
 
     // ── .forget command: demote matching memories, acknowledge via prependContext ──
