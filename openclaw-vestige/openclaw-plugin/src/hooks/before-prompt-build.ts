@@ -94,6 +94,13 @@ interface BeforePromptBuildConfig {
   maxMemories?: number;
   /** Max tokens to spend on injected memories (default: 1000) */
   maxMemoryTokens?: number;
+  /**
+   * Per-memory character cap before token counting (default: 600).
+   * Vestige merges [Updated YYYY-MM-DD] history into single records, so some
+   * bodies grow to 100KB+. We excerpt the head and let the model pull the
+   * full record via vestige_search if it wants more.
+   */
+  maxPerMemoryChars?: number;
   /** Disable KeyBERT layer (e.g. low-mem environments). Default: enabled. */
   disableKeybert?: boolean;
   /** Maximum referents to send to the search query (default: 8) */
@@ -337,21 +344,48 @@ export function createBeforePromptBuildHandler(config: BeforePromptBuildConfig) 
       return;
     }
 
-    // Build memory injection, respecting token budget
+    // Build memory injection, respecting token budget.
+    //
+    // Each memory is truncated to maxPerMemoryChars before token counting.
+    // Memories grow over time as Vestige merges [Updated YYYY-MM-DD] history
+    // into the same record — some bodies are 100KB+ — so we excerpt the head
+    // and let the model pull the full record via vestige_search if it wants.
+    //
+    // We also `continue` (not `break`) on overflow so a single huge memory
+    // doesn't shut out smaller ones behind it.
     const maxTokens = config.maxMemoryTokens ?? 1000;
+    const maxPerMemoryChars = config.maxPerMemoryChars ?? 600;
     const memoryLines: string[] = [];
     let tokenCount = 0;
+    let skipped = 0;
 
     const tag = pickMemoryTag(refs);
 
     for (const result of results) {
-      const tokens = estimateTokens(result.content);
-      if (tokenCount + tokens > maxTokens) break;
-      memoryLines.push(`• [${tag}] ${result.content}`);
+      const raw = (result as { content?: unknown }).content;
+      if (typeof raw !== "string") {
+        skipped++;
+        continue;
+      }
+      const truncated =
+        raw.length > maxPerMemoryChars
+          ? raw.slice(0, maxPerMemoryChars).trimEnd() + "…"
+          : raw;
+      const tokens = estimateTokens(truncated);
+      if (tokenCount + tokens > maxTokens) {
+        skipped++;
+        continue;
+      }
+      memoryLines.push(`• [${tag}] ${truncated}`);
       tokenCount += tokens;
     }
 
-    if (memoryLines.length === 0) return;
+    if (memoryLines.length === 0) {
+      log.warn(
+        `[vestige] all ${results.length} results dropped during budget pass (maxTokens=${maxTokens}, maxPerMemoryChars=${maxPerMemoryChars}, skipped=${skipped}) — no injection`,
+      );
+      return;
+    }
 
     const memoryBlock = [MEMORY_BLOCK_START, ...memoryLines, MEMORY_BLOCK_END].join("\n");
 
