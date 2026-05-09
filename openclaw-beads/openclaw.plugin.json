@@ -5,6 +5,9 @@
   "description": "Gateway-mounted /beads UI + API for browsing the Beads issue tracker as a DAG.",
   "author": "Tank (Eddie's stack)",
   "main": "dist/index.js",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

@@ -172,15 +172,15 @@
     import { Canvas, Node as ReaNode, Edge as ReaEdge } from "reaflow";
 
     const STATUS_COLORS = {
-      open:        "#3b82f6",
-      in_progress: "#f59e0b",
-      waiting_for_user: "#06b6d4",
-      waiting_for_available_agent: "#ec4899",
-      blocked:     "#ef4444",
-      closed:      "#6b7280",
-      deferred:    "#8b5cf6",
+      open:                        "#22c55e", // green
+      in_progress:                 "#3b82f6", // blue
+      waiting_for_user:            "#fdba74", // light orange
+      waiting_for_available_agent: "#ea580c", // dark orange
+      blocked:                     "#ef4444", // red
+      closed:                      "#6b7280", // gray
+      deferred:                    "#eab308", // yellow
     };
-    const colorForStatus = (s) => STATUS_COLORS[String(s ?? "open").toLowerCase()] ?? "#3b82f6";
+    const colorForStatus = (s) => STATUS_COLORS[String(s ?? "open").toLowerCase()] ?? "#22c55e";
 
     const ISSUE_TYPES = ["task", "bug", "feature", "epic", "chore", "decision"];
     const STATUSES = ["open", "in_progress", "waiting_for_user", "waiting_for_available_agent", "blocked", "closed", "deferred"];
