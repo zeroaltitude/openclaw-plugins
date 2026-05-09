@@ -2039,14 +2039,11 @@ export function registerSecurityHooks(
       if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return undefined;
       if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return undefined;
 
-      // The footer is only emitted on the final assistant reply for the
-      // turn. agent_end stages finalTaintBySession synchronously (the
-      // agent_end hook runner invokes handlers synchronously inside its
-      // wrapping async fn, so by the time deliverOutboundPayloads gets
-      // here for the final reply, staging is already done). Intermediate
-      // sends — mid-turn message:send tool calls, streamed thinking-loop
-      // chunks — have no staged data, so they get no footer.
-      // (See openclaw-provenance-rh3.)
+      // message_sending fires for auto-reply final sends (where hookRunner
+      // IS present). For those, finalTaintBySession is already staged by
+      // agent_end. Streaming chunks have no staged record → suppress (rh3).
+      // Tool-driven sends (message:send) are handled in before_tool_call
+      // via param mutation; they never reach this path.
       const final = finalTaintBySession.get(sessionKey);
       if (!final) return undefined;
 
@@ -2079,10 +2076,48 @@ export function registerSecurityHooks(
       const toolName = event.toolName;
       const toolNameLower = toolName.toLowerCase();
 
-      // (Removed: developerMode taint footer for message:send tool calls.
-      //  The footer is owned by message_sending on the final assistant
-      //  reply only, so mid-turn message tool sends and streamed updates
-      //  stay footer-free. See openclaw-provenance-rh3.)
+      // Developer-mode trust footer for message:send tool calls.
+      // The message_sending hook is not reachable from the tool-send path
+      // (hookRunner isn't threaded through durable-delivery.ts). Instead
+      // we mutate params.message here, before the tool executes, injecting
+      // the footer synthesized from live graph + watermark state.
+      // Streaming chunks don't go through before_tool_call → footer-free
+      // (rh3 fix preserved). Tracks openclaw-provenance-2ak.
+      if (
+        developerMode &&
+        toolNameLower === "message" &&
+        (event.params?.action === "send" || event.params?.action === "sendWithEffect") &&
+        typeof event.params?.message === "string" &&
+        event.params.message.length > 0
+      ) {
+        const liveGraph = store.getActive(sessionKey);
+        const liveTaint = liveGraph?.maxTaint ?? "trusted";
+        const liveWm = watermarkStore.getLevel(sessionKey);
+        const liveLevel =
+          liveWm && TRUST_ORDER.indexOf(liveWm.level) > TRUST_ORDER.indexOf(liveTaint)
+            ? liveWm.level
+            : liveTaint;
+        const liveReason =
+          liveWm && liveLevel === liveWm.level
+            ? (liveWm.reason ?? "watermark")
+            : "current graph maxTaint";
+        const startEntry = turnStartTaintBySession.get(sessionKey);
+        const taintEmoji = (level: string) =>
+          level === "trusted" ? "🟢"
+            : level === "shared" ? "🟡"
+              : level === "external" ? "🟠" : "🔴";
+        const footer =
+          `\`${taintEmoji(startEntry?.level ?? "trusted")} ${startEntry?.level ?? "trusted"} ` +
+          `(${truncate(startEntry?.reason ?? "unknown", 60)}) → ` +
+          `${taintEmoji(liveLevel)} ${liveLevel} (${truncate(liveReason, 60)}) | ` +
+          `impacted: ${lastImpactedToolBySession.get(sessionKey) ?? toolName}\``;
+        return {
+          params: {
+            ...event.params,
+            message: event.params.message + "\n" + footer,
+          },
+        };
+      }
 
       // Memory file write protection
       if (graph && (toolNameLower === "write" || toolNameLower === "edit")) {
