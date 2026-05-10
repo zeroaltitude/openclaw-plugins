@@ -340,23 +340,50 @@ export function register(api: PluginApi) {
   const conceptLabels = (cfg.conceptLabels as string[] | undefined) ?? undefined;
   const saliencyThreshold = (cfg.saliencyThreshold as number | undefined) ?? undefined;
 
+  // Granular feature flags so each ambient hook can be toggled independently.
+  //
+  // `prependRecalledMemoriesEnabled` gates ONLY the `before_prompt_build`
+  // memory-injection path — the one that emits the `<!-- vestige:recalled-memories -->`
+  // structured header into the assistant's prompt. When the recall layer is
+  // misfiring (irrelevant or stale memories surfacing on every turn) this flag
+  // lets us disable it surgically without losing the outbound `llm_output`
+  // saliency-gated ingest path.
+  //
+  // Default: false (off). Operators must opt in explicitly. Existing deployments
+  // that previously relied on `hooksEnabled: true` to enable both hooks will
+  // need to also set `prependRecalledMemoriesEnabled: true` to restore the
+  // pre-insert behavior.
+  const prependRecalledMemoriesEnabled =
+    (cfg.prependRecalledMemoriesEnabled as boolean) ?? false;
+
   if (hooksEnabled) {
     // Feature-detect: gracefully degrade if the host doesn't support these hooks.
     try {
-      // Inbound: retrieve relevant memories before prompt is finalized
-      api.on(
-        "before_prompt_build",
-        createBeforePromptBuildHandler({
-          vestigeServerUrl: serverUrl,
-          vestigeAuthToken: token || undefined,
-          conceptLabels,
-          saliencyThreshold,
-          maxMemories: (cfg.maxMemories as number) ?? 5,
-          maxMemoryTokens: (cfg.maxMemoryTokens as number) ?? 1000,
-          logger: api.logger,
-        }),
-        { priority: 10 },
-      );
+      // Inbound: retrieve relevant memories before prompt is finalized.
+      // Gated separately so the noisy recall path can be disabled without
+      // also disabling outbound ingestion.
+      if (prependRecalledMemoriesEnabled) {
+        api.on(
+          "before_prompt_build",
+          createBeforePromptBuildHandler({
+            vestigeServerUrl: serverUrl,
+            vestigeAuthToken: token || undefined,
+            conceptLabels,
+            saliencyThreshold,
+            maxMemories: (cfg.maxMemories as number) ?? 5,
+            maxMemoryTokens: (cfg.maxMemoryTokens as number) ?? 1000,
+            logger: api.logger,
+          }),
+          { priority: 10 },
+        );
+        api.logger.info(
+          "[vestige] before_prompt_build hook registered (prependRecalledMemoriesEnabled=true)",
+        );
+      } else {
+        api.logger.info(
+          "[vestige] before_prompt_build hook DISABLED (prependRecalledMemoriesEnabled=false) — no recalled-memories header will be injected",
+        );
+      }
 
       // Outbound: auto-ingest important exchanges from the model's output
       api.on(
@@ -371,7 +398,9 @@ export function register(api: PluginApi) {
       );
 
       api.logger.info(
-        "[vestige] Ambient memory hooks registered: before_prompt_build + llm_output (model: DeBERTa-v3-xsmall NLI, local)",
+        "[vestige] Ambient memory hooks registered: llm_output" +
+          (prependRecalledMemoriesEnabled ? " + before_prompt_build" : "") +
+          " (model: DeBERTa-v3-xsmall NLI, local)",
       );
     } catch (err) {
       // Host doesn't support these hooks — fall back to tool-only mode
