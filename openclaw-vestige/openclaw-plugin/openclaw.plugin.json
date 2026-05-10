@@ -39,6 +39,16 @@
         "description": "Enable hook-based automatic memory retrieval and ingestion",
         "default": false
       },
+      "prependRecalledMemoriesEnabled": {
+        "type": "boolean",
+        "description": "Gate the before_prompt_build hook that prepends recalled memories to the prompt. Requires hooksEnabled=true.",
+        "default": false
+      },
+      "autoIngestEnabled": {
+        "type": "boolean",
+        "description": "Gate the llm_output hook that performs saliency-scored automatic post-turn memory ingestion. Requires hooksEnabled=true.",
+        "default": false
+      },
       "scorerApiKey": {
         "type": "string",
         "description": "API key for the saliency scorer LLM (e.g., Anthropic key for Haiku)"
