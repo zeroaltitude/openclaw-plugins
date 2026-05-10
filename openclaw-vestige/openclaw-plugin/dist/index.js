@@ -294,6 +294,11 @@ function register(api) {
     // need to also set `prependRecalledMemoriesEnabled: true` to restore the
     // pre-insert behavior.
     const prependRecalledMemoriesEnabled = cfg.prependRecalledMemoriesEnabled ?? false;
+    // `autoIngestEnabled` gates ONLY the `llm_output` saliency-scored auto-ingest
+    // path. When ingestion is misfiring (storing low-signal exchanges, hitting
+    // rate limits, or causing latency on the response path) this flag lets us
+    // disable it surgically without touching the recall path. Default: false.
+    const autoIngestEnabled = cfg.autoIngestEnabled ?? false;
     if (hooksEnabled) {
         // Feature-detect: gracefully degrade if the host doesn't support these hooks.
         try {
@@ -315,16 +320,26 @@ function register(api) {
             else {
                 api.logger.info("[vestige] before_prompt_build hook DISABLED (prependRecalledMemoriesEnabled=false) — no recalled-memories header will be injected");
             }
-            // Outbound: auto-ingest important exchanges from the model's output
-            api.on("llm_output", (0, llm_output_js_1.createLlmOutputHandler)({
-                vestigeServerUrl: serverUrl,
-                vestigeAuthToken: token || undefined,
-                conceptLabels,
-                saliencyThreshold,
-            }), { priority: 90 });
-            api.logger.info("[vestige] Ambient memory hooks registered: llm_output" +
-                (prependRecalledMemoriesEnabled ? " + before_prompt_build" : "") +
-                " (model: DeBERTa-v3-xsmall NLI, local)");
+            // Outbound: auto-ingest important exchanges from the model's output.
+            // Gated separately so the ingest path can be disabled without touching
+            // the recall path.
+            if (autoIngestEnabled) {
+                api.on("llm_output", (0, llm_output_js_1.createLlmOutputHandler)({
+                    vestigeServerUrl: serverUrl,
+                    vestigeAuthToken: token || undefined,
+                    conceptLabels,
+                    saliencyThreshold,
+                }), { priority: 90 });
+                api.logger.info("[vestige] llm_output hook registered (autoIngestEnabled=true)");
+            }
+            else {
+                api.logger.info("[vestige] llm_output hook DISABLED (autoIngestEnabled=false) — no automatic post-turn ingestion");
+            }
+            const enabledList = [
+                prependRecalledMemoriesEnabled ? "before_prompt_build" : null,
+                autoIngestEnabled ? "llm_output" : null,
+            ].filter(Boolean).join(" + ") || "(none)";
+            api.logger.info(`[vestige] Ambient memory hooks registered: ${enabledList} (model: DeBERTa-v3-xsmall NLI, local)`);
         }
         catch (err) {
             // Host doesn't support these hooks — fall back to tool-only mode
