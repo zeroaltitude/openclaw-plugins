@@ -197,6 +197,24 @@ export function shouldIncludeReadyIssue(issue: BdIssue, agentId: string, include
   return owner === "any" || owner === agentId;
 }
 
+/**
+ * Heartbeat selection ordering for `<plans_and_tasks>`. Sorts by:
+ *   1. Direct-assignee match first (assignee === agentId), so an
+ *      agent's own work is never starved by `any` backlog when the
+ *      list is capped by `readyLimitPerRepo`.
+ *   2. Numeric priority ascending (lower number = higher priority).
+ *   3. Stable on issue id as a tie-breaker.
+ */
+export function compareReadyIssuesForAgent(a: BdIssue, b: BdIssue, agentId: string): number {
+  const aDirect = issueAssignee(a) === agentId ? 0 : 1;
+  const bDirect = issueAssignee(b) === agentId ? 0 : 1;
+  if (aDirect !== bDirect) return aDirect - bDirect;
+  const ap = Number((a as any).priority ?? 2);
+  const bp = Number((b as any).priority ?? 2);
+  if (ap !== bp) return ap - bp;
+  return String(a.id ?? "").localeCompare(String(b.id ?? ""));
+}
+
 export function formatPlansAndTasksBlock(params: {
   agentId: string;
   repos: Array<{ repo: BdRepo; issues: BdIssue[]; error?: string }>;
@@ -420,7 +438,7 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
   if (config.runLoop?.enabled === false) return null;
   const repos = config.repos ?? [];
   if (!repos.length) return null;
-  const limit = Math.max(1, config.runLoop?.readyLimitPerRepo ?? 1);
+  const limit = Math.max(1, config.runLoop?.readyLimitPerRepo ?? 3);
   const includeUnassigned = config.runLoop?.includeUnassigned ?? false;
   const actionableRepos = repos.filter((repo) => !/test/i.test(repo.name));
   const ttlMs = Math.max(0, config.runLoop?.readyCacheTtlMs ?? DEFAULT_PROMPT_BLOCK_TTL_MS);
@@ -449,6 +467,7 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
           });
           const issues = ready
             .filter((issue) => shouldIncludeReadyIssue(issue, agentId, includeUnassigned))
+            .sort((a, b) => compareReadyIssuesForAgent(a, b, agentId))
             .slice(0, limit);
           return { repo, issues };
         } catch (err: any) {

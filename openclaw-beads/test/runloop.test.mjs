@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { shouldIncludeReadyIssue, formatPlansAndTasksBlock } from '../dist/index.js';
+import { shouldIncludeReadyIssue, formatPlansAndTasksBlock, compareReadyIssuesForAgent } from '../dist/index.js';
 
 describe('run loop prompt helpers', () => {
   it('includes issues assigned to the current agent or any only', () => {
@@ -9,6 +9,27 @@ describe('run loop prompt helpers', () => {
     assert.equal(shouldIncludeReadyIssue({ id: 'c', title: 'C', assignee: 'eddie' }, 'tank', false), false);
     assert.equal(shouldIncludeReadyIssue({ id: 'd', title: 'D' }, 'tank', false), false);
     assert.equal(shouldIncludeReadyIssue({ id: 'e', title: 'E' }, 'tank', true), true);
+  });
+
+  it('orders direct-assignee issues ahead of any-assigned ones, then by priority (Shiva starvation regression)', () => {
+    const anyHigherPriority = { id: 'openclaw-vestige-7j3', title: 'A', assignee: 'any', priority: 2 };
+    const directLowerPriority = { id: 'openclaw-vestige-odd', title: 'B', assignee: 'shiva', priority: 3 };
+    const sorted = [anyHigherPriority, directLowerPriority].sort((a, b) =>
+      compareReadyIssuesForAgent(a, b, 'shiva'),
+    );
+    assert.equal(sorted[0].id, 'openclaw-vestige-odd', 'direct-assignee must come first even at lower priority');
+    assert.equal(sorted[1].id, 'openclaw-vestige-7j3');
+    // With readyLimitPerRepo=1 the direct issue would have been starved before the fix.
+    const limited = sorted.slice(0, 1);
+    assert.equal(limited[0].id, 'openclaw-vestige-odd');
+  });
+
+  it('breaks priority ties by id within the same assignee tier', () => {
+    const a = { id: 'b-2', title: 'b', assignee: 'tank', priority: 2 };
+    const b = { id: 'a-1', title: 'a', assignee: 'tank', priority: 2 };
+    const sorted = [a, b].sort((x, y) => compareReadyIssuesForAgent(x, y, 'tank'));
+    assert.equal(sorted[0].id, 'a-1');
+    assert.equal(sorted[1].id, 'b-2');
   });
 
   it('renders core run-loop discipline and ready issues', () => {
