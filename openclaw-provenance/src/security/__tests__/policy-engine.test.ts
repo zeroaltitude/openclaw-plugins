@@ -22,7 +22,7 @@ import {
 } from "../policy-engine.js";
 import { TurnProvenanceGraph } from "../provenance-graph.js";
 import { ApprovalStore } from "../approval-store.js";
-import type { TrustLevel } from "../trust-levels.js";
+import { DEFAULT_TOOL_OUTPUT_TAINTS, type TrustLevel } from "../trust-levels.js";
 
 // ============================================================
 // Helpers
@@ -245,6 +245,25 @@ describe("buildPolicyConfig()", () => {
         expect(config.toolOverrides[tool]["*"]).toBe("allow");
       }
     }
+  });
+
+  it("keeps heartbeat_respond trusted and allowed at tainted levels", () => {
+    const config = buildPolicyConfig();
+    const graph = graphWithTaint("untrusted");
+    const approvals = new ApprovalStore();
+
+    expect(DEFAULT_TOOL_OUTPUT_TAINTS.heartbeat_respond).toBe("trusted");
+    expect(config.toolOverrides.heartbeat_respond["*"]).toBe("allow");
+
+    const result = evaluateWithApprovals(
+      graph,
+      ["heartbeat_respond"],
+      config,
+      approvals,
+      "heartbeat-session",
+    );
+    expect(result.toolRemovals.has("heartbeat_respond")).toBe(false);
+    expect(result.pendingConfirmations).toHaveLength(0);
   });
 
   it("user overrides merge per-tool", () => {

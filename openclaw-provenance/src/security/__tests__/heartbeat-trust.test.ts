@@ -216,4 +216,54 @@ describe("Heartbeat trust classification", () => {
     expect(trustLine).toContain("sourceProvider=heartbeat");
     expect(trustLine).toContain("effectiveProvider=heartbeat");
   });
+
+  it("allows heartbeat_respond and keeps its output trusted during heartbeat turns", () => {
+    const cleanSessionKey = "agent:main:slack:channel:heartbeat-clean";
+    const taintedSessionKey = "agent:main:slack:channel:heartbeat-tainted";
+    const { api, store } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "heartbeat" }],
+      messageCount: 1,
+    }, {
+      agentId: "main",
+      sessionKey: cleanSessionKey,
+      messageProvider: "slack",
+      sourceProvider: "heartbeat",
+    });
+
+    api.fire("after_tool_call", {
+      toolName: "heartbeat_respond",
+      params: { outcome: "progress", notify: true },
+      result: { status: "recorded", outcome: "progress", notify: true },
+    }, {
+      agentId: "main",
+      sessionKey: cleanSessionKey,
+    });
+
+    expect(store.getActive(cleanSessionKey)?.maxTaint).toBe("trusted");
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "heartbeat" }],
+      messageCount: 1,
+    }, {
+      agentId: "main",
+      sessionKey: taintedSessionKey,
+      messageProvider: "slack",
+      sourceProvider: "heartbeat",
+    });
+    store.getActive(taintedSessionKey)?.recordToolCall("web_fetch", 1);
+
+    const result = api.fire("before_tool_call", {
+      toolName: "heartbeat_respond",
+      params: { outcome: "progress", notify: true },
+    }, {
+      agentId: "main",
+      sessionKey: taintedSessionKey,
+    });
+
+    expect(result).toBeUndefined();
+  });
 });

@@ -163,6 +163,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   nodes: "trusted",
   canvas: "trusted",
   gateway: "trusted",
+  heartbeat_respond: "trusted",
   session_status: "trusted",
   subagents: "trusted",
   update_plan: "trusted",
