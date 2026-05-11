@@ -1,5 +1,5 @@
 /**
- * Trust footer is emitted ONCE per turn, on the final assistant reply only.
+ * Trust footer is emitted only on visible outbound reply surfaces.
  *
  * Regression for openclaw-provenance-rh3: after the hook-surface migration,
  * an inline-fallback in message_sending caused the developer-mode trust
@@ -7,6 +7,10 @@
  * tool calls, streamed thinking-loop chunks). The footer should only
  * appear on the final assistant reply, where agent_end has staged its
  * final-taint snapshot.
+ *
+ * openclaw-provenance-2ak later made `message:send` tool calls an
+ * intentional footer surface because group-chat final replies are delivered
+ * through that tool path instead of the implicit final assistant reply.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -29,7 +33,7 @@ function makeLogger() {
 
 const FOOTER_RE = /trusted.*→.*trusted.*\| impacted:/;
 
-describe("Developer-mode trust footer fires only on final reply", () => {
+describe("Developer-mode trust footer fires only on visible outbound replies", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -201,7 +205,7 @@ describe("Developer-mode trust footer fires only on final reply", () => {
     expect(firstInterim?.content).toBeUndefined();
   });
 
-  it("does not append a footer to before_tool_call message:send params (mid-turn)", () => {
+  it("appends a footer to before_tool_call message:send params", () => {
     const api = makeApi(tmpDir);
     registerSecurityHooks(api, makeLogger(), {
       workspaceDir: tmpDir,
@@ -217,9 +221,9 @@ describe("Developer-mode trust footer fires only on final reply", () => {
       ctx,
     );
 
-    // Agent emits a mid-turn `message` tool call to send a status update.
-    // The before_tool_call branch that USED to inject a footer here has
-    // been removed — params.message must come back unchanged.
+    // Agent emits a `message` tool call to send the visible group-chat reply.
+    // Unlike streaming/interim message_sending chunks, this path is an
+    // intentional developer-mode footer surface (openclaw-provenance-2ak).
     const result = api.fire(
       "before_tool_call",
       {
@@ -228,12 +232,10 @@ describe("Developer-mode trust footer fires only on final reply", () => {
       },
       ctx,
     );
-    // Either undefined (no mutation) or params.message unchanged.
-    if (result?.params?.message) {
-      expect(result.params.message).toBe("midway status");
-      expect(FOOTER_RE.test(result.params.message)).toBe(false);
-    } else {
-      expect(result).toBeUndefined();
-    }
+    expect(typeof result?.params?.message).toBe("string");
+    expect(result.params.message).toContain("midway status");
+    const footerMatches = (result.params.message as string).match(/trusted.*→.*trusted.*\| impacted:/g) ?? [];
+    expect(footerMatches.length).toBe(1);
+    expect(FOOTER_RE.test(result.params.message)).toBe(true);
   });
 });
