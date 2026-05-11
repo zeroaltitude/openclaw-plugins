@@ -105,6 +105,56 @@ def _agent_context(agent_id: str | None, existing_context: str | None = None) ->
     return result
 
 
+# ── Body truncation ──────────────────────────────────────────────────────────
+
+#: Fields whose string values are candidates for truncation on /search results.
+_BODY_FIELDS = ("body", "content", "text", "merged_body")
+
+
+def _truncate_result_bodies(result: Any, max_chars: int) -> Any:
+    """Walk a search result payload and truncate large string fields.
+
+    For each result item, any field in ``_BODY_FIELDS`` whose string length
+    exceeds ``max_chars`` is handled as follows:
+      - ``body_length`` is set to the original character count
+      - the field value is replaced with the first ``max_chars`` chars
+      - ``truncated_body`` is set to the same truncated value (explicit
+        signal for callers that want to key on it)
+
+    Handles two common MCP result shapes:
+    - ``{"results": [{...}, ...]}``  — processes items in ``results`` list
+    - ``[{...}, ...]``               — bare list, processes each item
+
+    Leaves everything else untouched.
+    """
+    candidates: list[dict[str, Any]]
+
+    if isinstance(result, list):
+        candidates = [item for item in result if isinstance(item, dict)]
+    elif isinstance(result, dict):
+        top_results = result.get("results")
+        if isinstance(top_results, list):
+            candidates = [item for item in top_results if isinstance(item, dict)]
+        elif "id" in result:
+            # Single memory dict at top level
+            candidates = [result]
+        else:
+            return result
+    else:
+        return result
+
+    for item in candidates:
+        for field in _BODY_FIELDS:
+            value = item.get(field)
+            if isinstance(value, str) and len(value) > max_chars:
+                truncated = value[:max_chars]
+                item["body_length"] = len(value)
+                item[field] = truncated
+                item["truncated_body"] = truncated
+
+    return result
+
+
 async def _tool(name: str, arguments: dict[str, Any]) -> VestigeResponse:
     try:
         result = await mcp.call_tool(name, arguments)
@@ -154,7 +204,12 @@ async def search(
     if req.threshold is not None:
         args["threshold"] = req.threshold
     args.update(_agent_context(x_agent_id))
-    return await _tool("search", args)
+    response = await _tool("search", args)
+    # Apply body truncation when requested (default 8000 chars)
+    max_chars = req.truncate_body_chars
+    if response.success and response.data is not None and max_chars and max_chars > 0:
+        response.data = _truncate_result_bodies(response.data, max_chars)
+    return response
 
 
 @app.post("/ingest", response_model=VestigeResponse)
