@@ -21,6 +21,14 @@ class SearchRequest(BaseModel):
     mode: SearchMode = Field(SearchMode.hybrid, description="Search mode")
     limit: int = Field(10, ge=1, le=100, description="Max results")
     threshold: float | None = Field(None, ge=0.0, le=1.0, description="Min relevance score")
+    truncate_body_chars: int | None = Field(
+        8000,
+        ge=0,
+        description=(
+            "Truncate large body/content/text fields in search results to this many chars. "
+            "Set to 0 or null to disable truncation. Default 8000."
+        ),
+    )
 
 
 # ── Ingest ────────────────────────────────────────────────────────────────────
