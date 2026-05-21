@@ -60,6 +60,14 @@ export type ThreadMeta = {
    * our own openclaw dynamic-tools server.
    */
   mcpServersConfig?: JsonObject;
+  /**
+   * Plugin-supplied native (Claude Code preset) tool names to block for
+   * this thread. Merged with the server's env-derived default
+   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS) at sdkOptions time so
+   * OpenClaw's tool policy (disableTools / restrictive toolsAllow) reaches
+   * the SDK's native tools, which bypass the dynamic-tools bridge.
+   */
+  disallowedTools?: string[];
   ephemeral: boolean;
   source: "appServer";
   forkedFromId?: string | null;
@@ -77,6 +85,7 @@ export type CreateThreadInput = {
   dynamicToolsFingerprint?: string;
   dynamicTools?: DynamicToolSpec[];
   mcpServersConfig?: JsonObject;
+  disallowedTools?: string[];
   forkedFromId?: string | null;
   cliVersion: string;
 };
@@ -120,6 +129,9 @@ export class ThreadStore {
       dynamicToolsFingerprint: input.dynamicToolsFingerprint,
       dynamicTools: input.dynamicTools,
       mcpServersConfig: input.mcpServersConfig,
+      ...(input.disallowedTools && input.disallowedTools.length > 0
+        ? { disallowedTools: input.disallowedTools }
+        : {}),
       ephemeral: false,
       source: "appServer",
       forkedFromId: input.forkedFromId ?? null,
