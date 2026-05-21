@@ -136,6 +136,11 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     abortController: turn.abortController,
     thinking,
     includePartialMessages: true,
+    // Pin the SDK's working directory to the thread's cwd so the claude_code
+    // preset's native Read/Edit/Bash tools operate inside the OpenClaw
+    // effective workspace, not the server process cwd. Without this, native
+    // tool calls effectively escape sandboxing for filesystem access.
+    ...(typeof meta.cwd === "string" && meta.cwd.length > 0 ? { cwd: meta.cwd } : {}),
     ...(disallowedNativeSubagentTools.length > 0
       ? { disallowedTools: disallowedNativeSubagentTools }
       : {}),
