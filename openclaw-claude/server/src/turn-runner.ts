@@ -116,8 +116,18 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   // any straggling tool_use emissions (from training-data habits) route to
   // OpenClaw's canonical subagent path. Operators can override via the
   // env vars below if they have a reason to keep the native tools active.
+  // Native (claude_code preset) tools to block by default. Empty list — the
+  // SDK's `Agent` / `Task` / `TaskOutput` / `TaskStop` are kept available so
+  // they can serve as the inline-sync subagent path analogous to codex's
+  // native `spawn_agent` / `sendInput` / `resumeAgent` / `wait` / `closeAgent`
+  // (see extensions/codex/src/app-server/protocol-generated/json/v2 +
+  // codex's thread-lifecycle dev-instruction at line ~840). The plugin's
+  // developer instructions tell the model which path to use: native `Agent`
+  // for inline subagent reasoning, OpenClaw `sessions_spawn` for genuine
+  // cross-runtime / cross-agent delegation. Operators can override via the
+  // OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS env (comma-separated).
   const disallowedNativeSubagentTools = (
-    process.env.OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS ?? "Agent,Task"
+    process.env.OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS ?? ""
   )
     .split(",")
     .map((s) => s.trim())

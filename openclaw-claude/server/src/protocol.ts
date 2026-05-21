@@ -188,7 +188,9 @@ export type ThreadStartParams = JsonObject & {
   /**
    * Additional Claude Code preset native tool names to block for this
    * thread. Merged with the server's env-derived default
-   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS, default "Agent,Task").
+   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS, default empty so the
+   * SDK's `Agent` / `Task*` tools stay available as the inline-sync
+   * subagent path — analogous to codex's native `spawn_agent`).
    * Plugin uses this to relay OpenClaw's tool policy (disableTools,
    * toolsAllow) onto the SDK's native tools (Read/Edit/Bash/etc.) which
    * don't otherwise traverse the dynamic-tools bridge.

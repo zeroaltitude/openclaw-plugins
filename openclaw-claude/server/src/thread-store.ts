@@ -63,7 +63,9 @@ export type ThreadMeta = {
   /**
    * Plugin-supplied native (Claude Code preset) tool names to block for
    * this thread. Merged with the server's env-derived default
-   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS) at sdkOptions time so
+   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS, default empty under
+   * Option X — native Agent/Task remain available as the inline-sync
+   * subagent path analogous to codex's spawn_agent) at sdkOptions time so
    * OpenClaw's tool policy (disableTools / restrictive toolsAllow) reaches
    * the SDK's native tools, which bypass the dynamic-tools bridge.
    */
