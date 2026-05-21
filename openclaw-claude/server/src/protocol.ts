@@ -257,6 +257,15 @@ export type ThreadResumeParams = JsonObject & {
   config?: JsonObject;
   developerInstructions?: string;
   persistExtendedHistory?: boolean;
+  /**
+   * Workspace path the plugin wants the SDK's native tools to operate in.
+   * When provided, the server patches meta.cwd so subsequent turns
+   * (which pin sdkOptions.cwd from meta.cwd) pick up the new path
+   * without rotating the thread / losing transcript history. Used by the
+   * claude extension when openclaw's resolveSandboxContext switches
+   * effectiveWorkspace mid-session.
+   */
+  cwd?: string;
 };
 
 export type ThreadResumeResponse = ThreadStartResponse;

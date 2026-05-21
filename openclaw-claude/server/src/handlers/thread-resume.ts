@@ -96,6 +96,10 @@ async function applyResumeOverrides(
   if (typeof params.developerInstructions === "string") {
     patch.developerInstructions = params.developerInstructions;
   }
+  // Plugin can update the workspace pin on resume so the SDK's next turn
+  // (which reads cwd off meta.cwd into sdkOptions.cwd) picks up the new
+  // effectiveWorkspace without losing transcript history.
+  if (typeof params.cwd === "string" && params.cwd.length > 0) patch.cwd = params.cwd;
   if (Object.keys(patch).length === 0) return null;
   return threadStore.updateMeta(threadId, patch);
 }
