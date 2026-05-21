@@ -122,6 +122,18 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  // Merge env defaults with any per-thread additions the plugin computed
+  // from OpenClaw's tool policy. Deduplicated. The aliasing for subagents
+  // (Agent/Task → sessions_spawn) only applies to the env-default set so a
+  // plugin-blocked tool is hard-blocked rather than aliased.
+  const threadDisallowedNative = Array.isArray((meta as Record<string, unknown>).disallowedTools)
+    ? ((meta as Record<string, unknown>).disallowedTools as unknown[]).filter(
+        (n): n is string => typeof n === "string" && n.trim().length > 0,
+      )
+    : [];
+  const mergedDisallowedNative = Array.from(
+    new Set([...disallowedNativeSubagentTools, ...threadDisallowedNative]),
+  );
   const openclawSubagentToolName = "mcp__openclaw__sessions_spawn";
   const subagentAliases: Record<string, string> = {};
   if (process.env.OPENCLAW_CLAUDE_APP_SERVER_DISABLE_SUBAGENT_ALIAS !== "1") {
@@ -141,8 +153,8 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     // effective workspace, not the server process cwd. Without this, native
     // tool calls effectively escape sandboxing for filesystem access.
     ...(typeof meta.cwd === "string" && meta.cwd.length > 0 ? { cwd: meta.cwd } : {}),
-    ...(disallowedNativeSubagentTools.length > 0
-      ? { disallowedTools: disallowedNativeSubagentTools }
+    ...(mergedDisallowedNative.length > 0
+      ? { disallowedTools: mergedDisallowedNative }
       : {}),
     ...(Object.keys(subagentAliases).length > 0 ? { toolAliases: subagentAliases } : {}),
   };

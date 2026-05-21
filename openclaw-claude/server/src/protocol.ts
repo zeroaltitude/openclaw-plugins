@@ -185,6 +185,15 @@ export type ThreadStartParams = JsonObject & {
   serviceName?: string;
   config?: JsonObject;
   environments?: JsonValue[];
+  /**
+   * Additional Claude Code preset native tool names to block for this
+   * thread. Merged with the server's env-derived default
+   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS, default "Agent,Task").
+   * Plugin uses this to relay OpenClaw's tool policy (disableTools,
+   * toolsAllow) onto the SDK's native tools (Read/Edit/Bash/etc.) which
+   * don't otherwise traverse the dynamic-tools bridge.
+   */
+  disallowedTools?: string[] | null;
 };
 
 export type ApprovalsReviewer = "user" | "auto_review" | "guardian_subagent";

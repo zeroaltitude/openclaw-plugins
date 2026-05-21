@@ -38,6 +38,12 @@ export function createThreadStartHandler(threadStore: ThreadStore, logger: Logge
 
     const dynamicTools = normalizeDynamicTools(params.dynamicTools);
     const mcpServersConfig = extractMcpServersConfig(params.config);
+    // Plugin-supplied native-tool disable list (e.g., from OpenClaw's
+    // disableTools / restrictive toolsAllow policy). Persisted on the thread
+    // so resume preserves the same allow surface.
+    const disallowedTools = Array.isArray(params.disallowedTools)
+      ? params.disallowedTools.filter((n): n is string => typeof n === "string" && n.length > 0)
+      : undefined;
 
     const meta = await threadStore.createThread({
       cwd,
@@ -50,6 +56,7 @@ export function createThreadStartHandler(threadStore: ThreadStore, logger: Logge
       developerInstructions: params.developerInstructions,
       dynamicTools: dynamicTools.length > 0 ? dynamicTools : undefined,
       mcpServersConfig,
+      ...(disallowedTools && disallowedTools.length > 0 ? { disallowedTools } : {}),
       cliVersion: OPENCLAW_CLAUDE_APP_SERVER_VERSION,
     });
 
