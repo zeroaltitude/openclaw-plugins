@@ -28,7 +28,6 @@ export function register(api: OpenClawPluginApi) {
     taintPolicy: (cfg.taintPolicy as any) ?? undefined,
     toolOverrides: (cfg.toolOverrides as any) ?? undefined,
     maxIterations: (cfg.maxIterations as number) ?? undefined,
-    developerMode: (cfg.developerMode as boolean) ?? undefined,
     toolOutputTaints: (cfg.toolOutputTaints as any) ?? undefined,
     trustedSenderIds: (cfg.trustedSenderIds as string[]) ?? undefined,
     agentOverrides: (cfg.agentOverrides as any) ?? undefined,

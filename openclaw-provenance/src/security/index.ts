@@ -123,7 +123,6 @@ export interface SecurityPluginConfig {
   verbose?: boolean;
   taintPolicy?: Partial<Record<string, PolicyMode>>;
   maxIterations?: number;
-  developerMode?: boolean;
   workspaceDir?: string;
   /** Additional sender IDs classified as trusted */
   trustedSenderIds?: string[];
@@ -397,28 +396,11 @@ function failOpen<T extends (...args: any[]) => any>(
 //
 // Maps that MUST be shared (read/written across hooks that can land on
 // different instances during one delivery):
-//   - finalTaintBySession        (agent_end → message_sending)
-//   - turnStartTaintBySession    (before_prompt_build / inbound_claim → agent_end)
-//   - lastImpactedToolBySession  (after_tool_call → agent_end)
 //   - blockedToolsBySession      (before_tool_call → agent_end clear)
 // Maps that can stay function-scoped (read+written only inside one instance's
 // own hook chain): turnStartTimes, lastLlmNodeBySession, sessionAgentMap.
 
-type FinalTaintEntry = {
-  startLevel: TrustLevel;
-  startReason: string;
-  endLevel: TrustLevel;
-  endReason: string;
-  impactedTool: string;
-  uriTaintRecords: UriTaintRecord[];
-};
-
-type TurnStartTaintEntry = { level: TrustLevel; reason: string };
-
 type ProvenanceProcessState = {
-  finalTaintBySession: Map<string, FinalTaintEntry>;
-  turnStartTaintBySession: Map<string, TurnStartTaintEntry>;
-  lastImpactedToolBySession: Map<string, string>;
   blockedToolsBySession: Map<string, Set<string>>;
   /** Bumped each time the module is evaluated; used to detect duplicate loads. */
   moduleLoadCount: number;
@@ -433,9 +415,6 @@ function getProcessState(): ProvenanceProcessState {
   let state = g[PROVENANCE_GLOBAL_KEY];
   if (!state) {
     state = {
-      finalTaintBySession: new Map<string, FinalTaintEntry>(),
-      turnStartTaintBySession: new Map<string, TurnStartTaintEntry>(),
-      lastImpactedToolBySession: new Map<string, string>(),
       blockedToolsBySession: new Map<string, Set<string>>(),
       moduleLoadCount: 0,
     };
@@ -446,9 +425,6 @@ function getProcessState(): ProvenanceProcessState {
 }
 
 const __provenanceProcessState = getProcessState();
-const finalTaintBySession = __provenanceProcessState.finalTaintBySession;
-const turnStartTaintBySession = __provenanceProcessState.turnStartTaintBySession;
-const lastImpactedToolBySession = __provenanceProcessState.lastImpactedToolBySession;
 const blockedToolsBySession = __provenanceProcessState.blockedToolsBySession;
 
 /**
@@ -475,7 +451,6 @@ export function registerSecurityHooks(
   // Mutable: hot-reloaded by /trust-uri and /trust-tool commands
   let resolvedToolTaints = buildToolOutputTaintMap(mergedToolOutputTaintOverrides);
   const verbose = config?.verbose ?? false;
-  const developerMode = config?.developerMode ?? false;
 
   // Build composite tools, URI extractors, and URI trust config
   const compositeTools = buildCompositeToolMap(config?.compositeTools);
@@ -637,11 +612,6 @@ export function registerSecurityHooks(
   ) {
     logger.info(
       `[provenance]   Tool output taint overrides: ${JSON.stringify(toolOutputTaintOverrides)}`,
-    );
-  }
-  if (developerMode) {
-    logger.info(
-      `[provenance]   Developer mode: ON (taint headers will be prepended to outbound messages)`,
     );
   }
   if (Object.keys(agentOverrides).length > 0) {
@@ -1726,21 +1696,6 @@ export function registerSecurityHooks(
       const sk = shortKey(sessionKey);
       const effectiveTaint = graph.maxTaint;
 
-      // Capture turn-start taint for developerMode header
-      const startReason = watermark && watermark.level !== "trusted"
-        ? watermark.reason
-        : `sender: ${identity?.senderName ?? identity?.senderId ?? "unknown"}`;
-      turnStartTaintBySession.set(sessionKey, { level: effectiveTaint, reason: startReason });
-
-      // Defensive clear: drop any final-taint snapshot left over from a
-      // previous turn before this turn produces outbound messages. Without
-      // this, if the previous turn's final message_sending failed to fire
-      // (or fired with a different sessionKey, or was skipped because the
-      // payload was non-text), the stale entry would be consumed by THIS
-      // turn's first interim message_sending and the developer-mode footer
-      // would attach to the wrong message. See openclaw-provenance-rh3.
-      finalTaintBySession.delete(sessionKey);
-
       logger.info(`[provenance:${sk}] ── Turn Start ──`);
       logger.info(
         `[provenance:${sk}]   Messages: ${event.messageCount ?? 0} | System prompt: ${(event.systemPrompt ?? "").length} chars`,
@@ -2020,60 +1975,6 @@ export function registerSecurityHooks(
       );
 
       blockedToolsBySession.delete(sessionKey);
-      // Stash final taint info for the message_sending handler to surface
-      // in the developer-mode footer. We use a per-session map keyed on
-      // sessionKey; message_sending fires shortly after agent_end with
-      // the same sessionKey on its hookCtx.
-      finalTaintBySession.set(sessionKey, {
-        startLevel: turnStartTaintBySession.get(sessionKey)?.level ?? "trusted",
-        startReason: turnStartTaintBySession.get(sessionKey)?.reason ?? "unknown",
-        endLevel: taintLevel,
-        endReason: taintReason,
-        impactedTool: lastImpactedToolBySession.get(sessionKey) ?? "none",
-        uriTaintRecords,
-      });
-    }),
-  );
-
-  api.on(
-    "message_sending",
-    profiled("message_sending", (event: any, ctx: AgentContext): { content?: string } | undefined => {
-      // Developer-mode footer: append a one-line summary of taint
-      // trajectory to outbound content. Only when developerMode is on,
-      // only when content is not a silent marker, and only when we have
-      // final taint info from the matching agent_end above.
-      if (!developerMode) return undefined;
-      const sessionKey = ctx.sessionKey ?? "unknown";
-
-      const content = event.content;
-      if (typeof content !== "string" || content.length === 0) return undefined;
-      const trimmed = content.trim();
-      if (/^\s*NO_REPLY(?=$|\W)/m.test(trimmed)) return undefined;
-      if (trimmed === "HEARTBEAT_OK" || /\bHEARTBEAT_OK\s*$/.test(trimmed)) return undefined;
-
-      // message_sending fires for auto-reply final sends (where hookRunner
-      // IS present). For those, finalTaintBySession is already staged by
-      // agent_end. Streaming chunks have no staged record → suppress (rh3).
-      // Tool-driven sends (message:send) are handled in before_tool_call
-      // via param mutation; they never reach this path.
-      const final = finalTaintBySession.get(sessionKey);
-      if (!final) return undefined;
-
-      const taintEmoji = (level: string) =>
-        level === "trusted" ? "🟢"
-          : level === "shared" ? "🟡"
-            : level === "external" ? "🟠" : "🔴";
-      const uriSummary = (final.uriTaintRecords ?? [])
-        .filter((r) => r.effectiveTrust !== "trusted")
-        .map((r) => `${r.tool}(${truncate(r.uri, 40)})`)
-        .slice(0, 3);
-      const uriPart = uriSummary.length > 0 ? ` | sources: ${uriSummary.join(", ")}` : "";
-      const footer =
-        `\`${taintEmoji(final.startLevel)} ${final.startLevel} (${truncate(final.startReason, 60)}) → ` +
-        `${taintEmoji(final.endLevel)} ${final.endLevel} (${truncate(final.endReason, 60)}) | ` +
-        `impacted: ${final.impactedTool}${uriPart}\``;
-      finalTaintBySession.delete(sessionKey);
-      return { content: content + "\n" + footer };
     }),
   );
 
@@ -2087,49 +1988,6 @@ export function registerSecurityHooks(
       const graph = store.getActive(sessionKey);
       const toolName = event.toolName;
       const toolNameLower = toolName.toLowerCase();
-
-      // Developer-mode trust footer for message:send tool calls.
-      // The message_sending hook is not reachable from the tool-send path
-      // (hookRunner isn't threaded through durable-delivery.ts). Instead
-      // we mutate params.message here, before the tool executes, injecting
-      // the footer synthesized from live graph + watermark state.
-      // Streaming chunks don't go through before_tool_call → footer-free
-      // (rh3 fix preserved). Tracks openclaw-provenance-2ak.
-      if (
-        developerMode &&
-        toolNameLower === "message" &&
-        (event.params?.action === "send" || event.params?.action === "sendWithEffect") &&
-        typeof event.params?.message === "string" &&
-        event.params.message.length > 0
-      ) {
-        const liveGraph = store.getActive(sessionKey);
-        const liveTaint = liveGraph?.maxTaint ?? "trusted";
-        const liveWm = watermarkStore.getLevel(sessionKey);
-        const liveLevel =
-          liveWm && TRUST_ORDER.indexOf(liveWm.level) > TRUST_ORDER.indexOf(liveTaint)
-            ? liveWm.level
-            : liveTaint;
-        const liveReason =
-          liveWm && liveLevel === liveWm.level
-            ? (liveWm.reason ?? "watermark")
-            : "current graph maxTaint";
-        const startEntry = turnStartTaintBySession.get(sessionKey);
-        const taintEmoji = (level: string) =>
-          level === "trusted" ? "🟢"
-            : level === "shared" ? "🟡"
-              : level === "external" ? "🟠" : "🔴";
-        const footer =
-          `\`${taintEmoji(startEntry?.level ?? "trusted")} ${startEntry?.level ?? "trusted"} ` +
-          `(${truncate(startEntry?.reason ?? "unknown", 60)}) → ` +
-          `${taintEmoji(liveLevel)} ${liveLevel} (${truncate(liveReason, 60)}) | ` +
-          `impacted: ${lastImpactedToolBySession.get(sessionKey) ?? toolName}\``;
-        return {
-          params: {
-            ...event.params,
-            message: event.params.message + "\n" + footer,
-          },
-        };
-      }
 
       // Memory file write protection
       if (graph && (toolNameLower === "write" || toolNameLower === "edit")) {
@@ -2227,7 +2085,6 @@ export function registerSecurityHooks(
           logger.warn(
             `[provenance:${sk}] 🛑 BLOCKED at execution layer (real-time re-eval): ${toolName} | taint: ${graph.maxTaint}`,
           );
-          lastImpactedToolBySession.set(sessionKey, toolName);
           return {
             block: true,
             blockReason:
@@ -2239,7 +2096,6 @@ export function registerSecurityHooks(
           logger.warn(
             `[provenance:${sk}] 🛑 BLOCKED at execution layer (real-time re-eval, needs approval): ${toolName} | taint: ${graph.maxTaint}`,
           );
-          lastImpactedToolBySession.set(sessionKey, toolName);
           return {
             block: true,
             blockReason:
@@ -2264,7 +2120,6 @@ export function registerSecurityHooks(
         logger.warn(
           `[provenance:${sk}] 🛑 BLOCKED at execution layer: ${toolName}`,
         );
-        lastImpactedToolBySession.set(sessionKey, toolName);
         return {
           block: true,
           blockReason:
@@ -2435,7 +2290,7 @@ export function registerSecurityHooks(
         logger.warn(
           `[provenance:${sk}]   TOOL_TAINT_ESCALATION: ${taintBefore} → ${graph.maxTaint} caused by: ${toolKey}(${effectiveTrust}${sourceUris.length > 0 ? ` uri:${truncate(sourceUris[0], 40)}` : ""})`,
         );
-      } else if (developerMode) {
+      } else if (verbose) {
         logger.info(
           `[provenance:${sk}]   TOOL_TAINT_EVAL: ${toolKey}(${effectiveTrust}) → taint unchanged at ${graph.maxTaint}`,
         );

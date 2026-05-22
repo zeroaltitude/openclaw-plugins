@@ -270,29 +270,11 @@ export function makeApi(workspaceDir: string = "__test_default__"): TestApi {
           const fakeAssistant = { role: "assistant", content };
           const messages: any[] = [];
           if (content.length > 0) messages.push(fakeAssistant);
-          const result = rawFire(
+          return rawFire(
             "agent_end",
             { messages, success: true, durationMs: 0, runId: event?.runId },
             ctx,
           );
-          // The legacy before_response_emit could return { content: ... }
-          // for the developer-mode footer; that now lives in
-          // message_sending. Fire it too so tests that exercise the
-          // footer get the same outbound mutation they expected.
-          if (content.length > 0) {
-            const sent = rawFire(
-              "message_sending",
-              {
-                to: ctx?.senderId ?? "unknown",
-                content,
-              },
-              ctx,
-            );
-            if (sent && typeof sent.content === "string") {
-              return { content: sent.content };
-            }
-          }
-          return result;
         }
         case "loop_iteration_start":
         case "loop_iteration_end":

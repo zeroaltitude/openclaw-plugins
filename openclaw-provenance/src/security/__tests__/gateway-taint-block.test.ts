@@ -61,7 +61,6 @@ const CONFIG: SecurityPluginConfig = {
   // No URI trust for vestige.bighatbio.me — that's the scenario
   uriTrust: {},
   trustedSenderIds: ["owner-123"],
-  developerMode: false,
 };
 
 const SESSION_KEY = "agent:main:main";
