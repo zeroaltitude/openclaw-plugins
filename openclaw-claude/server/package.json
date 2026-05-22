@@ -1,9 +1,9 @@
 {
-  "name": "@openclaw/claude-app-server",
+  "name": "@zeroaltitude/claude-app-server",
   "version": "0.1.0",
-  "description": "JSON-RPC 2.0 server over stdio that exposes Anthropic Claude via the codex-app-server protocol shape, so OpenClaw can drive Claude turns through the same harness pattern it uses for OpenAI Codex.",
+  "description": "JSON-RPC 2.0 server over stdio that exposes Anthropic Claude via the codex-app-server protocol shape, so OpenClaw can drive Claude turns through the same harness pattern it uses for OpenAI Codex. Fork-preview package; expected to migrate to @openclaw/claude-app-server when the upstream PR lands.",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/cli.js",
   "bin": {
     "openclaw-claude-app-server": "bin/openclaw-claude-app-server.mjs"
   },
@@ -12,6 +12,26 @@
     "dist",
     "README.md",
     "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zeroaltitude/openclaw-plugins.git",
+    "directory": "openclaw-claude/server"
+  },
+  "homepage": "https://github.com/zeroaltitude/openclaw-plugins/tree/main/openclaw-claude#readme",
+  "bugs": {
+    "url": "https://github.com/zeroaltitude/openclaw-plugins/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "claude",
+    "anthropic",
+    "app-server",
+    "json-rpc",
+    "codex-app-server-protocol"
   ],
   "scripts": {
     "build": "tsc",
