@@ -150,6 +150,15 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   dir_fetch: "trusted",
   file_fetch: "trusted",
   file_write: "trusted",
+  // apply_patch and edit are SDK-native file-edit primitives used by both
+  // codex and claude harnesses (apply_patch is codex's edit tool;
+  // edit is openclaw's bundled write tool). Their output is patch-result
+  // metadata, not external data — same shape as file_write above. Treating
+  // them as untrusted-by-default was inconsistent and meant every
+  // file-editing turn silently tainted its session (visible as "tool
+  // output: apply_patch" in /provenance across every agent doing coding).
+  apply_patch: "trusted",
+  edit: "trusted",
   exec: "trusted",
   process: "trusted",
   tts: "trusted",

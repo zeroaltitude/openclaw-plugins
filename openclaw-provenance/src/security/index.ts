@@ -788,7 +788,15 @@ export function registerSecurityHooks(
       ]);
 
       for (const sessionKey of sessionsToClear) {
-        const priorLevel = allWatermarks[sessionKey]?.level;
+        // Count what we ACTUALLY cleared, not what the pre-loop snapshot
+        // captured. Without this, sessions whose watermark was added (or
+        // /provenance-observable) between handler-start and this iteration
+        // get cleared by watermarkStore.clear() but counted as 0 — leading
+        // to "No active taint watermarks found" reports even though clearly
+        // there was state to clean. Reading the live store via .get()
+        // immediately before clear() makes the count match reality.
+        const liveEntry = watermarkStore.get(sessionKey);
+        const priorLevel = liveEntry?.level ?? allWatermarks[sessionKey]?.level;
         const hadActiveGraph = store.getActive(sessionKey) !== undefined;
         watermarkStore.clear(sessionKey);
         blockedToolsBySession.delete(sessionKey);
