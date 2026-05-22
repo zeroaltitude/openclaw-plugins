@@ -18,6 +18,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
+import { sanitizeAnthropicImagePayload, type SanitizableContentBlock } from "./image-payload-sanitizer.js";
 import type { UserInput } from "./protocol.js";
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -75,7 +76,12 @@ export async function buildContentBlocks(input: UserInput[]): Promise<AnthropicC
   if (blocks.length === 0) {
     blocks.push({ type: "text", text: "" });
   }
-  return blocks;
+  // Pre-flight: drop image payloads that would trigger an opaque 400 from
+  // Anthropic (oversize, wrong media type, malformed data: URL, or count
+  // exceeding 100 per request). The dropped blocks are replaced inline
+  // with a text note so the rest of the turn still progresses.
+  const sanitized = sanitizeAnthropicImagePayload(blocks as SanitizableContentBlock[]);
+  return sanitized.blocks as AnthropicContentBlock[];
 }
 
 export function makeSDKUserMessage(content: AnthropicContentBlock[]): Record<string, unknown> {
