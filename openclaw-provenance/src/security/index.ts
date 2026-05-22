@@ -193,38 +193,49 @@ function shortKey(sessionKey: string): string {
 /**
  * Classify initial trust level from sender/channel metadata.
  *
- * 1. No messageProvider (cron, heartbeat, system event) → trusted
+ * 1. System-source session (heartbeat, cron, exec-event, webchat) → trusted
+ *    Detected via identity.sourceProvider, messageProvider, OR sessionKey suffix.
+ *    The sessionKey fallback is load-bearing: when core dispatches a heartbeat
+ *    turn without populating identity.sourceProvider, the suffix is the only
+ *    reliable signal that the turn isn't user-driven. Without this, the
+ *    history node gets seeded with missingIdentityTrust (default "shared"),
+ *    the graph's maxTaint clamps there, and an interrupted heartbeat turn
+ *    silently escalates the session watermark.
  * 2. Sub-agent session (spawnedBy set) → trusted
  * 3. Owner (senderIsOwner=true) → trusted
  * 4. Trusted sender (senderId in trustedSenderIds) → trusted
  * 5. Known non-owner sender → external
  * 6. Unknown sender → untrusted
- *
- * Identity fields are sourced from the IdentityStore (populated by the
- * inbound_claim handler). The agent hookCtx only contributes
- * messageProvider, which mainline does populate.
  */
+const SYSTEM_SOURCE_PROVIDERS = new Set([
+  "heartbeat",
+  "cron",
+  "cron-event",
+  "exec-event",
+  "webchat",
+]);
+
+const SYSTEM_SOURCE_SESSION_SUFFIXES = [
+  ":heartbeat",
+  ":cron",
+  ":cron-event",
+  ":exec-event",
+];
+
 function classifyInitialTrust(params: {
   identity?: import("./identity-store.js").IdentityRecord;
   messageProvider?: string;
   trustedSenderIds: Set<string>;
   missingIdentityTrust?: TrustLevel;
+  sessionKey?: string;
 }): TrustLevel {
-  const { identity, messageProvider, trustedSenderIds } = params;
+  const { identity, messageProvider, trustedSenderIds, sessionKey } = params;
   const missingIdentityTrust = params.missingIdentityTrust ?? "shared";
-  // Check sourceProvider first — it reflects the true message origin
-  // (e.g. "heartbeat") even when messageProvider reflects the delivery
-  // channel (e.g. "discord"). Falls back to messageProvider when
-  // sourceProvider is not set.
   const effectiveProvider = identity?.sourceProvider ?? messageProvider;
-  if (
-    !effectiveProvider ||
-    effectiveProvider === "heartbeat" ||
-    effectiveProvider === "cron" ||
-    effectiveProvider === "cron-event" ||
-    effectiveProvider === "exec-event" ||
-    effectiveProvider === "webchat"
-  ) {
+  if (!effectiveProvider || SYSTEM_SOURCE_PROVIDERS.has(effectiveProvider)) {
+    return "trusted";
+  }
+  if (sessionKey && SYSTEM_SOURCE_SESSION_SUFFIXES.some((s) => sessionKey.endsWith(s))) {
     return "trusted";
   }
 
@@ -1608,6 +1619,7 @@ export function registerSecurityHooks(
         messageProvider: ctx.messageProvider,
         trustedSenderIds,
         missingIdentityTrust: config?.missingIdentityTrust,
+        sessionKey,
       });
 
       // before_prompt_build's event payload does not carry messageCount or

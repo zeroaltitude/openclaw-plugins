@@ -96,6 +96,29 @@ describe("Heartbeat trust classification", () => {
     expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: shared");
   });
 
+  it("classifies heartbeat sessionKey suffix as trusted even when sourceProvider is missing", () => {
+    // Regression: when core dispatches a heartbeat turn without populating
+    // identity.sourceProvider, the sessionKey suffix is the only signal that
+    // the turn isn't user-driven. Without this fallback, an interrupted
+    // heartbeat turn silently escalates the watermark to non-trusted (the
+    // …ddpw95:heartbeat sealing bug).
+    const { api, logger } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "heartbeat" }],
+      messageCount: 1,
+    }, {
+      agentId: "tabitha",
+      sessionKey: "agent:tabitha:discord:channel:ddpw95:heartbeat",
+      messageProvider: "discord",
+    });
+
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
+    expect(trustLine).toBeDefined();
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
+  });
+
   it("classifies heartbeat WITHOUT sourceProvider as trusted when missingIdentityTrust is configured", () => {
     const { api, logger } = setup({
       missingIdentityTrust: "trusted",
