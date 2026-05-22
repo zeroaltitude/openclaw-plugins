@@ -27,6 +27,7 @@ import {
   type DynamicToolCallResponse,
   type ToolCallBridge,
 } from "./dynamic-tools.js";
+import { formatRateLimitMessage, parseAnthropicRateLimitError } from "./rate-limits.js";
 import {
   thinkingBudgetForEffort,
 } from "./models.js";
@@ -372,11 +373,16 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     return { finalTurn };
   } catch (err) {
     const completedAtMs = Date.now();
-    const message = err instanceof Error ? err.message : String(err);
-    const aborted = turn.abortController.signal.aborted || /abort/i.test(message);
+    const baseMessage = err instanceof Error ? err.message : String(err);
+    const aborted = turn.abortController.signal.aborted || /abort/i.test(baseMessage);
     const status = aborted ? "interrupted" : "failed";
     turn.status = status;
     inputQueue.close();
+    // Enrich Anthropic 429 / rate-limit errors with parsed bucket and
+    // retry-after context so the user-visible final error explains WHY
+    // and WHEN to retry instead of just surfacing the raw SDK message.
+    const rateLimit = aborted ? null : parseAnthropicRateLimitError(err);
+    const enriched = rateLimit ? formatRateLimitMessage(rateLimit) : baseMessage;
     const finalTurn: Turn = {
       id: turn.turnId,
       threadId: meta.id,
@@ -385,10 +391,14 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       completedAt: Math.floor(completedAtMs / 1000),
       durationMs: completedAtMs - turn.startedAtMs,
       items: turn.items,
-      error: aborted ? null : { message },
+      error: aborted ? null : { message: enriched },
     };
     if (!aborted) {
-      logger.warn("[turn-runner] turn failed", { turnId: turn.turnId, error: message });
+      logger.warn("[turn-runner] turn failed", {
+        turnId: turn.turnId,
+        error: baseMessage,
+        rateLimit: rateLimit ?? undefined,
+      });
     }
     return { finalTurn };
   }
