@@ -215,6 +215,32 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
 // Legacy alias for backward compatibility
 export const DEFAULT_TOOL_TRUST = DEFAULT_TOOL_OUTPUT_TAINTS;
 
+// ── MCP-namespaced tool name handling ──────────────────────────────────────
+//
+// When Claude or Codex calls an OpenClaw tool via an MCP server, the tool
+// name arrives prefixed with the MCP server identifier — e.g.,
+// `mcp__openclaw__sessions_spawn` (claude extension's openclaw bridge) or
+// `mcp__codex_apps__github_list_installed_account_repositories` (codex's
+// app marketplace tools).
+//
+// Two recognition rules are applied during getToolTrust():
+//   1. Strip the MCP prefix and try the bare name in the trust map first —
+//      this routes `mcp__openclaw__sessions_spawn` to the existing
+//      `sessions_spawn: "trusted"` entry without duplicating entries per
+//      namespace.
+//   2. If the bare name has no entry, fall back to the per-prefix default
+//      below — for known trusted MCP namespaces this means "trusted"
+//      rather than the global "untrusted" fallback.
+//
+// The two prefixes default to "trusted" because they're owned by OpenClaw
+// integration code (the claude extension's dynamic-tools bridge and codex's
+// own app server). Adding a third-party MCP server's tools would require
+// explicit overrides via the `toolOutputTaints` config block.
+const MCP_PREFIX_DEFAULTS: ReadonlyArray<[string, TrustLevel]> = [
+  ["mcp__openclaw__", "trusted"],
+  ["mcp__codex_apps__", "trusted"],
+];
+
 // ── Taint policy ────────────────────────────────────────────────────────────
 
 export type TaintPolicyMode = "allow" | "confirm" | "restrict";
@@ -279,6 +305,25 @@ export function getToolTrust(
   }
   for (const [key, value] of Object.entries(DEFAULT_TOOL_OUTPUT_TAINTS)) {
     if (key.toLowerCase() === lower) return value;
+  }
+
+  // MCP-namespaced lookup: strip the prefix and try the bare name, then
+  // fall back to the per-prefix default for known trusted namespaces.
+  for (const [prefix, prefixDefault] of MCP_PREFIX_DEFAULTS) {
+    if (!toolName.startsWith(prefix)) continue;
+    const bareName = toolName.slice(prefix.length);
+    if (resolvedMap?.[bareName]) return resolvedMap[bareName];
+    if (DEFAULT_TOOL_OUTPUT_TAINTS[bareName]) return DEFAULT_TOOL_OUTPUT_TAINTS[bareName];
+    const bareLower = bareName.toLowerCase();
+    if (resolvedMap) {
+      for (const [key, value] of Object.entries(resolvedMap)) {
+        if (key.toLowerCase() === bareLower) return value;
+      }
+    }
+    for (const [key, value] of Object.entries(DEFAULT_TOOL_OUTPUT_TAINTS)) {
+      if (key.toLowerCase() === bareLower) return value;
+    }
+    return prefixDefault;
   }
 
   return "untrusted";
