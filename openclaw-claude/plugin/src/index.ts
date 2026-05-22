@@ -2,7 +2,7 @@
  * openclaw-claude plugin entry point.
  *
  * Registers an AgentHarness that delegates Anthropic turns to a local
- * @openclaw/claude-app-server process spoken via codex-shaped JSON-RPC.
+ * @zeroaltitude/openclaw-claude-bridge process spoken via codex-shaped JSON-RPC.
  * The server owns the agentic loop, persistence, approvals, tool dispatch,
  * and SDK streaming; the plugin is a thin bridge.
  */
@@ -44,7 +44,7 @@ type ResolvedConfig = {
 };
 
 const DEFAULTS: ResolvedConfig = {
-  bin: "openclaw-claude-app-server",
+  bin: "openclaw-claude-bridge",
   binArgs: [],
   env: {},
   // "never" mirrors the previous "bypassPermissions" behaviour: the server

@@ -14,8 +14,8 @@ import {
 } from "../protocol.js";
 import { RpcError } from "../server.js";
 import {
-  OPENCLAW_CLAUDE_APP_SERVER_NAME,
-  OPENCLAW_CLAUDE_APP_SERVER_VERSION,
+  OPENCLAW_CLAUDE_BRIDGE_NAME,
+  OPENCLAW_CLAUDE_BRIDGE_VERSION,
   REPORTED_PROTOCOL_VERSION,
 } from "../version.js";
 
@@ -34,13 +34,13 @@ export function createInitializeHandler(state: InitializeState) {
 
     const response: InitializeResponse = {
       serverInfo: {
-        name: OPENCLAW_CLAUDE_APP_SERVER_NAME,
-        version: OPENCLAW_CLAUDE_APP_SERVER_VERSION,
+        name: OPENCLAW_CLAUDE_BRIDGE_NAME,
+        version: OPENCLAW_CLAUDE_BRIDGE_VERSION,
       },
       protocolVersion: REPORTED_PROTOCOL_VERSION,
       // Codex's client extracts the leading product/version from this string;
       // see openclaw/extensions/codex/src/app-server/client.ts readCodexVersionFromUserAgent.
-      userAgent: `${OPENCLAW_CLAUDE_APP_SERVER_NAME}/${REPORTED_PROTOCOL_VERSION} (sdk=@anthropic-ai/claude-agent-sdk)`,
+      userAgent: `${OPENCLAW_CLAUDE_BRIDGE_NAME}/${REPORTED_PROTOCOL_VERSION} (sdk=@anthropic-ai/claude-agent-sdk)`,
       capabilities: {
         experimentalApi: true,
       },

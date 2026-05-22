@@ -1,5 +1,5 @@
 /**
- * Protocol types for the openclaw claude-app-server. These mirror the shapes
+ * Protocol types for the openclaw-claude-bridge JSON-RPC server. These mirror the shapes
  * that the OpenAI codex-app-server emits, so the same OpenClaw harness bridge
  * can drive both. Field names are intentionally identical to codex's
  * (camelCase, sometimes snake_case where codex uses it for legacy reasons).
@@ -188,7 +188,7 @@ export type ThreadStartParams = JsonObject & {
   /**
    * Additional Claude Code preset native tool names to block for this
    * thread. Merged with the server's env-derived default
-   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS, default empty so the
+   * (OPENCLAW_CLAUDE_BRIDGE_DISALLOWED_TOOLS, default empty so the
    * SDK's `Agent` / `Task*` tools stay available as the inline-sync
    * subagent path — analogous to codex's native `spawn_agent`).
    * Plugin uses this to relay OpenClaw's tool policy (disableTools,

@@ -29,12 +29,66 @@ import type { Logger } from "./transport.js";
 
 const META_SCHEMA_VERSION = 1;
 
-export const DEFAULT_STATE_ROOT = path.join(
-  process.env.HOME ?? os.homedir(),
-  ".openclaw",
-  "state",
-  "claude-app-server",
-);
+const STATE_ROOT_BASE = path.join(process.env.HOME ?? os.homedir(), ".openclaw", "state");
+
+export const DEFAULT_STATE_ROOT = path.join(STATE_ROOT_BASE, "claude-bridge");
+
+/**
+ * Legacy state-dir path from when this server was published as
+ * `@zeroaltitude/claude-app-server` and the namespace was `claude-app-server`.
+ * Existing user installs may carry threads under this path; the
+ * one-shot migration in `migrateLegacyStateRootIfNeeded` walks the old
+ * directory into the new one on first startup so resume keeps working.
+ */
+export const LEGACY_CLAUDE_APP_SERVER_STATE_ROOT = path.join(STATE_ROOT_BASE, "claude-app-server");
+
+/**
+ * Rename `<openclaw>/state/claude-app-server` → `<openclaw>/state/claude-bridge`
+ * on first startup if (a) the legacy dir exists and (b) the new dir does
+ * not yet exist. If both exist (e.g. the user manually created the new
+ * one, or migration ran but failed to clean up), log and skip — manual
+ * resolution beats data loss. Safe to call unconditionally.
+ */
+export async function migrateLegacyStateRootIfNeeded(
+  stateRoot: string,
+  logger?: Logger,
+): Promise<void> {
+  if (stateRoot !== DEFAULT_STATE_ROOT) {
+    return;
+  }
+  let legacyExists = false;
+  try {
+    await fs.stat(LEGACY_CLAUDE_APP_SERVER_STATE_ROOT);
+    legacyExists = true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw err;
+    }
+  }
+  if (!legacyExists) {
+    return;
+  }
+  let newExists = false;
+  try {
+    await fs.stat(DEFAULT_STATE_ROOT);
+    newExists = true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw err;
+    }
+  }
+  if (newExists) {
+    logger?.warn(
+      `state-dir migration: both ${LEGACY_CLAUDE_APP_SERVER_STATE_ROOT} and ${DEFAULT_STATE_ROOT} exist; not migrating (resolve manually).`,
+    );
+    return;
+  }
+  await fs.mkdir(path.dirname(DEFAULT_STATE_ROOT), { recursive: true });
+  await fs.rename(LEGACY_CLAUDE_APP_SERVER_STATE_ROOT, DEFAULT_STATE_ROOT);
+  logger?.info(
+    `state-dir migration: ${LEGACY_CLAUDE_APP_SERVER_STATE_ROOT} -> ${DEFAULT_STATE_ROOT}`,
+  );
+}
 
 export type ThreadMeta = {
   schemaVersion: number;
@@ -63,7 +117,7 @@ export type ThreadMeta = {
   /**
    * Plugin-supplied native (Claude Code preset) tool names to block for
    * this thread. Merged with the server's env-derived default
-   * (OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS, default empty under
+   * (OPENCLAW_CLAUDE_BRIDGE_DISALLOWED_TOOLS, default empty under
    * Option X — native Agent/Task remain available as the inline-sync
    * subagent path analogous to codex's spawn_agent) at sdkOptions time so
    * OpenClaw's tool policy (disableTools / restrictive toolsAllow) reaches

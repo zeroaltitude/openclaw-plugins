@@ -39,7 +39,7 @@ const validators = {
 
 export type ValidatorName = keyof typeof validators;
 
-const validateInProduction = process.env.OPENCLAW_CLAUDE_APP_SERVER_VALIDATE === "1";
+const validateInProduction = process.env.OPENCLAW_CLAUDE_BRIDGE_VALIDATE === "1";
 const skipValidation = process.env.NODE_ENV === "production" && !validateInProduction;
 
 /**
@@ -48,7 +48,7 @@ const skipValidation = process.env.NODE_ENV === "production" && !validateInProdu
  *   sees a real error, not a silent drop).
  * - production: skip validation entirely (codex revalidates on its end).
  *
- * Set OPENCLAW_CLAUDE_APP_SERVER_VALIDATE=1 to force validation in production.
+ * Set OPENCLAW_CLAUDE_BRIDGE_VALIDATE=1 to force validation in production.
  */
 export function validateOutbound(name: ValidatorName, value: unknown, logger: Logger): void {
   if (skipValidation) return;

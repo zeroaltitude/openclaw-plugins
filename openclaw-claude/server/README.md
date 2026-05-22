@@ -1,4 +1,4 @@
-# @zeroaltitude/claude-app-server
+# @zeroaltitude/openclaw-claude-bridge
 
 JSON-RPC 2.0 server over stdio that exposes Anthropic Claude via the
 codex-app-server protocol shape. Lets [OpenClaw](https://docs.openclaw.ai)
@@ -8,26 +8,27 @@ Codex (`@openai/codex`).
 > **Fork-preview package.** Published under `@zeroaltitude` while the
 > bridge ships under `@openclaw/claude` in the upstream OpenClaw fork at
 > [openclaw/openclaw#feat/claude-app-server-extension](https://github.com/openclaw/openclaw).
-> Expected to migrate to `@openclaw/claude-app-server` when the upstream
-> PR lands and OpenClaw maintainers publish under the `@openclaw` scope.
+> Expected to migrate to `@openclaw/openclaw-claude-bridge` when the
+> upstream PR lands and OpenClaw maintainers publish under the
+> `@openclaw` scope.
 
 ## Install
 
 ```sh
-npm install -g @zeroaltitude/claude-app-server
+npm install -g @zeroaltitude/openclaw-claude-bridge
 ```
 
-Or as a dependency of the `@openclaw/claude` bridge plugin (the bridge
-spawns the binary on PATH; a global install or a local install in the
-same project both work).
+Or as a dependency of the `@openclaw/claude` bridge plugin (the
+extension spawns the binary on PATH; a global install or a local install
+in the same project both work).
 
-After install, the binary `openclaw-claude-app-server` is on PATH and
-ready to be spawned by the bridge.
+After install, the binary `openclaw-claude-bridge` is on PATH and ready
+to be spawned by the OpenClaw extension.
 
 ## What it does
 
 The server wraps [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
-behind the codex app-server JSON-RPC protocol. Inbound RPC methods the
+behind the codex-app-server JSON-RPC protocol. Inbound RPC methods the
 server handles:
 
 - `initialize`
@@ -49,20 +50,20 @@ Server→client requests:
 - approval requests (command, file) — routed through OpenClaw's
   `BeforeToolCall` hook chain
 
-## How it relates to the OpenClaw bridge
+## How it relates to the OpenClaw extension
 
-The bridge lives in `extensions/claude/src/app-server/` in the OpenClaw
-fork and is what spawns this server. Three-piece architecture:
+The in-tree extension lives in `extensions/claude/src/app-server/` in the
+OpenClaw fork and is what spawns this server. Three-piece architecture:
 
 | Component | Where | Package |
 |---|---|---|
-| Bridge (in-tree, ships with OpenClaw) | `openclaw/openclaw` fork | `@openclaw/claude` |
+| In-tree extension (ships with OpenClaw) | `openclaw/openclaw` fork | `@openclaw/claude` |
 | Plugin manifest | `openclaw/openclaw-plugins/openclaw-claude/plugin/` | `@openclaw/claude` |
-| **JSON-RPC server (this package)** | `openclaw/openclaw-plugins/openclaw-claude/server/` | `@zeroaltitude/claude-app-server` |
+| **JSON-RPC server (this package)** | `openclaw/openclaw-plugins/openclaw-claude/server/` | `@zeroaltitude/openclaw-claude-bridge` |
 
-The bridge directory is named `app-server/` because it implements the
-codex-app-server *protocol* (matching the codex extension's
-directory layout) — the actual server is this separate binary.
+The extension's `src/app-server/` directory mirrors the codex
+extension's directory layout — it implements the *client side* of the
+codex-app-server protocol. The actual server is this separate binary.
 
 ## Server-side features
 
@@ -80,13 +81,44 @@ directory layout) — the actual server is this separate binary.
   and file approval requests through the bridge's `BeforeToolCall`
   hook chain.
 
+## State directory
+
+The server persists thread metadata + SDK session JSONLs under
+`~/.openclaw/state/claude-bridge/threads/<threadId>/`. The directory
+is created on first thread start; override with
+`OPENCLAW_CLAUDE_BRIDGE_STATE_ROOT`.
+
+### Legacy state migration
+
+Versions ≤ 0.1.0 of this package were published as
+`@zeroaltitude/claude-app-server` and persisted state under
+`~/.openclaw/state/claude-app-server/`. On first startup, version 0.2.0+
+auto-migrates the legacy directory to the new path if the new one does
+not yet exist. Both directories existing simultaneously is treated as a
+manual-resolution case (the server logs a warning and proceeds without
+migrating).
+
+## Environment variables
+
+- `OPENCLAW_CLAUDE_BRIDGE_STATE_ROOT` — override the state directory.
+- `OPENCLAW_CLAUDE_BRIDGE_VALIDATE=1` — force outbound-payload schema
+  validation in production builds.
+- `OPENCLAW_CLAUDE_BRIDGE_DISALLOWED_TOOLS` — comma-separated list of
+  native Claude tool names to disallow per process (extension/plugin
+  policy is merged on top per thread).
+- `OPENCLAW_CLAUDE_BRIDGE_DISABLE_SUBAGENT_ALIAS=1` — disable the
+  default Task↔Agent alias used by the inline-sync subagent path.
+- `OPENCLAW_CLAUDE_BRIDGE_ALLOW_ALL=1` — server-wide operator override
+  that auto-approves every command/file request. Intended for
+  controlled environments only.
+
 ## Development
 
 ```sh
 npm install
 npm run build
 npm test            # 81 tests
-node bin/openclaw-claude-app-server.mjs  # run the server directly
+node bin/openclaw-claude-bridge.mjs  # run the server directly
 ```
 
 Tests live in `tests/`; protocol-schema fixtures in

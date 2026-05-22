@@ -1,6 +1,6 @@
 /**
  * AgentHarness implementation that delegates Anthropic turns to a local
- * @openclaw/claude-app-server child process.
+ * @zeroaltitude/openclaw-claude-bridge child process.
  *
  * The server owns the entire turn lifecycle (SDK call, streaming, tool
  * dispatch, approval routing, persistence). The plugin's job is to bridge
@@ -30,7 +30,7 @@ import type {
 } from "./types.js";
 import { ClaudeAppServerClient, RpcError } from "./rpc.js";
 
-export const HARNESS_ID = "claude-app-server";
+export const HARNESS_ID = "claude-bridge";
 
 const THREAD_TTL_MS = 6 * 60 * 60 * 1000;
 const THREAD_MAP_MAX_ENTRIES = 500;
@@ -446,7 +446,7 @@ export function createClaudeHarness(cfg: HarnessConfig): AgentHarness {
 
   return {
     id: HARNESS_ID,
-    label: "Claude (openclaw-claude-app-server)",
+    label: "Claude (openclaw-claude-bridge)",
     pluginId: "claude",
 
     supports(ctx: AgentHarnessSupportContext): AgentHarnessSupport {
@@ -458,7 +458,7 @@ export function createClaudeHarness(cfg: HarnessConfig): AgentHarness {
       }
       return {
         supported: false,
-        reason: `claude-app-server handles provider=anthropic only (got provider=${ctx.provider}, runtime=${ctx.requestedRuntime})`,
+        reason: `claude-bridge handles provider=anthropic only (got provider=${ctx.provider}, runtime=${ctx.requestedRuntime})`,
       };
     },
 

@@ -1,5 +1,5 @@
-export const OPENCLAW_CLAUDE_APP_SERVER_NAME = "@openclaw/claude-app-server";
-export const OPENCLAW_CLAUDE_APP_SERVER_VERSION = "0.1.0";
+export const OPENCLAW_CLAUDE_BRIDGE_NAME = "@zeroaltitude/openclaw-claude-bridge";
+export const OPENCLAW_CLAUDE_BRIDGE_VERSION = "0.2.0";
 
 /**
  * The codex-app-server protocol revision we mirror. The openclaw codex plugin

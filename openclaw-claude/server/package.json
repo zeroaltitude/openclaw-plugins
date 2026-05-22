@@ -1,11 +1,11 @@
 {
-  "name": "@zeroaltitude/claude-app-server",
-  "version": "0.1.0",
-  "description": "JSON-RPC 2.0 server over stdio that exposes Anthropic Claude via the codex-app-server protocol shape, so OpenClaw can drive Claude turns through the same harness pattern it uses for OpenAI Codex. Fork-preview package; expected to migrate to @openclaw/claude-app-server when the upstream PR lands.",
+  "name": "@zeroaltitude/openclaw-claude-bridge",
+  "version": "0.2.0",
+  "description": "JSON-RPC 2.0 bridge server over stdio that exposes Anthropic Claude via the codex-app-server protocol shape, so OpenClaw can drive Claude turns through the same harness pattern it uses for OpenAI Codex. Fork-preview package; expected to migrate to @openclaw/openclaw-claude-bridge when the upstream PR lands.",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
-    "openclaw-claude-app-server": "bin/openclaw-claude-app-server.mjs"
+    "openclaw-claude-bridge": "bin/openclaw-claude-bridge.mjs"
   },
   "files": [
     "bin",
@@ -27,9 +27,9 @@
   },
   "keywords": [
     "openclaw",
+    "openclaw-bridge",
     "claude",
     "anthropic",
-    "app-server",
     "json-rpc",
     "codex-app-server-protocol"
   ],

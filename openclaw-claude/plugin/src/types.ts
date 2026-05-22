@@ -1,6 +1,6 @@
 /**
  * Local duck-typed copies of the OpenClaw AgentHarness contract and the
- * codex-shaped JSON-RPC protocol that our @openclaw/claude-app-server speaks.
+ * codex-shaped JSON-RPC protocol that our @zeroaltitude/openclaw-claude-bridge speaks.
  *
  * Shapes mirror openclaw/extensions/codex/src/app-server/protocol.ts so the
  * same harness pattern works for both OpenAI Codex and Anthropic Claude
@@ -125,7 +125,7 @@ export type PluginApi = {
   };
 };
 
-// ─── @openclaw/claude-app-server JSON-RPC protocol (codex-shaped) ────────────
+// ─── @zeroaltitude/openclaw-claude-bridge JSON-RPC protocol (codex-shaped) ────────────
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export type JsonObject = { [key: string]: JsonValue };

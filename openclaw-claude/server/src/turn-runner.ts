@@ -126,9 +126,9 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   // developer instructions tell the model which path to use: native `Agent`
   // for inline subagent reasoning, OpenClaw `sessions_spawn` for genuine
   // cross-runtime / cross-agent delegation. Operators can override via the
-  // OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS env (comma-separated).
+  // OPENCLAW_CLAUDE_BRIDGE_DISALLOWED_TOOLS env (comma-separated).
   const disallowedNativeSubagentTools = (
-    process.env.OPENCLAW_CLAUDE_APP_SERVER_DISALLOWED_TOOLS ?? ""
+    process.env.OPENCLAW_CLAUDE_BRIDGE_DISALLOWED_TOOLS ?? ""
   )
     .split(",")
     .map((s) => s.trim())
@@ -147,7 +147,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   );
   const openclawSubagentToolName = "mcp__openclaw__sessions_spawn";
   const subagentAliases: Record<string, string> = {};
-  if (process.env.OPENCLAW_CLAUDE_APP_SERVER_DISABLE_SUBAGENT_ALIAS !== "1") {
+  if (process.env.OPENCLAW_CLAUDE_BRIDGE_DISABLE_SUBAGENT_ALIAS !== "1") {
     for (const name of disallowedNativeSubagentTools) {
       subagentAliases[name] = openclawSubagentToolName;
     }
@@ -204,7 +204,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   }
 
   // Approval flow. Two bypass paths:
-  //   1. Operator override via OPENCLAW_CLAUDE_APP_SERVER_ALLOW_ALL=1 — affects
+  //   1. Operator override via OPENCLAW_CLAUDE_BRIDGE_ALLOW_ALL=1 — affects
   //      every turn on every thread regardless of codex-protocol settings.
   //   2. Thread-level codex approvalPolicy: "never" — set by the plugin at
   //      thread/start to indicate this thread runs without prompting.
@@ -212,7 +212,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   // (item/commandExecution/requestApproval, item/fileChange/requestApproval)
   // and awaits the plugin's decision per tool call.
   const allowAll =
-    process.env.OPENCLAW_CLAUDE_APP_SERVER_ALLOW_ALL === "1" ||
+    process.env.OPENCLAW_CLAUDE_BRIDGE_ALLOW_ALL === "1" ||
     meta.approvalPolicy === "never";
 
   if (allowAll) {

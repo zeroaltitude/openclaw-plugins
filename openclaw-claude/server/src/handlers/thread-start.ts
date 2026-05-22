@@ -23,7 +23,7 @@ import { ANTHROPIC_PROVIDER_ID, defaultModelId, isKnownModel } from "../models.j
 import type { ThreadStore } from "../thread-store.js";
 import type { Logger } from "../transport.js";
 import { validateOutbound } from "../validators.js";
-import { OPENCLAW_CLAUDE_APP_SERVER_VERSION } from "../version.js";
+import { OPENCLAW_CLAUDE_BRIDGE_VERSION } from "../version.js";
 
 export function createThreadStartHandler(threadStore: ThreadStore, logger: Logger) {
   return async function handleThreadStart(rawParams: JsonValue | undefined): Promise<JsonValue> {
@@ -57,7 +57,7 @@ export function createThreadStartHandler(threadStore: ThreadStore, logger: Logge
       dynamicTools: dynamicTools.length > 0 ? dynamicTools : undefined,
       mcpServersConfig,
       ...(disallowedTools && disallowedTools.length > 0 ? { disallowedTools } : {}),
-      cliVersion: OPENCLAW_CLAUDE_APP_SERVER_VERSION,
+      cliVersion: OPENCLAW_CLAUDE_BRIDGE_VERSION,
     });
 
     const thread: Thread = {

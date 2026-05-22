@@ -1,7 +1,7 @@
 {
   "name": "@openclaw/claude",
-  "version": "0.4.0",
-  "description": "OpenClaw plugin that delegates Anthropic model turns to a local @openclaw/claude-app-server process via codex-shaped JSON-RPC over stdio.",
+  "version": "0.5.0",
+  "description": "OpenClaw plugin that delegates Anthropic model turns to a local @zeroaltitude/openclaw-claude-bridge process via codex-shaped JSON-RPC over stdio.",
   "main": "dist/index.js",
   "type": "module",
   "openclaw": {

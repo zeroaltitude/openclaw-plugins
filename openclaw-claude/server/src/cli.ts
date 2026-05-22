@@ -20,9 +20,9 @@ import {
 } from "./protocol.js";
 import { JsonRpcServer, RpcError } from "./server.js";
 import { OpenClawSessionStore } from "./session-store.js";
-import { DEFAULT_STATE_ROOT, ThreadStore } from "./thread-store.js";
+import { DEFAULT_STATE_ROOT, ThreadStore, migrateLegacyStateRootIfNeeded } from "./thread-store.js";
 import { StdioTransport, type Logger } from "./transport.js";
-import { OPENCLAW_CLAUDE_APP_SERVER_NAME, OPENCLAW_CLAUDE_APP_SERVER_VERSION } from "./version.js";
+import { OPENCLAW_CLAUDE_BRIDGE_NAME, OPENCLAW_CLAUDE_BRIDGE_VERSION } from "./version.js";
 
 const STDERR_LOGGER: Logger = {
   debug: (msg, ...rest) => writeStderrLog("debug", msg, rest),
@@ -50,13 +50,13 @@ function safeStringify(value: unknown): string {
 
 export async function main(argv: string[]): Promise<void> {
   if (argv.includes("--version") || argv.includes("-v")) {
-    process.stdout.write(`${OPENCLAW_CLAUDE_APP_SERVER_NAME} ${OPENCLAW_CLAUDE_APP_SERVER_VERSION}\n`);
+    process.stdout.write(`${OPENCLAW_CLAUDE_BRIDGE_NAME} ${OPENCLAW_CLAUDE_BRIDGE_VERSION}\n`);
     return;
   }
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(
       [
-        `${OPENCLAW_CLAUDE_APP_SERVER_NAME} ${OPENCLAW_CLAUDE_APP_SERVER_VERSION}`,
+        `${OPENCLAW_CLAUDE_BRIDGE_NAME} ${OPENCLAW_CLAUDE_BRIDGE_VERSION}`,
         "",
         "A JSON-RPC 2.0 server over stdio that exposes Anthropic Claude via the",
         "codex-app-server protocol shape. Designed to be spawned by the OpenClaw",
@@ -71,7 +71,7 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  STDERR_LOGGER.info(`${OPENCLAW_CLAUDE_APP_SERVER_NAME} ${OPENCLAW_CLAUDE_APP_SERVER_VERSION} listening on stdio`);
+  STDERR_LOGGER.info(`${OPENCLAW_CLAUDE_BRIDGE_NAME} ${OPENCLAW_CLAUDE_BRIDGE_VERSION} listening on stdio`);
 
   let server: JsonRpcServer | null = null;
   const transport = new StdioTransport({ logger: STDERR_LOGGER }, (msg) => {
@@ -92,7 +92,8 @@ export async function main(argv: string[]): Promise<void> {
   const initState: InitializeState = { initialized: false };
   server.onMethod("initialize", createInitializeHandler(initState));
 
-  const stateRoot = process.env.OPENCLAW_CLAUDE_APP_SERVER_STATE_ROOT ?? DEFAULT_STATE_ROOT;
+  const stateRoot = process.env.OPENCLAW_CLAUDE_BRIDGE_STATE_ROOT ?? DEFAULT_STATE_ROOT;
+  await migrateLegacyStateRootIfNeeded(stateRoot, STDERR_LOGGER);
   const threadStore = new ThreadStore(stateRoot, STDERR_LOGGER);
   const sessionStore = new OpenClawSessionStore(threadStore, STDERR_LOGGER);
   const activeTurns = new ActiveTurnRegistry();

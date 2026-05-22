@@ -6,7 +6,7 @@
  * etc.), await the decision, and return allow/deny to the SDK.
  *
  * Bypass paths:
- *   - server-wide `OPENCLAW_CLAUDE_APP_SERVER_ALLOW_ALL=1` env var
+ *   - server-wide `OPENCLAW_CLAUDE_BRIDGE_ALLOW_ALL=1` env var
  *   - thread-level codex `approvalPolicy: "never"` set at thread/start
  *
  * Tools served by our own openclaw MCP server (prefixed `mcp__openclaw__`)

@@ -1,12 +1,12 @@
 {
   "id": "claude",
   "name": "OpenClaw Claude",
-  "version": "0.4.0",
-  "description": "Delegates Anthropic model turns to a local @openclaw/claude-app-server process (JSON-RPC 2.0 over stdio, codex-app-server protocol parity). The server wraps @anthropic-ai/claude-agent-sdk and owns the agent loop, streaming, tools, approvals, and session persistence.",
+  "version": "0.5.0",
+  "description": "Delegates Anthropic model turns to a local @zeroaltitude/openclaw-claude-bridge process (JSON-RPC 2.0 over stdio, codex-app-server protocol parity). The bridge server wraps @anthropic-ai/claude-agent-sdk and owns the agent loop, streaming, tools, approvals, and session persistence.",
   "author": "BigHat Biosciences",
   "main": "dist/index.js",
   "contracts": {
-    "agentHarnesses": ["claude-app-server"]
+    "agentHarnesses": ["claude-bridge"]
   },
   "configSchema": {
     "type": "object",
@@ -14,8 +14,8 @@
     "properties": {
       "bin": {
         "type": "string",
-        "description": "Path or command for the openclaw-claude-app-server binary",
-        "default": "openclaw-claude-app-server"
+        "description": "Path or command for the openclaw-claude-bridge binary",
+        "default": "openclaw-claude-bridge"
       },
       "binArgs": {
         "type": "array",

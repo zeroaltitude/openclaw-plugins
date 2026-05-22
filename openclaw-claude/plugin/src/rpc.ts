@@ -1,6 +1,6 @@
 /**
  * JSON-RPC 2.0 client over a stdio child process — talks to our
- * @openclaw/claude-app-server binary.
+ * @zeroaltitude/openclaw-claude-bridge binary.
  *
  * Bidirectional: the server can send REQUESTS to us (e.g. approval prompts,
  * dynamic-tool calls). We route them to a default-respond function. If
@@ -86,7 +86,7 @@ export class ClaudeAppServerClient {
       detached: process.platform !== "win32",
     });
 
-    this.cfg.logger.info("[claude] spawned openclaw-claude-app-server", {
+    this.cfg.logger.info("[claude] spawned openclaw-claude-bridge", {
       pid: this.child.pid,
       bin: this.cfg.bin,
     });
@@ -108,14 +108,14 @@ export class ClaudeAppServerClient {
         : "";
       this.handleChildExit(
         new Error(
-          `openclaw-claude-app-server exited (code=${formatExitValue(code)} signal=${formatExitValue(signal)})${suffix}`,
+          `openclaw-claude-bridge exited (code=${formatExitValue(code)} signal=${formatExitValue(signal)})${suffix}`,
         ),
       );
     });
 
     this.child.stdin?.on("error", (err) => {
       this.cfg.logger.error("[claude] stdin error", err.message);
-      this.handleChildExit(new Error(`openclaw-claude-app-server stdin error: ${err.message}`));
+      this.handleChildExit(new Error(`openclaw-claude-bridge stdin error: ${err.message}`));
     });
 
     this.initializePromise = this.sendRequest<JsonValue>(
@@ -173,7 +173,7 @@ export class ClaudeAppServerClient {
     forceKill.unref?.();
     child.once("exit", () => clearTimeout(forceKill));
     child.unref?.();
-    this.rejectAll(new Error("openclaw-claude-app-server stopped"));
+    this.rejectAll(new Error("openclaw-claude-bridge stopped"));
   }
 
   isRunning(): boolean {
@@ -190,7 +190,7 @@ export class ClaudeAppServerClient {
         await this.initializePromise.catch(() => {});
       }
       if (!this.initialized) {
-        throw new Error("openclaw-claude-app-server is not initialized");
+        throw new Error("openclaw-claude-bridge is not initialized");
       }
     }
     return this.sendRequest<T>(method, params, signal);
@@ -216,7 +216,7 @@ export class ClaudeAppServerClient {
     signal?: AbortSignal,
   ): Promise<T> {
     if (!this.child) {
-      throw new Error("openclaw-claude-app-server is not running");
+      throw new Error("openclaw-claude-bridge is not running");
     }
     const id = this.nextId++;
     const msg: RpcRequest = { jsonrpc: "2.0", id, method, params };
