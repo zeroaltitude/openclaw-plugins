@@ -221,6 +221,41 @@ const SYSTEM_SOURCE_SESSION_SUFFIXES = [
   ":exec-event",
 ];
 
+/**
+ * True if a session is system-source (heartbeat/cron/exec-event/webchat),
+ * detected via identity.sourceProvider, messageProvider, OR sessionKey
+ * suffix. Used by before_prompt_build and the seal handler to suppress
+ * watermark inheritance and watermark escalation for these sessions.
+ *
+ * Rationale: heartbeat/cron turns are system-generated, never user-driven.
+ * Their watermarks should not accumulate across runs; any non-trusted
+ * watermark on such a session is by definition stale (e.g. left over from
+ * a previous bug where the initial-trust classifier returned "shared" for
+ * heartbeat sessions because identity.sourceProvider wasn't populated).
+ * Without this gate, watermark inheritance in before_prompt_build feeds
+ * the next heartbeat turn's graph an untrusted node, which the seal
+ * handler then re-escalates — a self-perpetuating loop that survives
+ * even after /reset-trust unless every interrupted heartbeat turn is
+ * also drained before the next one starts.
+ */
+function isSystemSourceSession(params: {
+  identity?: import("./identity-store.js").IdentityRecord;
+  messageProvider?: string;
+  sessionKey?: string;
+}): boolean {
+  const effectiveProvider = params.identity?.sourceProvider ?? params.messageProvider;
+  if (effectiveProvider && SYSTEM_SOURCE_PROVIDERS.has(effectiveProvider)) {
+    return true;
+  }
+  if (
+    params.sessionKey &&
+    SYSTEM_SOURCE_SESSION_SUFFIXES.some((s) => params.sessionKey!.endsWith(s))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function classifyInitialTrust(params: {
   identity?: import("./identity-store.js").IdentityRecord;
   messageProvider?: string;
@@ -1553,10 +1588,36 @@ export function registerSecurityHooks(
       }
 
       const { graph, sealedPrevious } = store.startTurn(sessionKey);
+      const isSystemSession = isSystemSourceSession({
+        identity,
+        messageProvider: ctx.messageProvider,
+        sessionKey,
+      });
+
+      // System-source sessions (heartbeat/cron/exec-event) cannot legitimately
+      // hold persisted non-trusted watermarks: they are not user-driven, and
+      // any "taint" on them is by definition stale (e.g. from a previous bug
+      // where classifyInitialTrust returned non-trusted before the sessionKey
+      // suffix fallback was wired). Drain any non-trusted watermark at turn
+      // start so the inheritance block below is a no-op and the seal-handler
+      // doesn't immediately re-escalate from the next interrupted heartbeat.
+      if (isSystemSession) {
+        const stale = watermarkStore.get(sessionKey);
+        if (stale && stale.level !== "trusted") {
+          watermarkStore.clear(sessionKey);
+          watermarkStore.flush();
+          logger.info(
+            `[provenance:${shortKey(sessionKey)}] 🧹 SYSTEM_SESSION_WATERMARK_DRAIN: cleared stale watermark (was ${stale.level}: ${stale.reason ?? "no reason"}) on system-source session.`,
+          );
+        }
+      }
 
       // If a previous turn was interrupted (sealed without completing),
       // persist its watermark escalation now so taint is never silently lost.
-      if (sealedPrevious) {
+      // Skip for system-source sessions: heartbeat/cron turns getting
+      // interrupted is normal (process restart, idle deadline) and should
+      // not poison the watermark.
+      if (sealedPrevious && !isSystemSession) {
         const sealedMaxTaint = sealedPrevious.summary().maxTaint;
         if (sealedMaxTaint && sealedMaxTaint !== "trusted") {
           const _agentId = sessionAgentMap.get(sessionKey) ?? ctx.agentId ?? "unknown";
