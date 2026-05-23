@@ -36,7 +36,7 @@ server handles:
   instructions + projected OpenClaw dynamic tools
 - `thread/resume` — patch cwd/approvalPolicy/developerInstructions
   in-place; falls back to thread-not-found gracefully
-- `thread/fork` — TODO; planned for catalog-change continuity
+- `thread/fork` — branches a thread; the bridge calls this when the dynamic-tool catalog changes mid-session to preserve transcript continuity while adopting the new catalog (tested in `tests/thread-fork.test.ts`)
 - `thread/inject-items` — inject items into an existing thread
 - `thread/unsubscribe`
 - `turn/start` — run one turn, streaming `item/started`/`item/completed`
@@ -120,7 +120,7 @@ migrating).
 ```sh
 npm install
 npm run build
-npm test            # 81 tests
+npm test            # 96 tests
 node bin/openclaw-claude-bridge.mjs  # run the server directly
 ```
 
