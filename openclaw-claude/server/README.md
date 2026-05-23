@@ -53,17 +53,20 @@ Server→client requests:
 ## How it relates to the OpenClaw extension
 
 The in-tree extension lives in `extensions/claude/src/app-server/` in the
-OpenClaw fork and is what spawns this server. Three-piece architecture:
+OpenClaw fork and is what spawns this server. Two-piece architecture:
 
 | Component | Where | Package |
 |---|---|---|
-| In-tree extension (ships with OpenClaw) | `openclaw/openclaw` fork | `@openclaw/claude` |
-| Plugin manifest | `openclaw/openclaw-plugins/openclaw-claude/plugin/` | `@openclaw/claude` |
+| In-tree client bridge (ships with OpenClaw) | `openclaw/openclaw` fork | `@openclaw/claude` (bundled extension) |
 | **JSON-RPC server (this package)** | `openclaw/openclaw-plugins/openclaw-claude/server/` | `@zeroaltitude/openclaw-claude-bridge` |
 
 The extension's `src/app-server/` directory mirrors the codex
 extension's directory layout — it implements the *client side* of the
 codex-app-server protocol. The actual server is this separate binary.
+
+> A `plugin/` directory previously held a redundant, never-published
+> mirror of the in-tree bridge. It was removed on 2026-05-23; the
+> in-tree bridge is the source of truth.
 
 ## Server-side features
 

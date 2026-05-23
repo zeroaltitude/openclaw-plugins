@@ -1,146 +1,59 @@
 # openclaw-claude
 
-An OpenClaw plugin that delegates Anthropic model turns to a local
-[claude-app-server](https://github.com/sumansid/claude-app-server) process —
-the Claude equivalent of the OpenAI Codex App Server.
+Source for the **JSON-RPC bridge server** that lets
+[OpenClaw](https://github.com/openclaw/openclaw) drive Anthropic Claude
+turns through the same codex-shaped harness pattern it uses for OpenAI
+Codex (`@openai/codex`).
 
----
-
-## Architecture
+## Layout
 
 ```
-OpenClaw (product layer)
-  └─► openclaw-claude plugin  (AgentHarness)
+openclaw-claude/
+  server/    — @zeroaltitude/openclaw-claude-bridge (published npm package)
+```
+
+`server/` builds and publishes the binary `openclaw-claude-bridge`. The
+binary speaks JSON-RPC 2.0 over stdio (mirroring the codex-app-server
+protocol) and wraps [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
+
+The matching client lives **in-tree** in the OpenClaw fork at
+[`extensions/claude/src/app-server/`](https://github.com/openclaw/openclaw)
+on `feat/claude-app-server-extension`. The in-tree client is what
+`openclaw` builds + ships; this repository only owns the external
+server.
+
+## Status
+
+- `server/` — published as
+  [`@zeroaltitude/openclaw-claude-bridge`](https://www.npmjs.com/package/@zeroaltitude/openclaw-claude-bridge);
+  fork-preview path while the upstream PR for the OpenClaw bridge is in
+  review. Expected to migrate to `@openclaw/openclaw-claude-bridge` when
+  maintainers republish under the `@openclaw` scope.
+
+## Architecture (two-piece)
+
+```
+OpenClaw gateway
+  └─► extensions/claude/src/app-server/  (in-tree bridge — openclaw repo)
         └─► JSON-RPC 2.0 over stdio
-              └─► claude-app-server  (npm: claude-app-server)
-                    └─► Claude Code CLI  (claude --print --output-format stream-json …)
+              └─► openclaw-claude-bridge  (this repo's server/)
+                    └─► @anthropic-ai/claude-agent-sdk
                           └─► Anthropic Messages API
 ```
 
-**OpenClaw owns:** channels, memory, persona, session routing, cron, hooks.  
-**claude-app-server owns:** the thread lifecycle, the agentic loop, tool execution, session JSONL.
+A previous `openclaw-claude/plugin/` directory mirrored what the in-tree
+bridge does and was never published. It was removed on 2026-05-23; see
+git history for that scaffolding if a republished `@openclaw/claude`
+plugin form is ever needed.
 
-The plugin is thin glue: it spawns `claude-app-server` as a child process,
-speaks JSON-RPC 2.0 over stdin/stdout (NDJSON — same protocol shape as the
-Codex App Server), and translates results back into the OpenClaw
-`AgentHarness` contract.
-
----
-
-## Why claude-app-server and not a custom HTTP server?
-
-`claude-app-server` is a community-built (MIT) server that already does
-exactly what we need — it implements the same JSON-RPC thread/turn protocol
-that OpenAI's Codex App Server uses, but over the Claude Code CLI instead.
-OpenClaw already knows this protocol well (its Codex extension is a
-production client of it). There is no wheel to reinvent.
-
----
-
-## Prerequisites
-
-### 1. Claude Code CLI
-
-The server wraps `claude` (the Claude Code CLI). Install it:
+## Working on the server
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-Authenticate once:
-
-```bash
-claude auth
-# or
-claude setup-token   # if using an API key
-```
-
-### 2. claude-app-server
-
-```bash
-npm install -g claude-app-server
-```
-
-Verify it starts (Ctrl-C to stop):
-
-```bash
-claude-app-server
-# ← waits for stdin input; that's correct for stdio mode
-```
-
----
-
-## Installation
-
-### 1. Build the plugin
-
-```bash
-cd plugin
+cd server
 npm install
 npm run build
+npm test            # 96 tests
+node bin/openclaw-claude-bridge.mjs   # run the server directly
 ```
 
-### 2. Register in openclaw.json
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "claude": {
-        "path": "/path/to/openclaw-plugins/openclaw-claude/plugin",
-        "config": {
-          "permissionMode": "acceptEdits"
-        }
-      }
-    }
-  }
-}
-```
-
-Restart OpenClaw. The plugin spawns `claude-app-server` as a child process
-on startup and keeps it running for the lifetime of the gateway.
-
----
-
-## Configuration reference
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `bin` | string | `"claude-app-server"` | Command/path for the server binary |
-| `binArgs` | string[] | `[]` | Extra CLI args to pass on spawn |
-| `env` | object | `{}` | Extra env vars injected into the server process |
-| `permissionMode` | string | `"default"` | `"default"` / `"acceptEdits"` / `"bypassPermissions"` |
-| `priority` | number | `10` | Harness priority (higher wins over PI when both match) |
-| `turnTimeoutMs` | number | `600000` | Per-turn hard timeout in ms |
-
----
-
-## Protocol
-
-The plugin speaks [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over
-`stdin`/`stdout` (newline-delimited JSON). The method surface used:
-
-| Method | Direction | Purpose |
-|---|---|---|
-| `thread/start` | request | Create a new Claude thread for a fresh OpenClaw session |
-| `thread/resume` | request | Verify an existing thread is still alive |
-| `turn/start` | request | Send the user prompt; returns `turn_id` immediately |
-| `turn/interrupt` | request | Abort an in-progress turn |
-| `item/progress` | notification | Streaming text delta |
-| `item/created` | notification | Finalized item (text block, tool call, tool result) |
-| `turn/completed` | notification | Turn finished successfully |
-| `turn/error` | notification | Turn failed |
-
-Session continuity: the plugin maintains a `Map<openclawSessionId, threadId>`.
-Each new OpenClaw session gets a `thread/start`; subsequent turns in the same
-session resume the same thread via `thread/resume` + `turn/start`.
-
----
-
-## Harness selection
-
-The harness registers for:
-- `provider === "anthropic"` in `auto` runtime mode (priority 10 by default)
-- Any runtime pinned to `"claude-app-server"` (priority 1010)
-
-It defers to the PI harness for any other provider.
+See `server/README.md` for the full feature set + protocol notes.
