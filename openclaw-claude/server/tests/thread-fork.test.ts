@@ -272,6 +272,39 @@ describe("createThreadForkHandler", () => {
     expect(forkMeta?.disallowedTools).toBeUndefined();
   });
 
+  it("clears parent's disallowedTools when bridge sends an explicit empty array", async () => {
+    // Round-trip the policy-relaxation case: parent thread had Bash/Edit
+    // blocked, current openclaw policy now allows them. The bridge sends
+    // disallowedTools: [] (explicit empty), the server's createThread
+    // doesn't persist an empty array to meta, so the fork resumes with
+    // no native blocks. Without the explicit empty-array path the fork
+    // would silently inherit the parent's stale blocks.
+    const root = await makeStateRoot();
+    const logger = makeLogger();
+    const store = new ThreadStore(root, logger);
+    // Seed parent then hand-write disallowedTools directly into its meta
+    // (createThread filters empty/missing; we need the parent to actually
+    // have non-empty disallowedTools to make the inheritance hazard real).
+    const { threadId } = await seedParentThread(store);
+    const parentMetaPath = `${root}/threads/${threadId}/meta.json`;
+    const meta = JSON.parse(await readFile(parentMetaPath, "utf8")) as Record<string, unknown>;
+    meta.disallowedTools = ["Bash", "Edit"];
+    await writeFile(parentMetaPath, JSON.stringify(meta));
+    // Sanity: parent now has the blocks.
+    const parentAfter = await store.readMeta(threadId);
+    expect(parentAfter?.disallowedTools).toEqual(["Bash", "Edit"]);
+
+    const handler = createThreadForkHandler(store, logger);
+    const resp = (await handler({
+      threadId,
+      disallowedTools: [],
+    })) as { thread: { id: string } };
+
+    const forkMeta = await store.readMeta(resp.thread.id);
+    // Fork's meta should NOT carry the parent's stale disallowedTools.
+    expect(forkMeta?.disallowedTools).toBeUndefined();
+  });
+
   it("accepts string-form sandbox override (codex compat: { type: 'workspaceWrite' } shape)", async () => {
     const root = await makeStateRoot();
     const logger = makeLogger();
