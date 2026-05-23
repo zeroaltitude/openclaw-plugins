@@ -48,6 +48,11 @@ export const LEGACY_CLAUDE_APP_SERVER_STATE_ROOT = path.join(STATE_ROOT_BASE, "c
  * not yet exist. If both exist (e.g. the user manually created the new
  * one, or migration ran but failed to clean up), log and skip — manual
  * resolution beats data loss. Safe to call unconditionally.
+ *
+ * The pure rename logic lives in `runLegacyStateRootMigration` and is
+ * exported for direct testing; this wrapper enforces the "only act on the
+ * canonical default stateRoot" gate so custom `OPENCLAW_CLAUDE_BRIDGE_STATE_ROOT`
+ * users opt out automatically.
  */
 export async function migrateLegacyStateRootIfNeeded(
   stateRoot: string,
@@ -56,9 +61,23 @@ export async function migrateLegacyStateRootIfNeeded(
   if (stateRoot !== DEFAULT_STATE_ROOT) {
     return;
   }
+  await runLegacyStateRootMigration(
+    {
+      legacyPath: LEGACY_CLAUDE_APP_SERVER_STATE_ROOT,
+      newPath: DEFAULT_STATE_ROOT,
+    },
+    logger,
+  );
+}
+
+export async function runLegacyStateRootMigration(
+  paths: { legacyPath: string; newPath: string },
+  logger?: Logger,
+): Promise<void> {
+  const { legacyPath, newPath } = paths;
   let legacyExists = false;
   try {
-    await fs.stat(LEGACY_CLAUDE_APP_SERVER_STATE_ROOT);
+    await fs.stat(legacyPath);
     legacyExists = true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -70,7 +89,7 @@ export async function migrateLegacyStateRootIfNeeded(
   }
   let newExists = false;
   try {
-    await fs.stat(DEFAULT_STATE_ROOT);
+    await fs.stat(newPath);
     newExists = true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -79,15 +98,13 @@ export async function migrateLegacyStateRootIfNeeded(
   }
   if (newExists) {
     logger?.warn(
-      `state-dir migration: both ${LEGACY_CLAUDE_APP_SERVER_STATE_ROOT} and ${DEFAULT_STATE_ROOT} exist; not migrating (resolve manually).`,
+      `state-dir migration: both ${legacyPath} and ${newPath} exist; not migrating (resolve manually).`,
     );
     return;
   }
-  await fs.mkdir(path.dirname(DEFAULT_STATE_ROOT), { recursive: true });
-  await fs.rename(LEGACY_CLAUDE_APP_SERVER_STATE_ROOT, DEFAULT_STATE_ROOT);
-  logger?.info(
-    `state-dir migration: ${LEGACY_CLAUDE_APP_SERVER_STATE_ROOT} -> ${DEFAULT_STATE_ROOT}`,
-  );
+  await fs.mkdir(path.dirname(newPath), { recursive: true });
+  await fs.rename(legacyPath, newPath);
+  logger?.info(`state-dir migration: ${legacyPath} -> ${newPath}`);
 }
 
 export type ThreadMeta = {
