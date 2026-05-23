@@ -81,7 +81,12 @@ export function getToolMode(
   config: PolicyConfig,
 ): PolicyMode {
   const defaultMode = config.taintPolicy[taintLevel] ?? "restrict";
-  const override = config.toolOverrides[toolName.toLowerCase()];
+  const toolKey = toolName.toLowerCase();
+  const bareToolKey = toolKey.includes(".")
+    ? toolKey.slice(0, toolKey.indexOf("."))
+    : toolKey;
+  const override =
+    config.toolOverrides[toolKey] ?? config.toolOverrides[bareToolKey];
 
   if (!override) {
     // Unknown tool: when taint policy allows at this level, trust the policy.

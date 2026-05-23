@@ -157,6 +157,52 @@ For plugin-provided or custom tools, declare the action parameter in config:
 
 The lookup chain for any tool call: composite key → bare tool name → `untrusted` default.
 
+#### Example: TweetClaw Endpoint Policies
+
+[TweetClaw](https://github.com/Xquik-dev/tweetclaw) exposes one `tweetclaw`
+tool with a `path` parameter for X/Twitter reads and writes. This config lets
+public tweet search run without approval, treats returned X/Twitter data as
+external content, and asks before every other TweetClaw endpoint call:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "provenance": {
+        "config": {
+          "compositeTools": {
+            "tweetclaw": { "actionParam": "path" }
+          },
+          "uriExtractors": {
+            "tweetclaw": {
+              "params": ["path"],
+              "absolutePathScheme": "xquik"
+            }
+          },
+          "toolOutputTaints": {
+            "tweetclaw": "external"
+          },
+          "toolOverrides": {
+            "tweetclaw": { "*": "confirm" },
+            "tweetclaw./api/v1/x/tweets/search": { "*": "allow" },
+            "tweetclaw./api/v1/radar/trends": { "*": "allow" }
+          },
+          "uriTrust": {
+            "xquik://api/v1/x/accounts/**": "untrusted",
+            "xquik://api/v1/x/tweets/**": "external",
+            "xquik://api/v1/radar/**": "external"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The endpoint path `/api/v1/x/tweets/search` is recorded as
+`xquik://api/v1/x/tweets/search`, so URI trust can distinguish public reads
+from account-management paths without treating API paths as local files.
+
 ### URI Source Tracking
 
 Every tool call that introduces data has an identifiable source address (URI). The plugin extracts and tracks these URIs in the provenance graph:
@@ -185,6 +231,10 @@ Built-in extractors cover all known OpenClaw tools. For custom tools, declare wh
   }
 }
 ```
+
+Use `absolutePathScheme` when a parameter contains API-style paths such as
+`/api/v1/x/tweets/search`. Without it, absolute paths keep the safe default
+`file://` classification for local filesystem tools.
 
 ### URI Trust Classification
 

@@ -18,6 +18,8 @@ export interface UriExtractorConfig {
   params: string[];
   /** Default scheme if value has no scheme */
   scheme?: string;
+  /** Scheme to use for API-style absolute paths such as /api/v1/tweets */
+  absolutePathScheme?: string;
   /** Per-param scheme overrides */
   schemeMap?: Record<string, string>;
 }
@@ -139,9 +141,17 @@ const MESSAGE_READ_ACTIONS = new Set([
  * - Absolute paths get `file://` prepended
  * - Other values get the default scheme prepended
  */
-export function normalizeUri(value: string, defaultScheme?: string): string {
+export function normalizeUri(
+  value: string,
+  defaultScheme?: string,
+  absolutePathScheme?: string,
+): string {
   // Already has scheme (https://, file://, etc.)
   if (/^[a-z][\w+.-]*:\/\//i.test(value)) return value;
+  // API path params can opt into a virtual scheme instead of file://.
+  if (value.startsWith("/") && absolutePathScheme) {
+    return `${absolutePathScheme}://${value.replace(/^\/+/, "")}`;
+  }
   // Absolute path → file://
   if (value.startsWith("/")) return `file://${value}`;
   // Apply default scheme
@@ -170,6 +180,7 @@ function extractFromConfig(
         normalizeUri(
           val,
           config.schemeMap?.[paramName] ?? config.scheme,
+          config.absolutePathScheme,
         ),
       );
     }
@@ -180,6 +191,7 @@ function extractFromConfig(
             normalizeUri(
               v,
               config.schemeMap?.[paramName] ?? config.scheme,
+              config.absolutePathScheme,
             ),
           );
         }
