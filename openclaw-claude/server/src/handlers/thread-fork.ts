@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import {
   isJsonObject,
   RPC_INVALID_PARAMS,
+  type DynamicToolSpec,
   type JsonValue,
   type Thread,
   type ThreadForkParams,
@@ -38,6 +39,20 @@ export function createThreadForkHandler(threadStore: ThreadStore, logger: Logger
     const newThreadId = randomUUID();
     const nowSec = Math.floor(Date.now() / 1000);
 
+    // The bridge uses thread/fork specifically when the dynamic-tool
+    // catalog changed mid-session: the goal is to preserve transcript
+    // continuity (handled by the messages.jsonl copy below) while
+    // adopting the new tool set. Honor explicit `dynamicTools` /
+    // `mcpServersConfig` overrides so the SDK's MCP registration at the
+    // fork's next turn sees the new catalog instead of the parent's
+    // stale one. Pass-through when omitted — non-bridge callers (e.g.
+    // codex-style branch-without-catalog-change) get parent inheritance.
+    const dynamicToolsOverride = isCatalogOverride(params.dynamicTools)
+      ? normalizeDynamicTools(params.dynamicTools)
+      : undefined;
+    const mcpServersOverride = isJsonObject(params.mcpServersConfig)
+      ? params.mcpServersConfig
+      : undefined;
     const fork = await threadStore.createThread({
       cwd: typeof params.cwd === "string" ? params.cwd : parent.cwd,
       model: typeof params.model === "string" ? params.model : parent.model,
@@ -51,8 +66,12 @@ export function createThreadForkHandler(threadStore: ThreadStore, logger: Logger
         typeof params.baseInstructions === "string"
           ? params.baseInstructions
           : parent.developerInstructions,
-      dynamicTools: parent.dynamicTools,
-      mcpServersConfig: parent.mcpServersConfig,
+      dynamicTools: dynamicToolsOverride ?? parent.dynamicTools,
+      dynamicToolsFingerprint:
+        typeof params.dynamicToolsFingerprint === "string"
+          ? params.dynamicToolsFingerprint
+          : parent.dynamicToolsFingerprint,
+      mcpServersConfig: mcpServersOverride ?? parent.mcpServersConfig,
       forkedFromId: parent.id,
       cliVersion: parent.cliVersion,
     });
@@ -129,4 +148,24 @@ function parseParams(raw: JsonValue | undefined): ThreadForkParams {
     throw new RpcError(RPC_INVALID_PARAMS, "thread/fork requires { threadId: string, ... }");
   }
   return raw as ThreadForkParams;
+}
+
+function isCatalogOverride(value: unknown): value is unknown[] {
+  return Array.isArray(value);
+}
+
+function normalizeDynamicTools(raw: unknown): DynamicToolSpec[] {
+  if (!Array.isArray(raw)) return [];
+  const out: DynamicToolSpec[] = [];
+  for (const t of raw) {
+    if (
+      t &&
+      typeof t === "object" &&
+      typeof (t as { name?: unknown }).name === "string" &&
+      typeof (t as { description?: unknown }).description === "string"
+    ) {
+      out.push(t as DynamicToolSpec);
+    }
+  }
+  return out;
 }
