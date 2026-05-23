@@ -213,6 +213,80 @@ describe("createThreadForkHandler", () => {
     expect(resp.thread.forkedFromId).toBe(threadId);
   });
 
+  it("adopts approvalPolicy + sandbox + disallowedTools overrides (full execution-policy envelope)", async () => {
+    const root = await makeStateRoot();
+    const logger = makeLogger();
+    const store = new ThreadStore(root, logger);
+    // Seed the parent with one policy; the bridge will then override with current openclaw config.
+    const { threadId } = await seedParentThread(store);
+    // Hand-write disallowedTools onto the parent meta since seedParentThread doesn't take them.
+    const parentMeta = await store.readMeta(threadId);
+    expect(parentMeta).toBeTruthy();
+    const handler = createThreadForkHandler(store, logger);
+
+    const resp = (await handler({
+      threadId,
+      approvalPolicy: "on-request",
+      sandbox: { type: "readOnly" },
+      disallowedTools: ["Bash", "Edit"],
+    })) as { thread: { id: string } };
+
+    const forkMeta = await store.readMeta(resp.thread.id);
+    expect(forkMeta?.approvalPolicy).toBe("on-request");
+    expect(forkMeta?.sandbox).toEqual({ type: "readOnly" });
+    expect(forkMeta?.disallowedTools).toEqual(["Bash", "Edit"]);
+  });
+
+  it("falls back to parent approvalPolicy/sandbox/disallowedTools when overrides are omitted", async () => {
+    const root = await makeStateRoot();
+    const logger = makeLogger();
+    const store = new ThreadStore(root, logger);
+    const { threadId } = await seedParentThread(store);
+    const handler = createThreadForkHandler(store, logger);
+
+    const resp = (await handler({ threadId })) as { thread: { id: string } };
+    const forkMeta = await store.readMeta(resp.thread.id);
+    const parentMeta = await store.readMeta(threadId);
+    expect(forkMeta?.approvalPolicy).toBe(parentMeta?.approvalPolicy);
+    expect(forkMeta?.sandbox).toEqual(parentMeta?.sandbox);
+  });
+
+  it("ignores malformed approvalPolicy + sandbox overrides (silently inherits parent)", async () => {
+    const root = await makeStateRoot();
+    const logger = makeLogger();
+    const store = new ThreadStore(root, logger);
+    const { threadId } = await seedParentThread(store);
+    const handler = createThreadForkHandler(store, logger);
+
+    const resp = (await handler({
+      threadId,
+      approvalPolicy: "definitely-not-a-policy",
+      sandbox: 123,
+      disallowedTools: "not-an-array",
+    })) as { thread: { id: string } };
+
+    const forkMeta = await store.readMeta(resp.thread.id);
+    const parentMeta = await store.readMeta(threadId);
+    expect(forkMeta?.approvalPolicy).toBe(parentMeta?.approvalPolicy);
+    expect(forkMeta?.sandbox).toEqual(parentMeta?.sandbox);
+    expect(forkMeta?.disallowedTools).toBeUndefined();
+  });
+
+  it("accepts string-form sandbox override (codex compat: { type: 'workspaceWrite' } shape)", async () => {
+    const root = await makeStateRoot();
+    const logger = makeLogger();
+    const store = new ThreadStore(root, logger);
+    const { threadId } = await seedParentThread(store);
+    const handler = createThreadForkHandler(store, logger);
+
+    const resp = (await handler({
+      threadId,
+      sandbox: "workspaceWrite",
+    })) as { thread: { id: string } };
+    const forkMeta = await store.readMeta(resp.thread.id);
+    expect(forkMeta?.sandbox).toEqual({ type: "workspaceWrite" });
+  });
+
   it("throws an RpcError when the parent thread is missing", async () => {
     const root = await makeStateRoot();
     const logger = makeLogger();

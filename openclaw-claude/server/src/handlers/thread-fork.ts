@@ -15,8 +15,10 @@ import { randomUUID } from "node:crypto";
 import {
   isJsonObject,
   RPC_INVALID_PARAMS,
+  type AskForApproval,
   type DynamicToolSpec,
   type JsonValue,
+  type SandboxPolicyResponse,
   type Thread,
   type ThreadForkParams,
   type ThreadStartResponse,
@@ -42,25 +44,31 @@ export function createThreadForkHandler(threadStore: ThreadStore, logger: Logger
     // The bridge uses thread/fork specifically when the dynamic-tool
     // catalog changed mid-session: the goal is to preserve transcript
     // continuity (handled by the messages.jsonl copy below) while
-    // adopting the new tool set. Honor explicit `dynamicTools` /
-    // `mcpServersConfig` overrides so the SDK's MCP registration at the
-    // fork's next turn sees the new catalog instead of the parent's
-    // stale one. Pass-through when omitted — non-bridge callers (e.g.
-    // codex-style branch-without-catalog-change) get parent inheritance.
+    // adopting both the new tool set AND the current openclaw
+    // execution-policy envelope (approvalPolicy, sandbox, disallowedTools).
+    // Honoring per-field overrides matters because without it the fork
+    // inherits the parent's stale approval/sandbox posture even after
+    // the user's openclaw config changed mid-session. Each field that
+    // accepts an override falls back to parent inheritance only when
+    // the bridge omits it — so codex-style branch-without-catalog-change
+    // callers still get parent inheritance.
     const dynamicToolsOverride = isCatalogOverride(params.dynamicTools)
       ? normalizeDynamicTools(params.dynamicTools)
       : undefined;
     const mcpServersOverride = isJsonObject(params.mcpServersConfig)
       ? params.mcpServersConfig
       : undefined;
+    const approvalPolicyOverride = readApprovalPolicyOverride(params.approvalPolicy);
+    const sandboxOverride = readSandboxOverride(params.sandbox);
+    const disallowedToolsOverride = readDisallowedToolsOverride(params.disallowedTools);
     const fork = await threadStore.createThread({
       cwd: typeof params.cwd === "string" ? params.cwd : parent.cwd,
       model: typeof params.model === "string" ? params.model : parent.model,
       modelProvider:
         typeof params.modelProvider === "string" ? params.modelProvider : parent.modelProvider,
-      approvalPolicy: parent.approvalPolicy,
+      approvalPolicy: approvalPolicyOverride ?? parent.approvalPolicy,
       approvalsReviewer: parent.approvalsReviewer,
-      sandbox: parent.sandbox,
+      sandbox: sandboxOverride ?? parent.sandbox,
       serviceTier: parent.serviceTier ?? null,
       developerInstructions:
         typeof params.baseInstructions === "string"
@@ -72,6 +80,11 @@ export function createThreadForkHandler(threadStore: ThreadStore, logger: Logger
           ? params.dynamicToolsFingerprint
           : parent.dynamicToolsFingerprint,
       mcpServersConfig: mcpServersOverride ?? parent.mcpServersConfig,
+      ...(disallowedToolsOverride !== undefined
+        ? { disallowedTools: disallowedToolsOverride }
+        : parent.disallowedTools !== undefined
+          ? { disallowedTools: parent.disallowedTools }
+          : {}),
       forkedFromId: parent.id,
       cliVersion: parent.cliVersion,
     });
@@ -152,6 +165,35 @@ function parseParams(raw: JsonValue | undefined): ThreadForkParams {
 
 function isCatalogOverride(value: unknown): value is unknown[] {
   return Array.isArray(value);
+}
+
+const APPROVAL_POLICY_STRINGS = new Set(["untrusted", "on-failure", "on-request", "never"]);
+
+function readApprovalPolicyOverride(raw: unknown): AskForApproval | undefined {
+  if (typeof raw === "string" && APPROVAL_POLICY_STRINGS.has(raw)) {
+    return raw as AskForApproval;
+  }
+  if (isJsonObject(raw) && isJsonObject(raw.granular)) {
+    return raw as unknown as AskForApproval;
+  }
+  return undefined;
+}
+
+function readSandboxOverride(raw: unknown): SandboxPolicyResponse | undefined {
+  if (isJsonObject(raw) && typeof raw.type === "string") {
+    return raw as unknown as SandboxPolicyResponse;
+  }
+  if (typeof raw === "string") {
+    return { type: raw };
+  }
+  return undefined;
+}
+
+function readDisallowedToolsOverride(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  return raw.filter((entry): entry is string => typeof entry === "string");
 }
 
 function normalizeDynamicTools(raw: unknown): DynamicToolSpec[] {
