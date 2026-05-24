@@ -318,12 +318,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
 
   notify("turn/started", { threadId: meta.id, turnId: turn.turnId });
 
-  type StreamItem = {
-    id: string;
-    type: "agentMessage" | "reasoning";
-    buffer: string;
-  };
-  const blocks = new Map<number, StreamItem>();
+  const blocks = new Map<number, StreamItemRef>();
 
   try {
     // Cast — SDK options surface is rich and the runtime accepts our subset.
@@ -413,11 +408,24 @@ async function transcriptHasEntries(transcriptPath: string): Promise<boolean> {
   }
 }
 
-type StreamItemRef = {
-  id: string;
-  type: "agentMessage" | "reasoning";
-  buffer: string;
-};
+type StreamItemRef =
+  | {
+      id: string;
+      type: "agentMessage" | "reasoning";
+      buffer: string;
+    }
+  | {
+      id: string;
+      type: "toolCall";
+      name: string;
+      /**
+       * Anthropic SDK streams a tool_use block's input as a sequence of
+       * `input_json_delta` events whose `partial_json` strings concatenate
+       * into the final JSON. We accumulate the raw string here and
+       * JSON.parse it at content_block_stop.
+       */
+      partialJson: string;
+    };
 
 function handleStreamEvent(
   msg: Record<string, unknown>,
@@ -451,8 +459,35 @@ function handleStreamEvent(
           turnId: turn.turnId,
           item: makeReasoningItem(item.id, ""),
         });
+      } else if (kind === "tool_use") {
+        // Native Claude SDK tool call (Bash, Read, Edit, Write, etc.).
+        // Use the block's own id so item/started and item/completed
+        // refer to the same logical thing the SDK already knows about.
+        // Project this onto codex's `toolCall` item type so the bridge
+        // projector recognizes it as a tool item (isToolItem).
+        const blockId = typeof block.id === "string" ? block.id : randomUUID();
+        const blockName = typeof block.name === "string" ? block.name : "unknown";
+        const item: StreamItemRef = {
+          id: blockId,
+          type: "toolCall",
+          name: blockName,
+          partialJson: "",
+        };
+        blocks.set(idx, item);
+        notify("item/started", {
+          threadId: meta.id,
+          turnId: turn.turnId,
+          item: makeNativeToolCallItem({
+            id: blockId,
+            tool: blockName,
+            args: null,
+            status: "running",
+          }),
+        });
       }
-      // tool_use / tool_result blocks ignored in phase 4.
+      // tool_result blocks: not surfaced here; the SDK handles tool
+      // result accounting internally and the result text reappears in
+      // the next agentMessage block downstream.
       break;
     }
     case "content_block_delta": {
@@ -480,6 +515,15 @@ function handleStreamEvent(
           itemId: ref.id,
           delta: delta.thinking,
         });
+      } else if (
+        ref.type === "toolCall" &&
+        deltaKind === "input_json_delta" &&
+        typeof delta.partial_json === "string"
+      ) {
+        // Accumulate the streaming tool-input JSON. The Anthropic SDK
+        // doesn't define a codex-style per-arg delta event we can
+        // mirror, so we just store the partial and parse on stop.
+        ref.partialJson += delta.partial_json;
       }
       break;
     }
@@ -489,10 +533,39 @@ function handleStreamEvent(
       const ref = blocks.get(idx);
       if (!ref) return;
       blocks.delete(idx);
-      const finalItem =
-        ref.type === "agentMessage"
-          ? makeAgentMessageItem(ref.id, ref.buffer)
-          : makeReasoningItem(ref.id, ref.buffer);
+      let finalItem: ThreadItem;
+      switch (ref.type) {
+        case "agentMessage":
+          finalItem = makeAgentMessageItem(ref.id, ref.buffer);
+          break;
+        case "reasoning":
+          finalItem = makeReasoningItem(ref.id, ref.buffer);
+          break;
+        case "toolCall": {
+          // Parse the accumulated input JSON. Empty string is valid
+          // (no-arg tool); JSON.parse on "" throws so guard.
+          let args: unknown = null;
+          if (ref.partialJson.trim().length > 0) {
+            try {
+              args = JSON.parse(ref.partialJson);
+            } catch {
+              // Malformed JSON shouldn't crash the turn; surface raw text.
+              args = { _rawPartialJson: ref.partialJson };
+            }
+          }
+          finalItem = makeNativeToolCallItem({
+            id: ref.id,
+            tool: ref.name,
+            args,
+            // Status is "completed" from the LLM's perspective (it finished
+            // describing the tool call). Actual execution happens inside
+            // the SDK between turns; the result reappears in the next
+            // assistant text block downstream.
+            status: "completed",
+          });
+          break;
+        }
+      }
       turn.items.push(finalItem);
       notify("item/completed", {
         threadId: meta.id,
@@ -586,6 +659,43 @@ function coerceToolResponse(raw: unknown): DynamicToolCallResponse {
   return {
     contentItems: [{ type: "inputText", text: "Tool returned an unrecognized response shape." }],
     success: false,
+  };
+}
+
+/**
+ * Native Claude SDK tool calls (Bash, Read, Edit, etc.) are projected
+ * onto codex's `toolCall` item type so the bridge projector recognizes
+ * them via isToolItem and fires stream:"tool" events to channel
+ * renderers (Discord progress mode, etc.). Mirrors makeDynamicToolCallItem
+ * but for the native-SDK side; we don't carry contentItems/success/
+ * durationMs because the SDK handles execution accounting internally
+ * and the result reappears in the next assistant text block.
+ */
+function makeNativeToolCallItem(opts: {
+  id: string;
+  tool: string;
+  args: unknown;
+  status: "running" | "completed" | "failed";
+}): ThreadItem {
+  return {
+    id: opts.id,
+    type: "toolCall",
+    title: null,
+    status: opts.status,
+    name: opts.tool,
+    tool: opts.tool,
+    server: null,
+    command: null,
+    cwd: null,
+    query: null,
+    aggregatedOutput: null,
+    text: "",
+    changes: [],
+    namespace: null,
+    arguments: (opts.args ?? null) as ThreadItem["arguments"],
+    contentItems: null,
+    success: null,
+    durationMs: null,
   };
 }
 
