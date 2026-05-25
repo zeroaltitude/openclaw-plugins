@@ -16,11 +16,14 @@ openclaw-claude/
 binary speaks JSON-RPC 2.0 over stdio (mirroring the codex-app-server
 protocol) and wraps [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
 
-The matching client lives **in-tree** in the OpenClaw fork at
-[`extensions/claude/src/app-server/`](https://github.com/openclaw/openclaw)
-on `feat/claude-app-server-extension`. The in-tree client is what
+The matching client lives **in-tree** in the
+[`zeroaltitude/openclaw`](https://github.com/zeroaltitude/openclaw)
+fork of the upstream OpenClaw repo, on branch
+[`feat/claude-app-server-extension`](https://github.com/zeroaltitude/openclaw/tree/feat/claude-app-server-extension)
+under `extensions/claude/src/app-server/`. That in-tree client is what
 `openclaw` builds + ships; this repository only owns the external
-server.
+server. The branch will be upstreamed to `openclaw/openclaw` once the
+PR lands.
 
 ## Status
 
@@ -34,7 +37,7 @@ server.
 
 ```
 OpenClaw gateway
-  └─► extensions/claude/src/app-server/  (in-tree bridge — openclaw repo)
+  └─► extensions/claude/src/app-server/  (in-tree bridge — zeroaltitude/openclaw fork)
         └─► JSON-RPC 2.0 over stdio
               └─► openclaw-claude-bridge  (this repo's server/)
                     └─► @anthropic-ai/claude-agent-sdk
@@ -52,7 +55,7 @@ plugin form is ever needed.
 cd server
 npm install
 npm run build
-npm test            # 96 tests
+npm test            # 101 tests
 node bin/openclaw-claude-bridge.mjs   # run the server directly
 ```
 

@@ -6,10 +6,11 @@ drive Claude turns through the same harness pattern it uses for OpenAI
 Codex (`@openai/codex`).
 
 > **Fork-preview package.** Published under `@zeroaltitude` while the
-> bridge ships under `@openclaw/claude` in the upstream OpenClaw fork at
-> [openclaw/openclaw#feat/claude-app-server-extension](https://github.com/openclaw/openclaw).
-> Expected to migrate to `@openclaw/openclaw-claude-bridge` when the
-> upstream PR lands and OpenClaw maintainers publish under the
+> bridge lives on a `zeroaltitude/openclaw` fork of the upstream
+> OpenClaw repo, in branch
+> [feat/claude-app-server-extension](https://github.com/zeroaltitude/openclaw/tree/feat/claude-app-server-extension).
+> Expected to migrate to `@openclaw/openclaw-claude-bridge` once
+> upstream OpenClaw maintainers merge the PR and publish under the
 > `@openclaw` scope.
 
 ## Install
@@ -57,7 +58,7 @@ OpenClaw fork and is what spawns this server. Two-piece architecture:
 
 | Component | Where | Package |
 |---|---|---|
-| In-tree client bridge (ships with OpenClaw) | `openclaw/openclaw` fork | `@openclaw/claude` (bundled extension) |
+| In-tree client bridge (ships with OpenClaw) | `zeroaltitude/openclaw` fork | `@openclaw/claude` (bundled extension) |
 | **JSON-RPC server (this package)** | `openclaw/openclaw-plugins/openclaw-claude/server/` | `@zeroaltitude/openclaw-claude-bridge` |
 
 The extension's `src/app-server/` directory mirrors the codex
