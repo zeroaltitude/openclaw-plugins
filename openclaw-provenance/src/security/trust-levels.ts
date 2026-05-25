@@ -161,6 +161,29 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   edit: "trusted",
   exec: "trusted",
   process: "trusted",
+
+  // ── Claude SDK native tools (trusted: agent-local primitives) ────
+  // Output trust is *not* the same as execute trust. These tools'
+  // outputs are under user control via OpenClaw's execute management
+  // system (tool-policy allow/disallow, sandbox modes, approval
+  // gates). The provenance plugin defers the "should this tool run?"
+  // question to that system and only judges where output came from
+  // for downstream context-influence purposes. For agent-local file
+  // edits / shell exec / search / planning, the output's origin is
+  // the agent's own execution context — trusted-by-default is the
+  // right architectural answer. Web tools (WebFetch/WebSearch) stay
+  // untrusted because their output crosses a real trust boundary.
+  Bash: "trusted",
+  Glob: "trusted",
+  Grep: "trusted",
+  MultiEdit: "trusted",
+  NotebookEdit: "trusted",
+  NotebookRead: "trusted",
+  TodoWrite: "trusted",
+  Task: "trusted", // codex parallel: sessions_spawn (also trusted above)
+  ExitPlanMode: "trusted",
+  ListMcpResourcesTool: "trusted",
+  ReadMcpResourceTool: "trusted",
   tts: "trusted",
   cron: "trusted",
   sessions_spawn: "trusted",
@@ -218,6 +241,9 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // ── Untrusted / web ───────────────────────────────────────────────
   web_fetch: "untrusted",
   web_search: "untrusted",
+  // Claude SDK uses CamelCase tool names for these:
+  WebFetch: "untrusted",
+  WebSearch: "untrusted",
   browser: "untrusted",
 };
 
