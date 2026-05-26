@@ -553,6 +553,24 @@ function handleStreamEvent(
               args = { _rawPartialJson: ref.partialJson };
             }
           }
+          // Surface an item/updated mid-stream so the bridge can re-emit
+          // the tool with full args before the call completes. The initial
+          // item/started fired at content_block_start with args:null (the
+          // LLM hadn't streamed the input JSON yet), so channel renderers
+          // showed "🛠️ Bash" with no command detail. With this update they
+          // can refresh to "🛠️ Bash <command>" once the input is resolved
+          // — matching codex's per-tool command line.
+          const updatedItem = makeNativeToolCallItem({
+            id: ref.id,
+            tool: ref.name,
+            args,
+            status: "running",
+          });
+          notify("item/updated", {
+            threadId: meta.id,
+            turnId: turn.turnId,
+            item: updatedItem,
+          });
           finalItem = makeNativeToolCallItem({
             id: ref.id,
             tool: ref.name,
