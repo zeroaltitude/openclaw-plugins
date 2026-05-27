@@ -182,9 +182,27 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   TodoWrite: "trusted",
   Task: "trusted", // codex parallel: sessions_spawn (also trusted above)
   ExitPlanMode: "trusted",
-  // Claude Code SDK harness-internal tools — not external MCP, not user data
+  // Claude Code SDK harness-internal tools — not external MCP, not user data.
+  // These are harness primitives whose output is agent-local state, owner input,
+  // or schedule/task metadata — none cross an external trust boundary.
   Agent: "trusted",       // native subagent tool (inline reasoning, not cross-agent)
   ToolSearch: "trusted",  // deferred tool schema loader (returns tool definitions, not external content)
+  AskUserQuestion: "trusted", // owner's answer to an agent-posed question — owner input, not external content
+  EnterPlanMode: "trusted",   // plan-mode lifecycle (matches ExitPlanMode)
+  EnterWorktree: "trusted",   // worktree lifecycle — harness state transition
+  ExitWorktree: "trusted",
+  TaskCreate: "trusted",      // subagent task management; subagents are agent-local
+  TaskGet: "trusted",
+  TaskList: "trusted",
+  TaskOutput: "trusted",      // returns agent-local subagent results
+  TaskStop: "trusted",
+  TaskUpdate: "trusted",
+  CronCreate: "trusted",      // schedule management (matches the cron tool)
+  CronDelete: "trusted",
+  CronList: "trusted",
+  Monitor: "trusted",         // background process/condition watcher; output is status
+  PushNotification: "trusted",// sends a notification; output is an ack
+  RemoteTrigger: "trusted",   // harness primitive to trigger remote actions; owner-controlled
   ListMcpResourcesTool: "trusted",
   ReadMcpResourceTool: "trusted",
   tts: "trusted",
