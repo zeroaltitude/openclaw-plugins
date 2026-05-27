@@ -182,6 +182,9 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   TodoWrite: "trusted",
   Task: "trusted", // codex parallel: sessions_spawn (also trusted above)
   ExitPlanMode: "trusted",
+  // Claude Code SDK harness-internal tools — not external MCP, not user data
+  Agent: "trusted",       // native subagent tool (inline reasoning, not cross-agent)
+  ToolSearch: "trusted",  // deferred tool schema loader (returns tool definitions, not external content)
   ListMcpResourcesTool: "trusted",
   ReadMcpResourceTool: "trusted",
   tts: "trusted",
@@ -238,6 +241,19 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   gog: "external", // email/calendar content
   image: "external", // analyzing external images
 
+  // ── Generative media (trusted: output is model-generated, not fetched externally) ──
+  image_generate: "trusted",
+  music_generate: "trusted",
+  video_generate: "trusted",
+
+  // ── Runtime execution (trusted: agent-local, same as exec/process) ────────
+  code_execution: "trusted",
+
+  // ── External social / web ─────────────────────────────────────────────────
+  // x_search returns X/Twitter content — user-generated external content,
+  // same trust bucket as gog/message (known external source, not raw web crawl).
+  x_search: "external",
+
   // ── Untrusted / web ───────────────────────────────────────────────
   web_fetch: "untrusted",
   web_search: "untrusted",
@@ -271,6 +287,14 @@ export const DEFAULT_TOOL_TRUST = DEFAULT_TOOL_OUTPUT_TAINTS;
 // integration code (the claude extension's dynamic-tools bridge and codex's
 // own app server). Adding a third-party MCP server's tools would require
 // explicit overrides via the `toolOutputTaints` config block.
+//
+// Note: mcp__claude_ai__* is intentionally absent from this list. That
+// namespace includes external productivity integrations (Gmail, Calendar,
+// Slack, Granola, etc.) whose outputs contain real external data — email
+// bodies, calendar events, Slack messages — and should remain untrusted
+// or external. Blanket-trusting the whole namespace would suppress taint
+// on genuine external content. Tools in that namespace that are truly
+// internal can be added to DEFAULT_TOOL_OUTPUT_TAINTS individually.
 const MCP_PREFIX_DEFAULTS: ReadonlyArray<[string, TrustLevel]> = [
   ["mcp__openclaw__", "trusted"],
   ["mcp__codex_apps__", "trusted"],
@@ -278,24 +302,27 @@ const MCP_PREFIX_DEFAULTS: ReadonlyArray<[string, TrustLevel]> = [
 
 // ── Taint policy ────────────────────────────────────────────────────────────
 
-export type TaintPolicyMode = "allow" | "confirm" | "restrict";
+// "confirm" is accepted on input for backward compatibility but normalized to
+// "restrict" (see normalizePolicyMode in policy-engine.ts). Two canonical modes:
+// allow (run) and restrict (block, owner-overridable via /approve-exec).
+export type TaintPolicyMode = "allow" | "restrict" | "confirm";
 
 export interface TaintPolicyConfig {
   /** Policy for trusted content — system, owner, local (default: allow) */
   trusted?: TaintPolicyMode;
-  /** Policy for shared/cross-agent data (default: confirm) */
+  /** Policy for shared/cross-agent data (default: restrict) */
   shared?: TaintPolicyMode;
-  /** Policy for external sources (default: confirm) */
+  /** Policy for external sources (default: restrict) */
   external?: TaintPolicyMode;
-  /** Policy for untrusted content (default: confirm) */
+  /** Policy for untrusted content (default: restrict) */
   untrusted?: TaintPolicyMode;
 }
 
 export const DEFAULT_TAINT_POLICY: Required<TaintPolicyConfig> = {
   trusted: "allow",
-  shared: "confirm",
-  external: "confirm",
-  untrusted: "confirm",
+  shared: "restrict",
+  external: "restrict",
+  untrusted: "restrict",
 };
 
 /**

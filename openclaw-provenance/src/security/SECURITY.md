@@ -63,11 +63,13 @@ Across batches: enforcement is deterministic (gate reads updated `maxTaint`).
 
 ## Policy Modes
 
+Two modes (the legacy `confirm` mode was removed 2026-05-27; any `confirm` in
+config is normalized to `restrict`):
+
 | Mode | Behavior |
 |------|----------|
 | `allow` | No restrictions. Tools available normally. |
-| `confirm` | Tools blocked until owner approves (`.approve <tool>` or `.approve all`). |
-| `restrict` | Tools silently removed from tool list. No approval possible — use `.reset-trust`. |
+| `restrict` | Tool blocked, but the owner may override it for the session via `/approve-exec <tool>` (or `/approve-exec all`) from a trusted DM. `/reset-trust` clears the taint entirely. |
 
 ### Taint Policy
 
@@ -77,9 +79,9 @@ Maps each trust level to a mode. Must be monotonically non-decreasing in strictn
 {
   "taintPolicy": {
     "trusted": "allow",
-    "shared": "confirm",
-    "external": "confirm",
-    "untrusted": "confirm"
+    "shared": "restrict",
+    "external": "restrict",
+    "untrusted": "restrict"
   }
 }
 ```

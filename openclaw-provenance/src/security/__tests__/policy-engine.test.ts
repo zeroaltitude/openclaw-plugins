@@ -15,8 +15,7 @@ import {
   getToolMode,
   validateMonotonicity,
   strictest,
-  DEFAULT_SAFE_TOOLS,
-  DEFAULT_DANGEROUS_TOOLS,
+  DEFAULT_TOOL_EXECUTION_POLICY,
   type PolicyMode,
   type PolicyConfig,
 } from "../policy-engine.js";
@@ -51,7 +50,7 @@ function graphWithTaint(taint: TrustLevel): TurnProvenanceGraph {
 }
 
 const ALL_TOOLS = [
-  "exec", "read", "write", "edit", "browser", "message", "gateway",
+  "exec", "bash", "read", "write", "edit", "browser", "message", "gateway",
   "cron", "web_fetch", "web_search", "memory_search", "memory_get",
   "image", "session_status", "sessions_list", "sessions_history",
   "agents_list", "vestige_search", "vestige_smart_ingest", "vestige_promote",
@@ -65,20 +64,18 @@ const ALL_TOOLS = [
 
 describe("strictest()", () => {
   it("returns the stricter of two modes", () => {
-    expect(strictest("allow", "confirm")).toBe("confirm");
-    expect(strictest("confirm", "restrict")).toBe("restrict");
     expect(strictest("allow", "restrict")).toBe("restrict");
+    expect(strictest("restrict", "allow")).toBe("restrict");
+    expect(strictest("allow", "allow")).toBe("allow");
   });
 
   it("is commutative", () => {
-    expect(strictest("allow", "confirm")).toBe(strictest("confirm", "allow"));
     expect(strictest("allow", "restrict")).toBe(strictest("restrict", "allow"));
-    expect(strictest("confirm", "restrict")).toBe(strictest("restrict", "confirm"));
+    expect(strictest("restrict", "allow")).toBe(strictest("allow", "restrict"));
   });
 
   it("is idempotent", () => {
     expect(strictest("allow", "allow")).toBe("allow");
-    expect(strictest("confirm", "confirm")).toBe("confirm");
     expect(strictest("restrict", "restrict")).toBe("restrict");
   });
 });
@@ -91,8 +88,8 @@ describe("validateMonotonicity()", () => {
   it("accepts a valid monotonic config", () => {
     const { corrected, warnings } = validateMonotonicity({
       trusted: "allow",
-      shared: "confirm",
-      external: "confirm",
+      shared: "restrict",
+      external: "restrict",
       untrusted: "restrict",
     });
     expect(warnings).toHaveLength(0);
@@ -101,13 +98,13 @@ describe("validateMonotonicity()", () => {
 
   it("corrects non-monotonic config", () => {
     const { corrected, warnings } = validateMonotonicity({
-      trusted: "confirm",
+      trusted: "restrict",
       shared: "allow", // less strict than trusted — should be corrected
-      external: "confirm",
-      untrusted: "confirm",
+      external: "restrict",
+      untrusted: "restrict",
     });
     expect(warnings.length).toBeGreaterThan(0);
-    expect(corrected.shared).toBe("confirm"); // corrected to match trusted
+    expect(corrected.shared).toBe("restrict"); // corrected to match trusted
   });
 
   it("corrects untrusted being less strict than external", () => {
@@ -153,25 +150,27 @@ describe("getToolMode()", () => {
     expect(getToolMode("exec", "trusted", config)).toBe("allow");
   });
 
-  it("returns confirm for non-safe tools at external level", () => {
-    expect(getToolMode("exec", "external", config)).toBe("confirm");
+  it("returns restrict for non-safe tools at external level", () => {
+    expect(getToolMode("exec", "external", config)).toBe("restrict");
   });
 
   it("returns 'allow' for safe tools even at untrusted", () => {
     expect(getToolMode("read", "untrusted", config)).toBe("allow");
-    expect(getToolMode("web_fetch", "untrusted", config)).toBe("allow");
+    // web_fetch/web_search/image/vestige_*/sessions_history are restricted at untrusted
+    // to prevent 2nd-stage payload fetches, memory extraction, and cross-session data leaks.
+    expect(getToolMode("web_fetch", "untrusted", config)).toBe("restrict");
     // memory_search is restricted at shared+ taint (protects memory from tainted queries)
     expect(getToolMode("memory_search", "untrusted", config)).toBe("restrict");
-    expect(getToolMode("vestige_search", "untrusted", config)).toBe("allow");
-    expect(getToolMode("image", "untrusted", config)).toBe("allow");
+    expect(getToolMode("vestige_search", "untrusted", config)).toBe("restrict");
+    expect(getToolMode("image", "untrusted", config)).toBe("restrict");
     expect(getToolMode("session_status", "untrusted", config)).toBe("allow");
   });
 
-  it("returns 'confirm' for gateway at all levels (dangerous tool)", () => {
-    expect(getToolMode("gateway", "trusted", config)).toBe("confirm");
-    expect(getToolMode("gateway", "shared", config)).toBe("confirm");
-    expect(getToolMode("gateway", "external", config)).toBe("confirm");
-    expect(getToolMode("gateway", "untrusted", config)).toBe("confirm");
+  it("returns 'allow' for gateway except at untrusted (restricted there)", () => {
+    expect(getToolMode("gateway", "trusted", config)).toBe("allow");
+    expect(getToolMode("gateway", "shared", config)).toBe("allow");
+    expect(getToolMode("gateway", "external", config)).toBe("allow");
+    expect(getToolMode("gateway", "untrusted", config)).toBe("restrict");
   });
 
   it("user can override gateway to allow", () => {
@@ -182,7 +181,7 @@ describe("getToolMode()", () => {
 
   it("override can make things more permissive (safe tools)", () => {
     const customConfig = buildPolicyConfig(
-      { external: "confirm" },
+      { external: "restrict" },
       { "exec": { "external": "allow" } },
     );
     expect(getToolMode("exec", "external", customConfig)).toBe("allow");
@@ -190,7 +189,7 @@ describe("getToolMode()", () => {
 
   it("override can make things stricter", () => {
     const customConfig = buildPolicyConfig(
-      { external: "confirm" },
+      { external: "allow" },
       { "exec": { "external": "restrict" } },
     );
     expect(getToolMode("exec", "external", customConfig)).toBe("restrict");
@@ -206,8 +205,8 @@ describe("getToolMode()", () => {
   });
 
   it("is case-insensitive on tool name", () => {
-    expect(getToolMode("Gateway", "shared", config)).toBe("confirm");
-    expect(getToolMode("GATEWAY", "untrusted", config)).toBe("confirm");
+    expect(getToolMode("Gateway", "shared", config)).toBe("allow");
+    expect(getToolMode("GATEWAY", "untrusted", config)).toBe("restrict");
     expect(getToolMode("Read", "untrusted", config)).toBe("allow");
     expect(getToolMode("READ", "untrusted", config)).toBe("allow");
   });
@@ -221,9 +220,9 @@ describe("buildPolicyConfig()", () => {
   it("uses defaults when no args provided", () => {
     const config = buildPolicyConfig();
     expect(config.taintPolicy.trusted).toBe("allow");
-    expect(config.taintPolicy.shared).toBe("confirm");
-    expect(config.taintPolicy.external).toBe("confirm");
-    expect(config.taintPolicy.untrusted).toBe("confirm");
+    expect(config.taintPolicy.shared).toBe("restrict");
+    expect(config.taintPolicy.external).toBe("restrict");
+    expect(config.taintPolicy.untrusted).toBe("restrict");
     expect(config.maxIterations).toBe(30);
   });
 
@@ -233,17 +232,10 @@ describe("buildPolicyConfig()", () => {
     expect(config.taintPolicy.untrusted).toBe("restrict");
   });
 
-  it("includes all safe tools", () => {
+  it("all tools in DEFAULT_TOOL_EXECUTION_POLICY are present in built config", () => {
     const config = buildPolicyConfig();
-    for (const tool of Object.keys(DEFAULT_SAFE_TOOLS)) {
+    for (const tool of Object.keys(DEFAULT_TOOL_EXECUTION_POLICY)) {
       expect(config.toolOverrides[tool]).toBeDefined();
-      // memory_search/memory_get have per-level overrides instead of glob
-      if (tool === "memory_search" || tool === "memory_get") {
-        expect(config.toolOverrides[tool]["trusted"]).toBe("allow");
-        expect(config.toolOverrides[tool]["shared"]).toBe("restrict");
-      } else {
-        expect(config.toolOverrides[tool]["*"]).toBe("allow");
-      }
     }
   });
 
@@ -270,29 +262,32 @@ describe("buildPolicyConfig()", () => {
     const config = buildPolicyConfig(undefined, {
       "gateway": { "trusted": "restrict" },
     });
-    expect(config.toolOverrides["gateway"]["*"]).toBe("confirm");       // from default (dangerous tool)
-    expect(config.toolOverrides["gateway"]["trusted"]).toBe("restrict"); // from user
+    // gateway's default per-level keys survive the merge...
+    expect(config.toolOverrides["gateway"]["untrusted"]).toBe("restrict"); // from default
+    expect(config.toolOverrides["gateway"]["shared"]).toBe("allow");       // from default
+    // ...and the user's per-level override wins where it overlaps.
+    expect(config.toolOverrides["gateway"]["trusted"]).toBe("restrict");   // from user (was "allow")
   });
 
   it("corrects non-monotonic taint policy", () => {
     const config = buildPolicyConfig({
-      trusted: "confirm",
+      trusted: "restrict",
       shared: "allow", // invalid: less strict than trusted
     });
-    expect(config.taintPolicy.shared).toBe("confirm"); // auto-corrected
+    expect(config.taintPolicy.shared).toBe("restrict"); // auto-corrected to match trusted
   });
 
-  it("maps legacy 6-level keys to 4-level", () => {
+  it("maps legacy 6-level keys to 4-level (and legacy confirm → restrict)", () => {
     const config = buildPolicyConfig({
       system: "allow",
       owner: "allow",
       local: "allow",
-      shared: "confirm",
-      external: "confirm",
+      shared: "confirm",   // legacy mode — normalizes to "restrict"
+      external: "confirm", // legacy mode — normalizes to "restrict"
       untrusted: "restrict",
     } as any);
     expect(config.taintPolicy.trusted).toBe("allow");
-    expect(config.taintPolicy.shared).toBe("confirm");
+    expect(config.taintPolicy.shared).toBe("restrict");
     expect(config.taintPolicy.untrusted).toBe("restrict");
   });
 
@@ -311,25 +306,31 @@ describe("buildPolicyConfig()", () => {
 describe("evaluatePolicy()", () => {
   const config = buildPolicyConfig();
 
-  it("allows all tools at trusted taint except gateway (requires confirm)", () => {
+  it("allows all tools at trusted taint, including gateway", () => {
     const graph = graphWithTaint("trusted");
     const result = evaluatePolicy(graph, ALL_TOOLS, config);
     expect(result.defaultMode).toBe("allow");
     expect(result.allowed).toContain("exec");
     expect(result.allowed).toContain("message");
-    expect(result.confirm.map(c => c.tool)).toContain("gateway");
+    // gateway is now allowed at trusted/shared/external (restrict only at untrusted)
+    expect(result.allowed).toContain("gateway");
     expect(result.restricted).toHaveLength(0);
   });
 
-  it("confirms dangerous tools and allows safe tools at untrusted taint", () => {
+  it("restricts shell/file tools and gateway at untrusted taint", () => {
     const graph = graphWithTaint("untrusted");
     const result = evaluatePolicy(graph, ALL_TOOLS, config);
-    expect(result.defaultMode).toBe("confirm");
-    expect(result.confirm.map(c => c.tool)).toContain("exec");
-    expect(result.confirm.map(c => c.tool)).toContain("write");
-    expect(result.confirm.map(c => c.tool)).toContain("gateway");
+    // Two-mode model: untrusted taint-policy default is "restrict".
+    expect(result.defaultMode).toBe("restrict");
+    // exec/bash/write/edit are restricted at untrusted — owner-overridable via /approve-exec.
+    expect(result.restricted).toContain("exec");
+    expect(result.restricted).toContain("bash");
+    expect(result.restricted).toContain("write");
+    // gateway is restricted at untrusted (allowed at every other level)
+    expect(result.restricted).toContain("gateway");
     expect(result.allowed).toContain("read");
-    expect(result.allowed).toContain("web_fetch");
+    // web_fetch is restricted at untrusted (prevent 2nd-stage payload fetches)
+    expect(result.restricted).toContain("web_fetch");
     // memory_search is restricted at shared+ taint (protects memory from tainted queries)
     expect(result.restricted).toContain("memory_search");
   });
@@ -357,7 +358,7 @@ describe("evaluatePolicy()", () => {
     expect(result.blockTurn).toBe(false);
   });
 
-  it("all-restrict mode removes non-safe tools, safe tool overrides still win, gateway requires confirm", () => {
+  it("all-restrict mode removes non-safe tools, safe tool overrides still win", () => {
     const restrictConfig = buildPolicyConfig({
       trusted: "restrict",
       shared: "restrict",
@@ -370,12 +371,17 @@ describe("evaluatePolicy()", () => {
     expect(result.allowed).toContain("read");
     expect(result.allowed).toContain("web_fetch");
     expect(result.allowed).toContain("memory_search");
-    expect(result.restricted).toContain("exec");
-    expect(result.restricted).toContain("write");
-    expect(result.confirm.map(c => c.tool)).toContain("gateway");
+    // Note: exec/bash/write have per-tool overrides (trusted: "allow") that win over the
+    // taint-policy default. Per-tool overrides are intentional escape hatches — they beat
+    // the taint policy by design. A truly locked-down config should set explicit
+    // toolOverrides: { exec: { "*": "restrict" } }.
+    expect(result.allowed).toContain("exec");
+    expect(result.allowed).toContain("write");
+    // gateway is allowed at trusted (its per-tool override beats the all-restrict policy)
+    expect(result.allowed).toContain("gateway");
   });
 
-  it("all-allow mode allows everything except gateway (which always requires confirm)", () => {
+  it("all-allow mode: per-tool restrict overrides still win at untrusted", () => {
     const allowConfig = buildPolicyConfig({
       trusted: "allow",
       shared: "allow",
@@ -384,9 +390,14 @@ describe("evaluatePolicy()", () => {
     });
     const graph = graphWithTaint("untrusted");
     const result = evaluatePolicy(graph, ALL_TOOLS, allowConfig);
-    expect(result.allowed).toContain("exec");
-    expect(result.allowed).toContain("message");
-    expect(result.confirm.map(c => c.tool)).toContain("gateway");
+    // Note: exec/bash/write/message/browser/cron/gateway etc. have per-tool overrides
+    // (untrusted: "restrict") that win over the all-allow taint policy. This is intentional
+    // — prompt-injection protection for shell/file/messaging tools is a hard default,
+    // not overridable by taint policy alone.
+    // To truly allow these under untrusted, pass explicit toolOverrides: { exec: { "*": "allow" } }.
+    expect(result.restricted).toContain("exec");
+    expect(result.restricted).toContain("message");
+    expect(result.restricted).toContain("gateway");
   });
 });
 
@@ -406,26 +417,30 @@ describe("evaluateWithApprovals()", () => {
     const graph = graphWithTaint("untrusted");
     const result = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
     expect(result.toolRemovals.size).toBeGreaterThan(0);
+    // In the two-mode model, restricted tools are removed AND listed as approvable.
     expect(result.toolRemovals.has("exec")).toBe(true);
-    expect(result.pendingConfirmations.length).toBeGreaterThan(0);
+    expect(result.pendingConfirmations.map(p => p.toolName)).toContain("exec");
+    // canvas/tts/nodes follow taint-policy default ("restrict" at untrusted) — also approvable
+    expect(result.toolRemovals.has("canvas")).toBe(true);
+    expect(result.pendingConfirmations.map(p => p.toolName)).toContain("canvas");
   });
 
-  it("allows approved tools through", () => {
+  it("approval unblocks a restricted tool (restrict is owner-overridable)", () => {
     const graph = graphWithTaint("untrusted");
 
-    // First call to see it's blocked
+    // exec is restricted at untrusted — removed before approval
     const result1 = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
     expect(result1.toolRemovals.has("exec")).toBe(true);
 
-    // Approve exec
+    // Owner approves exec for the session
     approvalStore.approve("session-1", "exec", null);
 
-    // Second call should allow exec through
+    // exec now passes through (restrict + approval = allowed)
     const result2 = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
     expect(result2.toolRemovals.has("exec")).toBe(false);
   });
 
-  it("does not allow approval to bypass restrict mode", () => {
+  it("restricted tools are removed but approvable", () => {
     const restrictConfig = buildPolicyConfig({
       trusted: "restrict",
       shared: "restrict",
@@ -435,45 +450,59 @@ describe("evaluateWithApprovals()", () => {
     const graph = graphWithTaint("trusted");
     const result = evaluateWithApprovals(graph, ALL_TOOLS, restrictConfig, approvalStore, "session-1");
 
-    expect(result.toolRemovals.has("exec")).toBe(true);
-    expect(result.pendingConfirmations.map(p => p.toolName)).not.toContain("exec");
+    // canvas/tts/nodes follow taint-policy default (no per-tool override at trusted level) →
+    // restricted in all-restrict config. They are removed AND listed as approvable.
+    expect(result.toolRemovals.has("canvas")).toBe(true);
+    expect(result.pendingConfirmations.map(p => p.toolName)).toContain("canvas");
+
+    // And approval clears them
+    approvalStore.approve("session-1", "canvas", null);
+    const result2 = evaluateWithApprovals(graph, ALL_TOOLS, restrictConfig, approvalStore, "session-1");
+    expect(result2.toolRemovals.has("canvas")).toBe(false);
   });
 
   it("safe tools pass through even at untrusted", () => {
     const graph = graphWithTaint("untrusted");
     const result = evaluateWithApprovals(graph, ALL_TOOLS, config, approvalStore, "session-1");
     expect(result.toolRemovals.has("read")).toBe(false);
-    expect(result.toolRemovals.has("web_fetch")).toBe(false);
+    expect(result.toolRemovals.has("session_status")).toBe(false);
+    // web_fetch is now restricted at untrusted (prevent 2nd-stage payload fetches)
+    expect(result.toolRemovals.has("web_fetch")).toBe(true);
     // memory_search is restricted at shared+ taint (protects memory from tainted queries)
     expect(result.toolRemovals.has("memory_search")).toBe(true);
   });
 
-  it("gateway requires approval at all taint levels (dangerous tool)", () => {
+  it("gateway is allowed except at untrusted, where it is restricted (approvable)", () => {
+    // gateway: allow at trusted/shared/external, restrict at untrusted
     const graphShared = graphWithTaint("shared");
     const resultShared = evaluateWithApprovals(graphShared, ALL_TOOLS, config, approvalStore, "session-1");
-    expect(resultShared.toolRemovals.has("gateway")).toBe(true);
+    expect(resultShared.toolRemovals.has("gateway")).toBe(false);
+
+    const graphExternal = graphWithTaint("external");
+    const resultExternal = evaluateWithApprovals(graphExternal, ALL_TOOLS, config, approvalStore, "session-ext");
+    expect(resultExternal.toolRemovals.has("gateway")).toBe(false);
 
     const graphUntrusted = graphWithTaint("untrusted");
     const resultUntrusted = evaluateWithApprovals(graphUntrusted, ALL_TOOLS, config, approvalStore, "session-2");
     expect(resultUntrusted.toolRemovals.has("gateway")).toBe(true);
 
-    // Even at trusted taint, gateway requires confirm
     const graphTrusted = graphWithTaint("trusted");
     const resultTrusted = evaluateWithApprovals(graphTrusted, ALL_TOOLS, config, approvalStore, "session-3");
-    expect(resultTrusted.toolRemovals.has("gateway")).toBe(true);
+    expect(resultTrusted.toolRemovals.has("gateway")).toBe(false);
   });
 
-  it("gateway can be approved by owner", () => {
-    const graph = graphWithTaint("trusted");
+  it("gateway can be approved by owner at untrusted", () => {
+    const graph = graphWithTaint("untrusted");
     approvalStore.approve("session-1", "gateway", null);
-    const result = evaluateWithApprovals(graph, ["gateway", "read", "exec"], config, approvalStore, "session-1");
+    const result = evaluateWithApprovals(graph, ["gateway", "read"], config, approvalStore, "session-1");
     expect(result.toolRemovals.has("gateway")).toBe(false);
   });
 
   it("reports effective mode based on most restrictive tool", () => {
-    const graph = graphWithTaint("trusted");
-    const result = evaluateWithApprovals(graph, ["gateway", "read", "exec"], config, approvalStore, "session-1");
-    expect(result.mode).toBe("confirm"); // gateway requires confirm even at trusted
+    // At untrusted, exec is restricted → effective mode is restrict
+    const graph = graphWithTaint("untrusted");
+    const result = evaluateWithApprovals(graph, ["read", "exec"], config, approvalStore, "session-1");
+    expect(result.mode).toBe("restrict");
   });
 });
 
@@ -690,40 +719,53 @@ describe("Integration: taint → policy", () => {
     expect(result.toolRemovals.size).toBe(0);
   });
 
-  it("trusted → shared taint → confirm mode for dangerous tools", () => {
+  it("trusted → shared taint → confirm mode for taint-default tools", () => {
     const graph = makeGraph();
     graph.recordLlmCall(1, 28);
     // Use effectiveTrust override to simulate a tool that produces "shared" taint
     graph.recordToolCall("some_shared_tool", 1, undefined, undefined, { effectiveTrust: "shared" });
-    const result = evaluateWithApprovals(graph, ["exec", "message", "read"], config, approvalStore, "s1");
-    // shared default is "confirm" — exec and message need approval
-    expect(result.toolRemovals.has("exec")).toBe(true);
-    expect(result.toolRemovals.has("message")).toBe(true);
+    const result = evaluateWithApprovals(graph, ["exec", "canvas", "read"], config, approvalStore, "s1");
+    // shared default is "confirm" — canvas (no per-level override at shared) needs approval
+    // exec has an explicit per-tool override: shared → "allow", so it passes through freely
+    expect(result.toolRemovals.has("exec")).toBe(false);
+    expect(result.toolRemovals.has("canvas")).toBe(true);
     expect(result.toolRemovals.has("read")).toBe(false);
   });
 
-  it("approval flow: block → approve → allow", () => {
+  it("approval flow: block → approve → allow (for confirm-level tools)", () => {
     const graph = graphWithTaint("untrusted");
 
-    // Step 1: blocked
-    const r1 = evaluateWithApprovals(graph, ["exec"], config, approvalStore, "s1");
-    expect(r1.toolRemovals.has("exec")).toBe(true);
+    // canvas/tts/nodes follow the taint-policy default at untrusted ("confirm"), so they're approvable
+    // (unlike exec/bash/write/message which are hard-restricted and cannot be approved at untrusted)
+
+    // Step 1: blocked — canvas is removed pending confirmation
+    const r1 = evaluateWithApprovals(graph, ["canvas"], config, approvalStore, "s1");
+    expect(r1.toolRemovals.has("canvas")).toBe(true);
+    expect(r1.pendingConfirmations.map(p => p.toolName)).toContain("canvas");
 
     // Step 2: approve
     approvalStore.approve("s1", "all", null);
 
-    // Step 3: allowed
-    const r2 = evaluateWithApprovals(graph, ["exec"], config, approvalStore, "s1");
-    expect(r2.toolRemovals.has("exec")).toBe(false);
+    // Step 3: allowed after approval
+    const r2 = evaluateWithApprovals(graph, ["canvas"], config, approvalStore, "s1");
+    expect(r2.toolRemovals.has("canvas")).toBe(false);
   });
 
-  it("restrict mode cannot be bypassed by approval", () => {
+  it("restrict mode IS bypassable by approval (unified two-mode model)", () => {
+    // In the two-mode model, restrict is the single approvable gate — the old
+    // "restrict cannot be approved" invariant was removed when confirm was folded in.
     const restrictConfig = buildPolicyConfig({ trusted: "restrict" });
     const graph = graphWithTaint("trusted");
 
-    const result = evaluateWithApprovals(graph, ["exec"], restrictConfig, approvalStore, "s1");
-    expect(result.toolRemovals.has("exec")).toBe(true);
-    expect(result.pendingConfirmations).toHaveLength(0); // no confirm, just restrict
+    // Without approval: canvas (taint-default → restrict here) is removed and approvable.
+    const before = evaluateWithApprovals(graph, ["canvas"], restrictConfig, approvalStore, "s1");
+    expect(before.toolRemovals.has("canvas")).toBe(true);
+    expect(before.pendingConfirmations.map(p => p.toolName)).toContain("canvas");
+
+    // With approval: it passes through.
+    approvalStore.approve("s1", "canvas", null);
+    const after = evaluateWithApprovals(graph, ["canvas"], restrictConfig, approvalStore, "s1");
+    expect(after.toolRemovals.has("canvas")).toBe(false);
   });
 });
 

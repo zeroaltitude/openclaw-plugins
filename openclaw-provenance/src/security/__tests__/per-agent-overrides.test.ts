@@ -146,7 +146,10 @@ describe("Per-agent policy overrides", () => {
     expect(taintLog).toContain("trusted");
   });
 
-  it("agent with taintPolicy override allows exec at external taint", () => {
+  it("agent with taintPolicy+toolOverride allows exec at external taint", () => {
+    // exec now has a per-tool override: external → "confirm". To allow exec at external
+    // for a specific agent, both taintPolicy AND toolOverrides must be set. taintPolicy
+    // alone is insufficient because per-tool overrides beat the taint policy default.
     const logger = makeLogger();
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
@@ -164,6 +167,10 @@ describe("Per-agent policy overrides", () => {
           taintPolicy: {
             shared: "allow",
             external: "allow",
+          },
+          // Must also explicitly override exec's per-tool restriction at external
+          toolOverrides: {
+            exec: { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
           },
         },
       },
@@ -207,13 +214,7 @@ describe("Per-agent policy overrides", () => {
       sessionKey: "agent:tank:test2",
     });
 
-    // Debug: check what policy Tank actually got
-    const policyLogs = logger.logs.filter(l => l.includes("Taint:") || l.includes("Mode:") || l.includes("Removed:"));
-    // console.log("Tank policy logs:", policyLogs);
-    // console.log("All logs:", logger.logs);
-    // console.log("Result:", JSON.stringify(result));
-
-    // Tank's policy: external = allow, so no tools should be removed
+    // Tank's policy: external = allow + explicit exec toolOverride, so exec is not removed
     if (result?.tools) {
       const remainingNames = result.tools.map((t: any) => t.name);
       expect(remainingNames).toContain("exec");

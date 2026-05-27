@@ -1206,13 +1206,13 @@ export function registerSecurityHooks(
   // --- /trust-tool command ---
   // Add, remove, or list tool trust overrides in openclaw.json (with hot-reload).
   // Usage:
-  //   /trust-tool add <tool[.sub]> [--policy allow|confirm|restrict] [--output-taint <level>]
+  //   /trust-tool add <tool[.sub]> [--policy allow|restrict] [--output-taint <level>]
   //   /trust-tool remove <tool[.sub]> --policy | --output-taint | both
   //   /trust-tool list
   api.registerCommand?.({
     name: "trust-tool",
     description:
-      "Manage tool trust overrides. Usage: /trust-tool add <tool> [--policy allow|confirm|restrict] [--output-taint <level>] | remove <tool> --policy|--output-taint | list",
+      "Manage tool trust overrides. Usage: /trust-tool add <tool> [--policy allow|restrict] [--output-taint <level>] | remove <tool> --policy|--output-taint | list",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
@@ -1221,7 +1221,8 @@ export function registerSecurityHooks(
       const subcommand = parts[0]?.toLowerCase();
 
       const validLevels: TrustLevel[] = ["trusted", "shared", "external", "untrusted"];
-      const validModes: PolicyMode[] = ["allow", "confirm", "restrict"];
+      // "confirm" still accepted as legacy input (normalized to "restrict" on apply).
+      const validModes: string[] = ["allow", "restrict", "confirm"];
 
       if (subcommand === "list") {
         const current = readProvenanceConfig();
@@ -1249,7 +1250,7 @@ export function registerSecurityHooks(
         if (!tool) {
           return {
             text:
-              "Usage: `/trust-tool add <tool[.sub]> [--policy allow|confirm|restrict] [--output-taint <level>]`\n" +
+              "Usage: `/trust-tool add <tool[.sub]> [--policy allow|restrict] [--output-taint <level>]`\n" +
               "At least one of --policy or --output-taint is required.",
           };
         }
@@ -1392,7 +1393,7 @@ export function registerSecurityHooks(
       return {
         text:
           "Usage:\n" +
-          "  `/trust-tool add <tool[.sub]> [--policy allow|confirm|restrict] [--output-taint <level>]`\n" +
+          "  `/trust-tool add <tool[.sub]> [--policy allow|restrict] [--output-taint <level>]`\n" +
           "  `/trust-tool remove <tool[.sub]> --policy | --output-taint`\n" +
           "  `/trust-tool list`\n\n" +
           "Examples:\n" +
@@ -2150,27 +2151,19 @@ export function registerSecurityHooks(
         const agentId = sessionAgentMap.get(sessionKey);
         const effectivePolicyConfig = getPolicyConfig(agentId);
         const mode = getToolMode(toolKeyLower, graph.maxTaint, effectivePolicyConfig);
-        if (mode === "restrict") {
+        // Two-mode model: allow runs; restrict blocks UNLESS the owner has
+        // approved this tool for the session via /approve-exec (trusted DM).
+        // (The old separate "confirm" mode was folded into restrict+approval.)
+        if (mode === "restrict" && !approvalStore.isApproved(sessionKey, toolKeyLower)) {
           logger.warn(
             `[provenance:${sk}] 🛑 BLOCKED at execution layer (real-time re-eval): ${toolName} | taint: ${graph.maxTaint}`,
           );
           return {
             block: true,
             blockReason:
-              `Tool '${toolName}' is restricted at taint level '${graph.maxTaint}'.\n` +
-              `Use /reset-trust to clear taint, or review the context.`,
-          };
-        }
-        if (mode === "confirm" && !approvalStore.isApproved(sessionKey, toolKeyLower)) {
-          logger.warn(
-            `[provenance:${sk}] 🛑 BLOCKED at execution layer (real-time re-eval, needs approval): ${toolName} | taint: ${graph.maxTaint}`,
-          );
-          return {
-            block: true,
-            blockReason:
-              `Tool '${toolName}' requires approval at taint level '${graph.maxTaint}'.\n` +
-              `Approve: /approve-exec ${toolName}  (or /approve-exec all)\n` +
-              `Or use /reset-trust to clear all restrictions.`,
+              `Tool '${toolName}' is restricted because the session contains '${graph.maxTaint}' content.\n` +
+              `Approve for this session: /approve-exec ${toolName}  (or /approve-exec all) from a trusted DM.\n` +
+              `Or use /reset-trust to clear the taint entirely.`,
           };
         }
       }
