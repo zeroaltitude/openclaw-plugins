@@ -186,6 +186,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // These are harness primitives whose output is agent-local state, owner input,
   // or schedule/task metadata — none cross an external trust boundary.
   Agent: "trusted",       // native subagent tool (inline reasoning, not cross-agent)
+  Skill: "trusted",       // skill invocation — agent-local orchestration; external content a skill pulls in is tainted at the specific tool it calls (e.g. web_fetch)
   ToolSearch: "trusted",  // deferred tool schema loader (returns tool definitions, not external content)
   AskUserQuestion: "trusted", // owner's answer to an agent-posed question — owner input, not external content
   EnterPlanMode: "trusted",   // plan-mode lifecycle (matches ExitPlanMode)
