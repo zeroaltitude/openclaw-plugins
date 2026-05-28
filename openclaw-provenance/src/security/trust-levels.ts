@@ -232,6 +232,14 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   memory_search: "trusted",
   memory_get: "trusted",
 
+  // ── Additional OpenClaw native tools — owner-controlled output ──
+  // pdf: classified trusted on the basis that the owner only parses PDFs
+  // they have intentionally opened. If you ever ingest PDFs from external
+  // channels (email/Slack/web), reclassify this to "external".
+  pdf: "trusted",
+  meeting_notes: "trusted",
+  qqbot_remind: "trusted",
+
   // ── Shared (cross-agent memory) ───────────────────────────────────
   vestige_search: "trusted", // local cognitive memory; default trusted (override if shared)
   vestige_smart_ingest: "trusted", // write-only, output is confirmation
@@ -275,6 +283,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // ── Untrusted / web ───────────────────────────────────────────────
   web_fetch: "untrusted",
   web_search: "untrusted",
+  web_search_preview: "untrusted", // Codex preview variant of web_search
   // Claude SDK uses CamelCase tool names for these:
   WebFetch: "untrusted",
   WebSearch: "untrusted",
