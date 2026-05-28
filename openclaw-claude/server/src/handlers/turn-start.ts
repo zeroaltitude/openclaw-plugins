@@ -55,6 +55,7 @@ export function createTurnStartHandler(deps: TurnStartHandlerDeps) {
 
     const effort = parseEffort(params.effort);
     const modelOverride = typeof params.model === "string" ? params.model : undefined;
+    const fastMode = params.fastMode === true;
 
     const turnId = randomUUID();
     const startedAtMs = Date.now();
@@ -82,6 +83,7 @@ export function createTurnStartHandler(deps: TurnStartHandlerDeps) {
           turn: active,
           input,
           effort,
+          fastMode,
           modelOverride,
           collaborationMode: params.collaborationMode ?? null,
           sessionStore: deps.sessionStore,

@@ -314,6 +314,15 @@ export type TurnStartParams = JsonObject & {
   sandboxPolicy?: SandboxPolicy;
   serviceTier?: string | null;
   effort?: string | null;
+  /**
+   * Per-turn Fast mode opt-in. The bridge forwards this verbatim to the
+   * Claude Agent SDK's `settings.fastMode`. The bridge does not gate on
+   * model capability — the caller (e.g. the openclaw claude-bridge harness)
+   * is responsible for setting this only when the resolved model has
+   * `supportsFastMode: true`, and for handling the SDK's per-result
+   * `fast_mode_state: "off" | "cooldown" | "on"` reporting back.
+   */
+  fastMode?: boolean | null;
   collaborationMode?: TurnCollaborationMode | null;
 };
 

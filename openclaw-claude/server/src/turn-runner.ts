@@ -56,6 +56,15 @@ export type RunTurnInput = {
   turn: ActiveTurn;
   input: UserInput[];
   effort: ReasoningEffort | null;
+  /**
+   * Per-turn Fast mode opt-in. When true, the SDK is invoked with
+   * `settings: { fastMode: true }` so the model runs in the Claude Code Fast
+   * tier when the model supports it. Anthropic gates Fast mode per-model;
+   * the SDK reports a per-result `fast_mode_state: "off" | "cooldown" | "on"`.
+   * Bridges should only set this when their caller has already verified
+   * model capability — the bridge does not re-check `supportsFastMode`.
+   */
+  fastMode?: boolean | null;
   collaborationMode?: TurnCollaborationMode | null;
   modelOverride?: string;
   sessionStore: OpenClawSessionStore;
@@ -81,6 +90,7 @@ export type RunTurnResult = {
 export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   const { meta, turn, input, effort, sessionStore, notify, logger } = args;
   const model = args.modelOverride ?? meta.model;
+  const fastMode = args.fastMode === true;
   // Build the initial user message and seed a controllable queue. The queue
   // is closed immediately after the initial push so the SDK's iterator
   // exhausts cleanly — the SDK consumes input eagerly and blocks the whole
@@ -168,6 +178,14 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       ? { disallowedTools: mergedDisallowedNative }
       : {}),
     ...(Object.keys(subagentAliases).length > 0 ? { toolAliases: subagentAliases } : {}),
+    // Fast mode: when the caller has flagged this turn as Fast-eligible
+    // (caller is responsible for checking model capability and harness
+    // identity), thread it into the SDK's flag-settings layer. Settings.fastMode
+    // is the highest-priority user-controlled toggle, so it overrides any
+    // per-user persisted preference. We don't set fastModePerSessionOptIn —
+    // the bridge is stateless per-turn from the SDK's POV, and we want the
+    // caller's intent to be authoritative.
+    ...(fastMode ? { settings: { fastMode: true } } : {}),
   };
   if (hasHistory) {
     // On resume, sessionId is implied by `resume` — passing both can make
