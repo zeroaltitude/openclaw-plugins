@@ -319,6 +319,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   notify("turn/started", { threadId: meta.id, turnId: turn.turnId });
 
   const blocks = new Map<number, StreamItemRef>();
+  const agentMessageTracker: AgentMessageTracker = {};
 
   try {
     // Cast — SDK options surface is rich and the runtime accepts our subset.
@@ -328,12 +329,49 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       const m = msg as Record<string, unknown>;
       switch (m.type) {
         case "stream_event":
-          handleStreamEvent(m, blocks, turn, meta, notify);
+          handleStreamEvent(m, blocks, turn, meta, notify, agentMessageTracker);
           break;
-        case "assistant":
-          // Coalesced full message; our stream events already produced the
-          // items. Nothing extra to emit here.
+        case "assistant": {
+          // Coalesced full message; stream events already produced the
+          // items. Use `stop_reason` (only known at this point — message_delta
+          // fires after every content_block_stop in the message) to
+          // retroactively tag the trailing agentMessage block as the turn's
+          // final answer. Bridges can then deliver the in-channel
+          // transcript (commentary preambles) alongside the final reply
+          // as separate channel messages.
+          const assistantMessage = m.message as Record<string, unknown> | undefined;
+          const stopReason =
+            typeof assistantMessage?.stop_reason === "string" ? assistantMessage.stop_reason : null;
+          if (
+            stopReason === "end_turn" &&
+            agentMessageTracker.lastItemId &&
+            typeof agentMessageTracker.lastText === "string"
+          ) {
+            const finalAnswerItem = makeAgentMessageItem(
+              agentMessageTracker.lastItemId,
+              agentMessageTracker.lastText,
+              "final_answer",
+            );
+            // Update the in-memory turn.items so turn/completed carries
+            // the resolved phase too.
+            const idx = turn.items.findIndex((it) => it.id === finalAnswerItem.id);
+            if (idx >= 0) turn.items[idx] = finalAnswerItem;
+            notify("item/updated", {
+              threadId: meta.id,
+              turnId: turn.turnId,
+              item: finalAnswerItem,
+            });
+          }
+          // Always reset at the end of each assistant message so the
+          // next assistant message in this turn starts with a fresh
+          // tracker. Crucially, a tool-only continuation message (no
+          // text blocks) would otherwise keep the prior message's
+          // tracked item id and could mis-tag an earlier commentary
+          // block as final_answer when the eventual end_turn arrives.
+          agentMessageTracker.lastItemId = undefined;
+          agentMessageTracker.lastText = undefined;
           break;
+        }
         case "result":
           // Terminal — captured outside the loop via the for-await exit.
           break;
@@ -427,12 +465,26 @@ type StreamItemRef =
       partialJson: string;
     };
 
+/**
+ * Mutable tracker for the most recently completed agentMessage block in
+ * the current turn. The `assistant` SDK message arrives after all of its
+ * content_block_stop events; only then is `stop_reason` known. To tag the
+ * trailing agentMessage block with `phase: "final_answer"` retroactively,
+ * we keep its id/text so the runTurn loop can emit an `item/updated`
+ * notification when `stop_reason === "end_turn"` resolves.
+ */
+type AgentMessageTracker = {
+  lastItemId?: string;
+  lastText?: string;
+};
+
 function handleStreamEvent(
   msg: Record<string, unknown>,
   blocks: Map<number, StreamItemRef>,
   turn: ActiveTurn,
   meta: ThreadMeta,
   notify: (method: string, params: unknown) => void,
+  agentMessageTracker: AgentMessageTracker,
 ): void {
   const evt = msg.event as Record<string, unknown> | undefined;
   if (!evt || typeof evt.type !== "string") return;
@@ -536,7 +588,17 @@ function handleStreamEvent(
       let finalItem: ThreadItem;
       switch (ref.type) {
         case "agentMessage":
-          finalItem = makeAgentMessageItem(ref.id, ref.buffer);
+          // Default every agentMessage block to phase: "commentary".
+          // The trailing block of an assistant message with
+          // stop_reason === "end_turn" gets retroactively retagged
+          // "final_answer" via an item/updated emitted in the
+          // `assistant` case in runTurn. Bridges can therefore trust:
+          //   - phase: "commentary" => intermediate prose, route as
+          //     preamble/transcript content.
+          //   - phase: "final_answer" => the turn's deliverable reply.
+          finalItem = makeAgentMessageItem(ref.id, ref.buffer, "commentary");
+          agentMessageTracker.lastItemId = ref.id;
+          agentMessageTracker.lastText = ref.buffer;
           break;
         case "reasoning":
           finalItem = makeReasoningItem(ref.id, ref.buffer);
@@ -605,7 +667,13 @@ function numField(obj: Record<string, unknown>, name: string): number | undefine
   return typeof v === "number" ? v : undefined;
 }
 
-function makeAgentMessageItem(id: string, text: string): ThreadItem {
+type AgentMessagePhase = "commentary" | "final_answer" | null;
+
+function makeAgentMessageItem(
+  id: string,
+  text: string,
+  phase: AgentMessagePhase = null,
+): ThreadItem {
   return {
     id,
     type: "agentMessage",
@@ -622,8 +690,12 @@ function makeAgentMessageItem(id: string, text: string): ThreadItem {
     changes: [],
     // Codex's normalizeThreadItem injects these defaults for agentMessage —
     // mirror them so the response validates against codex's ThreadItem
-    // schema without round-trip normalization.
-    phase: null,
+    // schema without round-trip normalization. `phase` classifies the
+    // message as interim commentary (intermediate prose / progress
+    // narration) or final_answer (the assistant's terminal reply for the
+    // turn). Bridges use this to decide whether a block belongs in the
+    // in-channel transcript (preamble) or as the deliverable reply.
+    phase,
     memoryCitation: null,
   };
 }
