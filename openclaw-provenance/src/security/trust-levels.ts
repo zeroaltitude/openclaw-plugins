@@ -267,6 +267,24 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   gog: "external", // email/calendar content
   image: "external", // analyzing external images
 
+  // ── claude.ai MCP Slack integration ──────────────────────────────────────
+  // Read/search tools return Slack message content — same trust bucket as
+  // gog/message (known external source, not raw web crawl).
+  // Write/create tools return confirmation metadata only — no external content.
+  "mcp__claude_ai_Slack__slack_read_channel": "external",
+  "mcp__claude_ai_Slack__slack_read_thread": "external",
+  "mcp__claude_ai_Slack__slack_read_canvas": "external",
+  "mcp__claude_ai_Slack__slack_read_user_profile": "external",
+  "mcp__claude_ai_Slack__slack_search_channels": "external",
+  "mcp__claude_ai_Slack__slack_search_public": "external",
+  "mcp__claude_ai_Slack__slack_search_public_and_private": "external",
+  "mcp__claude_ai_Slack__slack_search_users": "external",
+  "mcp__claude_ai_Slack__slack_send_message": "trusted",
+  "mcp__claude_ai_Slack__slack_send_message_draft": "trusted",
+  "mcp__claude_ai_Slack__slack_schedule_message": "trusted",
+  "mcp__claude_ai_Slack__slack_create_canvas": "trusted",
+  "mcp__claude_ai_Slack__slack_update_canvas": "trusted",
+
   // ── Generative media (trusted: output is model-generated, not fetched externally) ──
   image_generate: "trusted",
   music_generate: "trusted",
