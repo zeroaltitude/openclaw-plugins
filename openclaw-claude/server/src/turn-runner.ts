@@ -399,10 +399,31 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
           logger.debug("[turn-runner] system event", { subtype: m.subtype });
           break;
         }
-        default:
-          // Unknown SDK event types (the SDK ships new ones regularly). Log
-          // at debug level — they're not errors, just unsupported here.
-          logger.debug("[turn-runner] unhandled SDK event", { type: m.type });
+        default: {
+          // Activity / unhandled SDK message. The SDK ships many message
+          // types beyond the content-bearing `stream_event` / `assistant` /
+          // `result` set (e.g. SDKTaskStartedMessage, SDKTaskProgressMessage,
+          // SDKTaskUpdatedMessage, SDKToolProgressMessage, SDKStatusMessage,
+          // SDKAPIRetryMessage, SDKHookStartedMessage, ...) during
+          // long-running operations like native Task subagent runs or
+          // tool execution. The bridge consumer's idle watchdog resets
+          // on any JSON-RPC notification carrying this turnId — without a
+          // heartbeat here, a Task subagent that runs for >90s (the default
+          // turnIdleTimeoutMs) silently kills the parent turn with
+          // "model did not produce a response before the model idle
+          // timeout." Emit a minimal turn/progress notification so the
+          // watchdog stays alive; the projector treats unknown methods as
+          // no-ops after resetting the timer, so content interpretation is
+          // unaffected.
+          const kind = typeof m.type === "string" ? m.type : "unknown";
+          notify("turn/progress", {
+            threadId: meta.id,
+            turnId: turn.turnId,
+            kind,
+          });
+          logger.debug("[turn-runner] activity SDK event", { type: kind });
+          break;
+        }
       }
       if (turn.abortController.signal.aborted) break;
     }
