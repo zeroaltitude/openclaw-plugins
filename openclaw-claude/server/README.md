@@ -9,9 +9,9 @@ Codex (`@openai/codex`).
 > bridge lives on a `zeroaltitude/openclaw` fork of the upstream
 > OpenClaw repo, in branch
 > [feat/claude-app-server-extension](https://github.com/zeroaltitude/openclaw/tree/feat/claude-app-server-extension).
-> Expected to migrate to `@openclaw/openclaw-claude-bridge` once
-> upstream OpenClaw maintainers merge the PR and publish under the
-> `@openclaw` scope.
+> May one day migrate to `@openclaw/openclaw-claude-bridge` if
+> upstream OpenClaw maintainers merge the PR and choose to publish
+> under the `@openclaw` scope.
 
 ## Install
 
