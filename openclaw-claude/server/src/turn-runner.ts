@@ -336,6 +336,38 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
 
   notify("turn/started", { threadId: meta.id, turnId: turn.turnId });
 
+  // Periodic heartbeat. The activity-message heartbeat in the `default`
+  // branch below only fires if the SDK emits something — but the SDK
+  // can go genuinely silent for long stretches: native Task subagents
+  // run entirely in a child process without bubbling progress to the
+  // parent's iterator on this SDK version, Anthropic API latency on
+  // cold-cache 1M-context reads can take minutes before the first
+  // content_block_start arrives, and slow tool executions block the
+  // iterator with no per-tool progress signal. The consumer's idle
+  // watchdog (extensions/claude/src/app-server/run-attempt.ts default
+  // 90s) tears the turn down with "model did not produce a response"
+  // when no JSON-RPC notifications flow. A 30s timer-based heartbeat
+  // guarantees a turn/progress notification regardless of SDK
+  // behavior; the projector treats unknown methods as no-ops after the
+  // matchesTurn check resets the timer, so content interpretation is
+  // unaffected. Cleared in the finally block below regardless of
+  // success or error path.
+  const HEARTBEAT_INTERVAL_MS = 30_000;
+  const heartbeatTimer = setInterval(() => {
+    try {
+      notify("turn/progress", {
+        threadId: meta.id,
+        turnId: turn.turnId,
+        kind: "heartbeat",
+      });
+    } catch (heartbeatErr) {
+      logger.debug("[turn-runner] heartbeat notify threw", {
+        error: heartbeatErr instanceof Error ? heartbeatErr.message : String(heartbeatErr),
+      });
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
+
   const blocks = new Map<number, StreamItemRef>();
   const agentMessageTracker: AgentMessageTracker = {};
 
@@ -473,6 +505,8 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       });
     }
     return { finalTurn };
+  } finally {
+    clearInterval(heartbeatTimer);
   }
 }
 
