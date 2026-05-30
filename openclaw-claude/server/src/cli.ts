@@ -14,11 +14,8 @@ import { createThreadUnsubscribeHandler } from "./handlers/thread-unsubscribe.js
 import { createTurnInterruptHandler } from "./handlers/turn-interrupt.js";
 import { createTurnStartHandler } from "./handlers/turn-start.js";
 import { createTurnSteerHandler } from "./handlers/turn-steer.js";
-import {
-  RPC_METHOD_NOT_FOUND,
-  type JsonValue,
-} from "./protocol.js";
-import { JsonRpcServer, RpcError } from "./server.js";
+import { type JsonValue } from "./protocol.js";
+import { JsonRpcServer } from "./server.js";
 import { OpenClawSessionStore } from "./session-store.js";
 import { DEFAULT_STATE_ROOT, ThreadStore, migrateLegacyStateRootIfNeeded } from "./thread-store.js";
 import { StdioTransport, type Logger } from "./transport.js";
@@ -70,6 +67,25 @@ export async function main(argv: string[]): Promise<void> {
     );
     return;
   }
+
+  // The bridge is a single shared process serving every concurrent turn for
+  // every agent. An unhandled REJECTION is almost always a benign background
+  // promise (e.g. a fire-and-forget notify); killing the shared process over it
+  // would fail every other agent's in-flight turn, so we log and keep serving.
+  process.on("unhandledRejection", (reason) => {
+    STDERR_LOGGER.error("unhandledRejection (kept alive)", reason);
+  });
+  // An uncaught EXCEPTION leaves the process in an undefined state. Staying alive
+  // is worse than exiting here: a turn whose async context threw out-of-band can
+  // be left orphaned while its 30s heartbeat keeps firing, which masks the dead
+  // turn from the consumer's idle watchdog and stalls it until the 30-min hard
+  // ceiling. Log and exit so the child dies cleanly and the consumer's
+  // onExit/child-exit path fails every in-flight turn fast (P0 #1) and the next
+  // turn respawns a healthy bridge.
+  process.on("uncaughtException", (err) => {
+    STDERR_LOGGER.error("uncaughtException; exiting for a clean respawn", err);
+    process.exit(1);
+  });
 
   STDERR_LOGGER.info(`${OPENCLAW_CLAUDE_BRIDGE_NAME} ${OPENCLAW_CLAUDE_BRIDGE_VERSION} listening on stdio`);
 
@@ -157,8 +173,3 @@ function registerStub(
   server.onMethod(method, () => resultFactory());
 }
 
-function registerNotImplemented(server: JsonRpcServer, method: string): void {
-  server.onMethod(method, () => {
-    throw new RpcError(RPC_METHOD_NOT_FOUND, `${method} not implemented in this build`);
-  });
-}
