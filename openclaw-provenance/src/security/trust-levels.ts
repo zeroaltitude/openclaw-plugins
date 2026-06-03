@@ -346,6 +346,25 @@ const MCP_PREFIX_DEFAULTS: ReadonlyArray<[string, TrustLevel]> = [
   ["mcp__codex_apps__", "trusted"],
 ];
 
+/** Recognized MCP namespace prefixes (OpenClaw bridge, codex app server). */
+export const KNOWN_MCP_PREFIXES: readonly string[] = MCP_PREFIX_DEFAULTS.map(
+  ([prefix]) => prefix,
+);
+
+/**
+ * If `toolName` carries a recognized MCP namespace prefix, return the bare
+ * name with that prefix stripped; otherwise return undefined. Used by composite
+ * key resolution so that bridge-routed composites (e.g. `mcp__openclaw__message`)
+ * still resolve their `.action` subtool keys instead of collapsing to the bare
+ * external default.
+ */
+export function stripKnownMcpPrefix(toolName: string): string | undefined {
+  for (const prefix of KNOWN_MCP_PREFIXES) {
+    if (toolName.startsWith(prefix)) return toolName.slice(prefix.length);
+  }
+  return undefined;
+}
+
 // ── Taint policy ────────────────────────────────────────────────────────────
 
 // "confirm" is accepted on input for backward compatibility but normalized to

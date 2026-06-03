@@ -9,7 +9,7 @@
  * User/plugin config only needed for custom tools.
  */
 
-import type { TrustLevel } from "./trust-levels.js";
+import { type TrustLevel, stripKnownMcpPrefix } from "./trust-levels.js";
 import type { PolicyMode, ToolOverride } from "./policy-engine.js";
 import {
   type ExecCommandRule,
@@ -157,6 +157,13 @@ export const DEFAULT_COMPOSITE_TOOL_OVERRIDES: Record<string, ToolOverride> = {
  *   1. Composite tools (action parameter) — e.g., browser.navigate, message.send
  *   2. Exec command pattern matching — e.g., exec.curl, exec.agent-browser-snapshot
  *   3. Fall through to bare tool name
+ *
+ * Composite/exec tools may arrive MCP-namespaced when routed through the
+ * OpenClaw bridge (e.g. `mcp__openclaw__message`). We strip the recognized
+ * prefix before resolution so subtool keys still resolve — otherwise every
+ * bridge-routed `message`/`browser`/`exec` op would collapse to the bare tool's
+ * external/trusted default, losing the send-vs-read (and exec command-pattern)
+ * taint distinction.
  */
 export function resolveToolKey(
   toolName: string,
@@ -164,15 +171,24 @@ export function resolveToolKey(
   compositeTools: Record<string, CompositeToolConfig>,
   execCommandRules?: ExecCommandRule[],
 ): string {
+  // Strip a recognized MCP prefix only when the bare name is a known composite
+  // or exec tool — avoids mis-applying OpenClaw semantics to unrelated MCP
+  // tools that happen to share a name.
+  const stripped = stripKnownMcpPrefix(toolName);
+  const baseName =
+    stripped && (compositeTools[stripped] || stripped === "exec")
+      ? stripped
+      : toolName;
+
   // 1. Standard composite tool resolution (action param)
-  const config = compositeTools[toolName];
+  const config = compositeTools[baseName];
   if (config) {
     const action = params[config.actionParam];
-    if (typeof action === "string") return `${toolName}.${action}`;
+    if (typeof action === "string") return `${baseName}.${action}`;
   }
 
   // 2. Exec command pattern matching
-  if (toolName === "exec") {
+  if (baseName === "exec") {
     return resolveExecToolKey(params, execCommandRules);
   }
 
