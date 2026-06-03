@@ -1619,6 +1619,7 @@
       const [owner, setOwner] = useState(ownerOptions?.[0] || "any");
       const [referencesText, setReferencesText] = useState("");
       const [targetDatetime, setTargetDatetime] = useState("");
+      const [status, setStatus] = useState("waiting_for_user");
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState(null);
 
@@ -1640,6 +1641,7 @@
               owner: owner.trim(),
               references,
               target_datetime: targetDatetime.trim(),
+              status,
             }),
           });
           const j = await r.json();
@@ -1717,6 +1719,18 @@
                 { value: priority, onChange: (e) => setPriority(e.target.value) },
                 ...PRIORITIES.map((p) =>
                   React.createElement("option", { key: p.v, value: p.v }, p.label),
+                ),
+              ),
+            ),
+            React.createElement(
+              "div",
+              null,
+              React.createElement("label", null, "Status"),
+              React.createElement(
+                "select",
+                { value: status, onChange: (e) => setStatus(e.target.value) },
+                ...STATUSES.map((s) =>
+                  React.createElement("option", { key: s, value: s }, s),
                 ),
               ),
             ),

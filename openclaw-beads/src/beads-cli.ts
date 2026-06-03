@@ -231,15 +231,24 @@ export async function createIssue(
   }
   const out = await runBd(args, opts);
   const trimmed = stripWarnings(out);
-  await refreshExport(opts);
-  // bd create --json returns the created issue
+  // bd create --json returns the created issue.
+  let created: BdIssue;
   try {
     const parsed = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) return parsed[0];
-    return parsed;
+    created = Array.isArray(parsed) ? parsed[0] : parsed;
   } catch {
+    await refreshExport(opts);
     throw new Error(`bd create returned non-JSON: ${trimmed.slice(0, 200)}`);
   }
+  // bd create has no --status flag (issues always start "open"). Honor a requested
+  // non-open status with a follow-up update so the UI can file work directly as
+  // e.g. waiting_for_user.
+  if (input.status && input.status !== "open" && created?.id) {
+    await runBd(["update", created.id, "--status", input.status], opts);
+    created = { ...created, status: input.status };
+  }
+  await refreshExport(opts);
+  return created;
 }
 
 /** Update fields on an existing issue. */
