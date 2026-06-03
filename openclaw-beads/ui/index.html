@@ -566,9 +566,14 @@
 
       const reaflowEdges = useMemo(() => {
         const ids = new Set(visibleIssues.map((i) => i.id));
+        // The deps API returns each edge as dependent → blocker
+        // (from = issue_id, to = depends_on_id). Render it blocker → dependent so
+        // the arrow points from the prerequisite to the work it unblocks, and ELK
+        // lays blockers out as upstream roots. The original API direction is kept
+        // in `data` so the edge-remove handler still calls the API correctly.
         return edges
           .filter((e) => ids.has(e.from) && ids.has(e.to))
-          .map((e, idx) => ({ id: `e-${idx}`, from: e.from, to: e.to }));
+          .map((e, idx) => ({ id: `e-${idx}`, from: e.to, to: e.from, data: { apiFrom: e.from, apiTo: e.to } }));
       }, [edges, visibleIssues]);
 
       const graphLayout = useMemo(() => {
@@ -921,7 +926,10 @@
                               const sourceId = dragSourceId;
                               setDragSourceId(null);
                               if (sourceId && sourceId !== issue.id) {
-                                linkIssues(sourceId, issue.id);
+                                // Arrows render blocker → dependent, so dragging from
+                                // the blocker (source) onto the work it unblocks
+                                // (target) means: target depends on source.
+                                linkIssues(issue.id, sourceId);
                               }
                             },
                           },
@@ -949,7 +957,7 @@
                           sel &&
                             React.createElement("div", {
                               className: "link-anchor",
-                              title: "Drag to another issue to link as dependency",
+                              title: "Drag onto an issue this one unblocks (that issue will depend on this one)",
                               draggable: true,
                               onClick: (e) => e.stopPropagation(),
                               onDragStart: (e) => {
@@ -968,8 +976,13 @@
                   edge: React.createElement(ReaEdge, {
                     style: { stroke: "#4b5563", strokeWidth: 1.5 },
                     onClick: async (_e, edge) => {
+                      // reaflow from/to are rendered blocker → dependent; the API
+                      // edit endpoint expects the dependency direction
+                      // (from = dependent, to = blocker), carried in edge.data.
+                      const apiFrom = edge?.data?.apiFrom ?? edge.to;
+                      const apiTo = edge?.data?.apiTo ?? edge.from;
                       const ok = confirm(
-                        `Remove dependency edge ${edge.from} → ${edge.to}?`,
+                        `Remove dependency edge ${apiFrom} → ${apiTo}?`,
                       );
                       if (!ok) return;
                       try {
@@ -978,7 +991,7 @@
                           {
                             method: "DELETE",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ from: edge.from, to: edge.to }),
+                            body: JSON.stringify({ from: apiFrom, to: apiTo }),
                           },
                         );
                         const j = await r.json();
