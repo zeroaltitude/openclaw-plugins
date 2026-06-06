@@ -221,6 +221,11 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   session_status: "trusted",
   subagents: "trusted",
   update_plan: "trusted",
+  // skill_workshop: built-in skill authoring tool (create/update/review/apply
+  // skill proposals). Output is proposal metadata, agent-local orchestration —
+  // same category as Skill above. External content a proposal pulls in is
+  // tainted at the specific tool that fetched it (e.g. web_fetch), not here.
+  skill_workshop: "trusted",
 
   // ── Local wiki vault (trusted: on-machine markdown vault, owner-controlled) ──
   wiki_status: "trusted",

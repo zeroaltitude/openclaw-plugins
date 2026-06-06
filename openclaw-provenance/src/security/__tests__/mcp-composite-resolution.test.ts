@@ -80,3 +80,17 @@ describe("resolveToolKey — MCP-prefixed composite tools", () => {
     expect(key).toBe("mcp__claude_ai_Google_Drive__read_file_content");
   });
 });
+
+describe("skill_workshop — trusted agent-local skill authoring tool", () => {
+  it("treats bare skill_workshop output as trusted", () => {
+    expect(getToolTrust("skill_workshop", taints)).toBe("trusted");
+  });
+
+  it("treats bridge-routed mcp__openclaw__skill_workshop as trusted", () => {
+    // Regression: skill_workshop was absent from defaults and fell through to
+    // the "untrusted" fallback, poisoning heartbeat/session watermarks.
+    expect(getToolTrust("mcp__openclaw__skill_workshop", taints)).toBe(
+      "trusted",
+    );
+  });
+});
