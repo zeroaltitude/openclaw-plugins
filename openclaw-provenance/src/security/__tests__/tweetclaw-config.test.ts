@@ -43,11 +43,28 @@ describe("TweetClaw custom plugin configuration", () => {
 
     expect(toolKey).toBe("tweetclaw./api/v1/x/tweets/search");
     expect(sourceUris).toEqual(["xquik://api/v1/x/tweets/search"]);
+
+    expect(
+      extractToolSourceUris(
+        toolKey,
+        "tweetclaw",
+        { path: ["/api/v1/x/tweets/search", "/api/v1/radar/trends"] },
+        buildUriExtractorMap({
+          tweetclaw: {
+            params: ["path"],
+            absolutePathScheme: "xquik",
+          },
+        }),
+      ),
+    ).toEqual([
+      "xquik://api/v1/x/tweets/search",
+      "xquik://api/v1/radar/trends",
+    ]);
   });
 
   it("lets exact TweetClaw read policies override the tool-wide fallback", () => {
     const config = buildPolicyConfig(undefined, {
-      tweetclaw: { "*": "confirm" },
+      tweetclaw: { "*": "restrict" },
       "tweetclaw./api/v1/x/tweets/search": { "*": "allow" },
     });
 
@@ -56,7 +73,7 @@ describe("TweetClaw custom plugin configuration", () => {
     ).toBe("allow");
     expect(
       getToolMode("tweetclaw./api/v1/x/tweets", "trusted", config),
-    ).toBe("confirm");
+    ).toBe("restrict");
   });
 
   it("uses bare TweetClaw output taint for endpoint composite keys", () => {

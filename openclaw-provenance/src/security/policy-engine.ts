@@ -85,6 +85,7 @@ export function getToolMode(
   const bareToolKey = toolKey.includes(".")
     ? toolKey.slice(0, toolKey.indexOf("."))
     : toolKey;
+  // Composite keys inherit the bare tool policy only after an exact match misses.
   const override =
     config.toolOverrides[toolKey] ?? config.toolOverrides[bareToolKey];
 

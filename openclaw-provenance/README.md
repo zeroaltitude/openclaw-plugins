@@ -19,7 +19,7 @@ Without provenance tracking, a single malicious email can:
 
 ### Relevance to the OpenClaw Threat Model
 
-We submitted [the first issue](https://github.com/openclaw/trust) to the `openclaw/trust` repository documenting how workspace files (TOOLS.md, AGENTS.md, etc.) are injected verbatim into the system prompt, creating a credential storage honeypot. Any prompt injection that gains tool access can read these files and exfiltrate secrets.
+An earlier OpenClaw trust report documented how workspace files (TOOLS.md, AGENTS.md, etc.) are injected verbatim into the system prompt, creating a credential storage honeypot. Any prompt injection that gains tool access can read these files and exfiltrate secrets.
 
 The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37 threats mapped to MITRE ATLAS. This plugin directly mitigates 8 of them and partially addresses 4 more:
 
@@ -183,7 +183,7 @@ external content, and asks before every other TweetClaw endpoint call:
             "tweetclaw": "external"
           },
           "toolOverrides": {
-            "tweetclaw": { "*": "confirm" },
+            "tweetclaw": { "*": "restrict" },
             "tweetclaw./api/v1/x/tweets/search": { "*": "allow" },
             "tweetclaw./api/v1/radar/trends": { "*": "allow" }
           },
@@ -198,6 +198,10 @@ external content, and asks before every other TweetClaw endpoint call:
   }
 }
 ```
+
+The bare `tweetclaw` catch-all is the fallback for every endpoint path that
+does not have an exact composite override. Keep it at `restrict` or `confirm`
+so new or unrecognized paths cannot silently inherit `allow`.
 
 The endpoint path `/api/v1/x/tweets/search` is recorded as
 `xquik://api/v1/x/tweets/search`, so URI trust can distinguish public reads
