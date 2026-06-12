@@ -424,51 +424,26 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
         }
         case "result": {
           // Terminal — emit token usage so consumers can track context growth.
-          // Prefer getContextUsage() which returns the Claude app's own context
-          // window accounting (totalTokens = real fill, apiUsage = last-call
-          // cache breakdown). Fall back to result.usage if the control call
-          // fails (e.g. older app versions that don't support it yet).
+          // The SDK's result.usage is a summarised view that may zero out
+          // cache_read_input_tokens. Read the last assistant record from the
+          // session JSONL instead — the SDK writes the real per-call Anthropic
+          // API usage there (including cache_read_input_tokens).
           const resultUsage = m.usage as Record<string, unknown> | undefined;
-          const queryObj = stream as { getContextUsage?: () => Promise<Record<string, unknown>> };
-          let ctxUsage: Record<string, unknown> | null = null;
-          if (typeof queryObj.getContextUsage === "function") {
-            try {
-              ctxUsage = await queryObj.getContextUsage();
-            } catch {
-              // Not fatal — fall through to result.usage path.
-            }
-          }
-          if (ctxUsage) {
-            const apiUsage = ctxUsage.apiUsage as Record<string, unknown> | null | undefined;
+          const messagesPath = args.threadStore.messagesPath(meta.id);
+          const transcriptUsage = messagesPath
+            ? await readLastAssistantUsage(messagesPath)
+            : undefined;
+          const effectiveUsage = transcriptUsage ?? resultUsage;
+          if (effectiveUsage) {
             notify("thread/tokenUsage/updated", {
               threadId: meta.id,
               turnId: turn.turnId,
               tokenUsage: {
                 last: {
-                  // Use apiUsage for per-call cache breakdown when available.
-                  input_tokens: apiUsage?.input_tokens ?? resultUsage?.input_tokens ?? 0,
-                  output_tokens: apiUsage?.output_tokens ?? resultUsage?.output_tokens ?? 0,
-                  cache_creation_input_tokens:
-                    apiUsage?.cache_creation_input_tokens ??
-                    resultUsage?.cache_creation_input_tokens ??
-                    0,
-                  // Use totalTokens as cache_read proxy: it represents the
-                  // full context fill the Claude app sees, which maps cleanly
-                  // to OpenClaw's promptTokens → totalTokens display path.
-                  cache_read_input_tokens: ctxUsage.totalTokens ?? 0,
-                },
-              },
-            });
-          } else if (resultUsage) {
-            notify("thread/tokenUsage/updated", {
-              threadId: meta.id,
-              turnId: turn.turnId,
-              tokenUsage: {
-                last: {
-                  input_tokens: resultUsage.input_tokens ?? 0,
-                  output_tokens: resultUsage.output_tokens ?? 0,
-                  cache_creation_input_tokens: resultUsage.cache_creation_input_tokens ?? 0,
-                  cache_read_input_tokens: resultUsage.cache_read_input_tokens ?? 0,
+                  input_tokens: effectiveUsage.input_tokens ?? 0,
+                  output_tokens: effectiveUsage.output_tokens ?? 0,
+                  cache_creation_input_tokens: effectiveUsage.cache_creation_input_tokens ?? 0,
+                  cache_read_input_tokens: effectiveUsage.cache_read_input_tokens ?? 0,
                 },
               },
             });
@@ -567,6 +542,41 @@ async function transcriptHasEntries(transcriptPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Read the usage object from the last assistant message in the SDK session
+ * JSONL. The SDK writes the real Anthropic API usage (including
+ * cache_read_input_tokens) to each assistant record; the streaming result
+ * message's usage field is a summarised view that may zero out cache counts.
+ */
+async function readLastAssistantUsage(
+  transcriptPath: string,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const content = await fs.readFile(transcriptPath, "utf-8");
+    const lines = content.split("\n").filter((l) => l.trim().length > 0);
+    // Scan from the end — the last assistant record is the one we want.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const line = lines[i];
+        if (!line) continue;
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.type === "assistant") {
+          const msg = entry.message as Record<string, unknown> | undefined;
+          const usage = msg?.usage as Record<string, unknown> | undefined;
+          if (usage && typeof usage.output_tokens === "number") {
+            return usage;
+          }
+        }
+      } catch {
+        // Malformed line — skip.
+      }
+    }
+  } catch {
+    // File missing or unreadable — fall through.
+  }
+  return undefined;
 }
 
 type StreamItemRef =
