@@ -422,9 +422,59 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
           agentMessageTracker.lastText = undefined;
           break;
         }
-        case "result":
-          // Terminal — captured outside the loop via the for-await exit.
+        case "result": {
+          // Terminal — emit token usage so consumers can track context growth.
+          // Prefer getContextUsage() which returns the Claude app's own context
+          // window accounting (totalTokens = real fill, apiUsage = last-call
+          // cache breakdown). Fall back to result.usage if the control call
+          // fails (e.g. older app versions that don't support it yet).
+          const resultUsage = m.usage as Record<string, unknown> | undefined;
+          const queryObj = stream as { getContextUsage?: () => Promise<Record<string, unknown>> };
+          let ctxUsage: Record<string, unknown> | null = null;
+          if (typeof queryObj.getContextUsage === "function") {
+            try {
+              ctxUsage = await queryObj.getContextUsage();
+            } catch {
+              // Not fatal — fall through to result.usage path.
+            }
+          }
+          if (ctxUsage) {
+            const apiUsage = ctxUsage.apiUsage as Record<string, unknown> | null | undefined;
+            notify("thread/tokenUsage/updated", {
+              threadId: meta.id,
+              turnId: turn.turnId,
+              tokenUsage: {
+                last: {
+                  // Use apiUsage for per-call cache breakdown when available.
+                  input_tokens: apiUsage?.input_tokens ?? resultUsage?.input_tokens ?? 0,
+                  output_tokens: apiUsage?.output_tokens ?? resultUsage?.output_tokens ?? 0,
+                  cache_creation_input_tokens:
+                    apiUsage?.cache_creation_input_tokens ??
+                    resultUsage?.cache_creation_input_tokens ??
+                    0,
+                  // Use totalTokens as cache_read proxy: it represents the
+                  // full context fill the Claude app sees, which maps cleanly
+                  // to OpenClaw's promptTokens → totalTokens display path.
+                  cache_read_input_tokens: ctxUsage.totalTokens ?? 0,
+                },
+              },
+            });
+          } else if (resultUsage) {
+            notify("thread/tokenUsage/updated", {
+              threadId: meta.id,
+              turnId: turn.turnId,
+              tokenUsage: {
+                last: {
+                  input_tokens: resultUsage.input_tokens ?? 0,
+                  output_tokens: resultUsage.output_tokens ?? 0,
+                  cache_creation_input_tokens: resultUsage.cache_creation_input_tokens ?? 0,
+                  cache_read_input_tokens: resultUsage.cache_read_input_tokens ?? 0,
+                },
+              },
+            });
+          }
           break;
+        }
         case "system": {
           // Permission denials and other system events will be wired in phase 7.
           // Until then, leave a debug breadcrumb for visibility.
