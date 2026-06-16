@@ -44,6 +44,13 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "message.poll": "trusted",
   "message.emoji-upload": "trusted",
   "message.sticker-upload": "trusted",
+  // upload-file pushes a LOCAL file out to a channel; its output is a delivery
+  // receipt (message id + channel id), not inbound external content — same
+  // category as message.send / emoji-upload above. Without this entry the key
+  // falls through to the unknown-tool "untrusted" default, which silently
+  // taints the session every time the agent uploads (a chart, a report, etc.)
+  // and then gates further message ops. (Sibling of the send/* output actions.)
+  "message.upload-file": "trusted",
   "message.sticker": "trusted",
   "message.set-presence": "trusted",
   "message.voice-status": "trusted",

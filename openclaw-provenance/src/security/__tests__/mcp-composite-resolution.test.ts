@@ -28,6 +28,29 @@ describe("resolveToolKey — MCP-prefixed composite tools", () => {
     expect(getToolTrust(key, taints)).toBe("trusted");
   });
 
+  it("resolves message.upload-file to a trusted key (outbound send, not external)", () => {
+    const key = resolveToolKey(
+      "message",
+      { action: "upload-file" },
+      compositeTools,
+    );
+    expect(key).toBe("message.upload-file");
+    // Regression: upload-file was absent from the composite map and fell
+    // through to the unknown-tool "untrusted" default, silently tainting the
+    // session on every outbound upload and gating further message ops.
+    expect(getToolTrust(key, taints)).toBe("trusted");
+  });
+
+  it("resolves bridge-routed mcp__openclaw__message upload-file as trusted", () => {
+    const key = resolveToolKey(
+      "mcp__openclaw__message",
+      { action: "upload-file" },
+      compositeTools,
+    );
+    expect(key).toBe("message.upload-file");
+    expect(getToolTrust(key, taints)).toBe("trusted");
+  });
+
   it("keeps bridge-routed message read as external", () => {
     const key = resolveToolKey(
       "mcp__openclaw__message",
