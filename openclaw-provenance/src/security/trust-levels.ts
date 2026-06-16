@@ -201,9 +201,20 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   CronCreate: "trusted",      // schedule management (matches the cron tool)
   CronDelete: "trusted",
   CronList: "trusted",
+  ScheduleWakeup: "trusted",  // self-wake scheduler (dynamic /loop); output is a delay/confirmation echo — same category as CronCreate
   Monitor: "trusted",         // background process/condition watcher; output is status
   PushNotification: "trusted",// sends a notification; output is an ack
   RemoteTrigger: "trusted",   // harness primitive to trigger remote actions; owner-controlled
+  DesignSync: "trusted",      // harness design-sync lifecycle primitive; output is a state transition, no external boundary
+  // Workflow runs a multi-agent orchestration script; its output is agent-local
+  // orchestration results (the same category as Task/TaskOutput/Agent above).
+  // External content a workflow pulls in is tainted at the specific tool the
+  // workflow calls (e.g. web_fetch), not here — mirroring the Skill rationale.
+  Workflow: "trusted",
+  // ShareOnboardingGuide uploads the local ONBOARDING.md and returns a share
+  // link + status. Output is an agent-local action ack (a URL we generated),
+  // not inbound external content — same shape as PushNotification's ack.
+  ShareOnboardingGuide: "trusted",
   ListMcpResourcesTool: "trusted",
   ReadMcpResourceTool: "trusted",
   tts: "trusted",
