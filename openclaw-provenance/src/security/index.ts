@@ -667,12 +667,32 @@ export function registerSecurityHooks(
   // --- /provenance slash command ---
   api.registerCommand?.({
     name: "provenance",
-    description: "Show current taint/provenance state for all active sessions",
-    handler: () => {
+    description: "Show current taint/provenance state for this agent. Use /provenance all for global status.",
+    acceptsArgs: true,
+    requireAuth: true,
+    handler: (ctx: any = {}) => {
       const watermarks = watermarkStore.listAll();
-      const entries = Object.entries(watermarks);
+      const rawArgs = ((ctx.args ?? "") as string).trim().toLowerCase();
+      const showAll = rawArgs === "all" || rawArgs === "--all";
+      const callerSessionKey = (
+        ctx.sessionKey ??
+        ctx.session?.key ??
+        deriveSessionKeyFromCommandContext(ctx) ??
+        ""
+      ) as string;
+      const agentId = (
+        ctx.agentId ??
+        ctx.agent?.id ??
+        callerSessionKey.match(/^agent:([^:]+):/)?.[1] ??
+        ""
+      ).toString().trim().toLowerCase();
+      const entries = Object.entries(watermarks).filter(([key]) => {
+        if (showAll || !agentId) return true;
+        return key.startsWith(`agent:${agentId}:`);
+      });
       if (entries.length === 0) {
-        return { text: "🟢 No active taint watermarks. All sessions trusted." };
+        const scope = showAll || !agentId ? "All sessions" : `Agent \`${agentId}\``;
+        return { text: `🟢 No active taint watermarks. ${scope} trusted.` };
       }
       const taintEmoji = (level: string) =>
         level === "trusted" ? "🟢"
@@ -683,7 +703,8 @@ export function registerSecurityHooks(
         const short = key.length > 20 ? "…" + key.slice(-16) : key;
         return `${taintEmoji(entry.level)} \`${short}\`: ${entry.level} (${entry.reason})`;
       });
-      return { text: `**Provenance Status**\n${lines.join("\n")}` };
+      const scope = showAll || !agentId ? "all sessions" : `agent \`${agentId}\``;
+      return { text: `**Provenance Status** (${scope})\n${lines.join("\n")}` };
     },
   });
 
@@ -763,7 +784,6 @@ export function registerSecurityHooks(
         ? (rawArgs as TrustLevel)
         : "trusted";
 
-      const allWatermarks = watermarkStore.listAll();
       const clearedSessions: string[] = [];
 
       // Clear the current session (from ctx) even if it has no watermark yet,
@@ -779,13 +799,21 @@ export function registerSecurityHooks(
       logger.info(
         `[provenance] 🔄 TRUST_RESET (command): callerSessionKey=${callerSessionKey || "(empty)"}, ` +
         `channel=${ctx.channel ?? "(none)"}, from=${ctx.from ?? "(none)"}, ` +
-        `threadId=${ctx.messageThreadId ?? "(none)"}, allWatermarks=${Object.keys(allWatermarks).length}`,
+        `threadId=${ctx.messageThreadId ?? "(none)"}`,
       );
 
-      const sessionsToClear = new Set([
-        ...Object.keys(allWatermarks),
-        ...(callerSessionKey ? [callerSessionKey] : []),
-      ]);
+      if (!callerSessionKey) {
+        logger.warn(
+          `[provenance] 🔄 TRUST_RESET (command): unable to derive caller session; refusing global reset`,
+        );
+        return {
+          text:
+            "❌ Could not determine the calling session, so I did not clear any trust state. " +
+            "Use `/trust-status` to list keys and `/reset-trust-key <sessionKeyOrPrefix>` for a surgical reset.",
+        };
+      }
+
+      const sessionsToClear = new Set([callerSessionKey]);
 
       for (const sessionKey of sessionsToClear) {
         // Count what we ACTUALLY cleared, not what the pre-loop snapshot
@@ -796,7 +824,7 @@ export function registerSecurityHooks(
         // there was state to clean. Reading the live store via .get()
         // immediately before clear() makes the count match reality.
         const liveEntry = watermarkStore.get(sessionKey);
-        const priorLevel = liveEntry?.level ?? allWatermarks[sessionKey]?.level;
+        const priorLevel = liveEntry?.level;
         const hadActiveGraph = store.getActive(sessionKey) !== undefined;
         watermarkStore.clear(sessionKey);
         blockedToolsBySession.delete(sessionKey);
@@ -819,7 +847,7 @@ export function registerSecurityHooks(
       // If targetLevel is not trusted, re-escalate to that level so the
       // in-memory and on-disk state reflect the requested baseline.
       if (targetLevel !== "trusted") {
-        for (const sessionKey of clearedSessions) {
+        for (const sessionKey of sessionsToClear) {
           watermarkStore.escalate(
             sessionKey,
             targetLevel,

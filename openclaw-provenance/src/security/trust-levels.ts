@@ -181,6 +181,7 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   NotebookRead: "trusted",
   TodoWrite: "trusted",
   Task: "trusted", // codex parallel: sessions_spawn (also trusted above)
+  spawn_agent: "trusted", // native Codex subagent spawn result; agent-local orchestration
   ExitPlanMode: "trusted",
   // Claude Code SDK harness-internal tools — not external MCP, not user data.
   // These are harness primitives whose output is agent-local state, owner input,
@@ -270,6 +271,21 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   vestige_predict: "trusted", // prediction from local memory state
   vestige_session_context: "trusted", // combined session init from local memory
   vestige_backup: "trusted", // local SQLite VACUUM INTO; output is path/status
+  // Legacy/generated OpenClaw Vestige tool aliases. Some dynamic-tool surfaces
+  // flatten the plugin namespace into the tool name (openclawvestige_*), so
+  // keep these as trusted siblings of the canonical vestige_* entries.
+  openclawvestige_search: "trusted",
+  openclawvestige_smart_ingest: "trusted",
+  openclawvestige_ingest: "trusted",
+  openclawvestige_promote: "trusted",
+  openclawvestige_demote: "trusted",
+  openclawvestige_dream: "trusted",
+  openclawvestige_consolidate: "trusted",
+  openclawvestige_importance_score: "trusted",
+  openclawvestige_explore_connections: "trusted",
+  openclawvestige_predict: "trusted",
+  openclawvestige_session_context: "trusted",
+  openclawvestige_backup: "trusted",
 
   // ── External sources ──────────────────────────────────────────────
   message: "external", // channel messages contain external content

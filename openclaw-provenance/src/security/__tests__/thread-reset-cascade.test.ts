@@ -1,8 +1,8 @@
 /**
- * Thread Reset Cascade — Test Suite
+ * Session Reset Scope — Test Suite
  *
- * Validates that /reset-trust clears watermarks across sessions,
- * preventing stale taint from re-infecting new threads.
+ * Validates that /reset-trust only clears the calling session. Broader cleanup
+ * belongs to /reset-trust-key, where the owner names the intended scope.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -39,7 +39,7 @@ function readWatermarks(tmpDir: string): Record<string, any> {
 
 // ── Tests ────────────────────────────────────────────────────
 
-describe("Thread reset cascade", () => {
+describe("Session reset scope", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -102,11 +102,11 @@ describe("Thread reset cascade", () => {
   }
 
   /** Simulate /reset-trust from an owner via the registered command */
-  function simulateResetTrust(api: ReturnType<typeof makeApi>, _sessionKey: string) {
-    api.invokeCommand("reset-trust", { args: "" });
+  function simulateResetTrust(api: ReturnType<typeof makeApi>, sessionKey: string) {
+    api.invokeCommand("reset-trust", { args: "", sessionKey });
   }
 
-  it("reset in thread clears parent channel watermark", () => {
+  it("reset in thread does not clear parent channel watermark", () => {
     const { api } = setup();
 
     // 1. Taint the base channel session
@@ -118,10 +118,10 @@ describe("Thread reset cascade", () => {
     // 2. Reset trust from a thread in that channel
     simulateResetTrust(api, threadSession);
 
-    // 3. Both the thread AND parent watermarks should be cleared
+    // 3. Only the calling thread is cleared; the parent channel stays tainted.
     watermarks = readWatermarks(tmpDir);
     expect(watermarks[threadSession]).toBeUndefined();
-    expect(watermarks[baseSession]).toBeUndefined();
+    expect(watermarks[baseSession]).toBeDefined();
   });
 
   it("new thread after cascade reset starts trusted", () => {
@@ -130,7 +130,7 @@ describe("Thread reset cascade", () => {
     // 1. Taint the base channel
     simulateTaintedTurn(api, baseSession);
 
-    // 2. Reset from thread (cascades to parent)
+    // 2. Reset from thread only
     simulateResetTrust(api, threadSession);
 
     // 3. New thread should start clean — no inherited taint
@@ -149,23 +149,22 @@ describe("Thread reset cascade", () => {
     expect(watermarks[newThreadSession]).toBeUndefined();
   });
 
-  it("/reset-trust clears all tainted sessions (global reset)", () => {
+  it("/reset-trust clears only the calling tainted session", () => {
     const { api } = setup();
 
     // 1. Taint both base and thread
     simulateTaintedTurn(api, baseSession);
     simulateTaintedTurn(api, threadSession);
 
-    // 2. /reset-trust clears all watermarks globally
+    // 2. /reset-trust clears only the calling session
     simulateResetTrust(api, baseSession);
 
-    // Both should be cleared
     const watermarks = readWatermarks(tmpDir);
     expect(watermarks[baseSession]).toBeUndefined();
-    expect(watermarks[threadSession]).toBeUndefined();
+    expect(watermarks[threadSession]).toBeDefined();
   });
 
-  it("/reset-trust clears all sessions including unrelated ones", () => {
+  it("/reset-trust does not clear unrelated sessions", () => {
     const { api } = setup();
     const unrelatedSession = "agent:tank:slack:channel:other123";
 
@@ -173,12 +172,24 @@ describe("Thread reset cascade", () => {
     simulateTaintedTurn(api, baseSession);
     simulateTaintedTurn(api, unrelatedSession);
 
-    // /reset-trust clears everything
+    // /reset-trust clears only the caller's thread session.
+    simulateTaintedTurn(api, threadSession);
     simulateResetTrust(api, threadSession);
 
-    // All sessions cleared
     const watermarks = readWatermarks(tmpDir);
-    expect(watermarks[baseSession]).toBeUndefined();
-    expect(watermarks[unrelatedSession]).toBeUndefined();
+    expect(watermarks[threadSession]).toBeUndefined();
+    expect(watermarks[baseSession]).toBeDefined();
+    expect(watermarks[unrelatedSession]).toBeDefined();
+  });
+
+  it("/reset-trust <level> sets the requested baseline for the calling session", () => {
+    const { api } = setup();
+
+    api.invokeCommand("reset-trust", { args: "external", sessionKey: baseSession });
+
+    const watermarks = readWatermarks(tmpDir);
+    expect(watermarks[baseSession]).toBeDefined();
+    expect(watermarks[baseSession].level).toBe("external");
+    expect(Object.keys(watermarks)).toEqual([baseSession]);
   });
 });

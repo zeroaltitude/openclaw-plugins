@@ -18,6 +18,7 @@ const HARNESS_NATIVE_TRUSTED = [
   "Workflow",
   "DesignSync",
   "ShareOnboardingGuide",
+  "spawn_agent",
   // siblings already mapped — included so the class is asserted as a unit
   "CronCreate",
   "Monitor",
@@ -48,4 +49,23 @@ describe("harness-native primitives — trusted output", () => {
     expect(getToolTrust("web_fetch", taints)).toBe("untrusted");
     expect(getToolTrust("browser", taints)).toBe("untrusted");
   });
+});
+
+const VESTIGE_TRUSTED_ALIASES = [
+  "vestige_backup",
+  "openclawvestige_dream",
+  "openclawvestige_consolidate",
+  "openclawvestige_backup",
+] as const;
+
+describe("Vestige dynamic-tool aliases — trusted output", () => {
+  for (const tool of VESTIGE_TRUSTED_ALIASES) {
+    it(`${tool} resolves trusted`, () => {
+      expect(getToolTrust(tool, taints)).toBe("trusted");
+    });
+
+    it(`${tool} has an explicit default entry`, () => {
+      expect(DEFAULT_TOOL_OUTPUT_TAINTS[tool]).toBe("trusted");
+    });
+  }
 });
