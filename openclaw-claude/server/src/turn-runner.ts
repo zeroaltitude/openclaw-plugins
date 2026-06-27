@@ -368,6 +368,47 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   }, HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref?.();
 
+  // Native-subagent activity emitter. When the model invokes a native
+  // claude_code subagent tool (`Agent` / `Task`), the SDK executes the
+  // subagent in a child process that — on the installed SDK version — bubbles
+  // NO progress messages to this parent iterator. The block-level events
+  // (content_block_start/stop for the tool_use) only bracket the model
+  // *describing* the call; the subagent's actual run happens AFTER the block
+  // closes, during which the iterator blocks with zero output. The only signal
+  // flowing in that window is the 30s `heartbeat` above — which the consumer's
+  // idle watchdog (extensions/claude/src/app-server/run-attempt.ts) DELIBERATELY
+  // ignores so genuinely-hung turns still die. Result: a real subagent run >
+  // progressIdleTimeoutMs gets torn down mid-flight.
+  //
+  // Codex doesn't hit this because its server emits real typed progress
+  // (commandExecution / mcpToolCall) throughout native operations, which the
+  // consumer counts as activity. We mirror that here: while a native subagent
+  // is believed in-flight, emit a periodic NON-heartbeat `turn/progress`
+  // (kind:"subagentActivity"). The consumer treats any non-"heartbeat"
+  // turn/progress as genuine progress and resets its idle watchdog — so this
+  // fixes the stall for every consumer of the bridge with ZERO consumer change
+  // required. The projector treats unknown kinds as no-ops, so content
+  // interpretation is unaffected.
+  //
+  // "In-flight" is tracked optimistically: armed when an `Agent`/`Task`
+  // tool_use block starts, disarmed the moment any further stream event arrives
+  // (which means real activity resumed and the heartbeat/default paths take
+  // over again). The interval is shorter than the heartbeat so a subagent that
+  // starts just after a heartbeat tick still produces a non-heartbeat signal
+  // well inside the consumer's idle budget. True hangs are still caught: this
+  // only fires while a subagent tool was actually invoked this turn, and the
+  // hard turnTimeoutMs remains the backstop.
+  const subagentActivity = createSubagentActivityEmitter({
+    notify,
+    threadId: meta.id,
+    turnId: turn.turnId,
+    onError: (activityErr) => {
+      logger.debug("[turn-runner] subagentActivity notify threw", {
+        error: activityErr instanceof Error ? activityErr.message : String(activityErr),
+      });
+    },
+  });
+
   const blocks = new Map<number, StreamItemRef>();
   const agentMessageTracker: AgentMessageTracker = {};
 
@@ -377,9 +418,14 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
 
     for await (const msg of stream as AsyncIterable<unknown>) {
       const m = msg as Record<string, unknown>;
+      // Any real SDK message means the silent post-tool_use window is over —
+      // disarm the subagent-activity emitter. handleStreamEvent re-arms it when
+      // a fresh native subagent tool_use block opens. Disarm BEFORE dispatch so
+      // re-arming inside this same event survives.
+      subagentActivity.disarm();
       switch (m.type) {
         case "stream_event":
-          handleStreamEvent(m, blocks, turn, meta, notify, agentMessageTracker);
+          handleStreamEvent(m, blocks, turn, meta, notify, agentMessageTracker, subagentActivity);
           break;
         case "assistant": {
           // Coalesced full message; stream events already produced the
@@ -532,6 +578,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     return { finalTurn };
   } finally {
     clearInterval(heartbeatTimer);
+    subagentActivity.disarm();
   }
 }
 
@@ -611,6 +658,68 @@ type AgentMessageTracker = {
   lastText?: string;
 };
 
+// Controls the periodic non-heartbeat `subagentActivity` progress emitter.
+// `arm()` starts emitting (idempotent); `disarm()` stops (idempotent). See the
+// long comment at the controller's construction site in runTurn for why this
+// exists and how it keeps native-subagent turns alive through the consumer's
+// idle watchdog.
+type SubagentActivityController = {
+  arm: () => void;
+  disarm: () => void;
+};
+
+// Native claude_code subagent tools whose execution happens in a child process
+// AFTER the tool_use block closes, with no progress bubbled to the parent
+// iterator on the installed SDK version. Seeing one of these begin a tool_use
+// block is our signal to arm the subagent-activity emitter. `TaskOutput` /
+// `TaskStop` are control/IO ops that resolve promptly and don't need it.
+const NATIVE_SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task"]);
+
+// How often the armed emitter fires a `subagentActivity` progress notification.
+// Must be comfortably below both the bridge's 30s heartbeat cadence and the
+// consumer's idle budget so a subagent that starts right after a heartbeat tick
+// still yields a non-heartbeat signal well inside the watchdog window.
+export const SUBAGENT_ACTIVITY_INTERVAL_MS = 20_000;
+
+/**
+ * Builds the native-subagent activity emitter. `arm()` starts a periodic
+ * non-heartbeat `turn/progress {kind:"subagentActivity"}` notification (no-op if
+ * already armed); `disarm()` stops it (no-op if not armed). Extracted so the
+ * arm/disarm/emit semantics can be unit-tested with fake timers, independent of
+ * the SDK stream. See the call site in runTurn for the full rationale.
+ */
+export function createSubagentActivityEmitter(opts: {
+  notify: (method: string, params: unknown) => void;
+  threadId: string;
+  turnId: string;
+  onError?: (err: unknown) => void;
+  intervalMs?: number;
+}): SubagentActivityController {
+  const intervalMs = opts.intervalMs ?? SUBAGENT_ACTIVITY_INTERVAL_MS;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const arm = () => {
+    if (timer) return;
+    timer = setInterval(() => {
+      try {
+        opts.notify("turn/progress", {
+          threadId: opts.threadId,
+          turnId: opts.turnId,
+          kind: "subagentActivity",
+        });
+      } catch (activityErr) {
+        opts.onError?.(activityErr);
+      }
+    }, intervalMs);
+    timer.unref?.();
+  };
+  const disarm = () => {
+    if (!timer) return;
+    clearInterval(timer);
+    timer = undefined;
+  };
+  return { arm, disarm };
+}
+
 function handleStreamEvent(
   msg: Record<string, unknown>,
   blocks: Map<number, StreamItemRef>,
@@ -618,6 +727,7 @@ function handleStreamEvent(
   meta: ThreadMeta,
   notify: (method: string, params: unknown) => void,
   agentMessageTracker: AgentMessageTracker,
+  subagentActivity: SubagentActivityController,
 ): void {
   const evt = msg.event as Record<string, unknown> | undefined;
   if (!evt || typeof evt.type !== "string") return;
@@ -776,6 +886,15 @@ function handleStreamEvent(
             // assistant text block downstream.
             status: "completed",
           });
+          // If this was a native subagent (`Agent`/`Task`) invocation, the SDK
+          // is about to run it in a child process that emits nothing to this
+          // iterator until it finishes. Arm the activity emitter NOW — on block
+          // *stop*, not start, because the silent window begins only after the
+          // model finishes describing the call. The main loop disarms it the
+          // instant the next real stream event arrives.
+          if (ref.name && NATIVE_SUBAGENT_TOOL_NAMES.has(ref.name)) {
+            subagentActivity.arm();
+          }
           break;
         }
       }
