@@ -466,6 +466,21 @@ export function getToolTrust(
     if (key.toLowerCase() === lower) return value;
   }
 
+  // Composite key fallback: plugin tools can resolve to keys such as
+  // tweetclaw./api/v1/x/tweets/search while sharing a bare tool taint.
+  if (lower.includes(".")) {
+    const bareName = lower.slice(0, lower.indexOf("."));
+    // Exact and case-insensitive composite-key lookup already missed above.
+    if (resolvedMap) {
+      for (const [key, value] of Object.entries(resolvedMap)) {
+        if (key.toLowerCase() === bareName) return value;
+      }
+    }
+    for (const [key, value] of Object.entries(DEFAULT_TOOL_OUTPUT_TAINTS)) {
+      if (key.toLowerCase() === bareName) return value;
+    }
+  }
+
   // MCP-namespaced lookup: strip the prefix and try the bare name, then
   // fall back to the per-prefix default for known trusted namespaces.
   for (const [prefix, prefixDefault] of MCP_PREFIX_DEFAULTS) {
@@ -474,6 +489,7 @@ export function getToolTrust(
     if (resolvedMap?.[bareName]) return resolvedMap[bareName];
     if (DEFAULT_TOOL_OUTPUT_TAINTS[bareName]) return DEFAULT_TOOL_OUTPUT_TAINTS[bareName];
     const bareLower = bareName.toLowerCase();
+    // MCP prefixes are stripped only after non-namespaced composite fallbacks miss.
     if (resolvedMap) {
       for (const [key, value] of Object.entries(resolvedMap)) {
         if (key.toLowerCase() === bareLower) return value;

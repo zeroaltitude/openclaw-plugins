@@ -19,7 +19,7 @@ Without provenance tracking, a single malicious email can:
 
 ### Relevance to the OpenClaw Threat Model
 
-We submitted [the first issue](https://github.com/openclaw/trust) to the `openclaw/trust` repository documenting how workspace files (TOOLS.md, AGENTS.md, etc.) are injected verbatim into the system prompt, creating a credential storage honeypot. Any prompt injection that gains tool access can read these files and exfiltrate secrets.
+An earlier OpenClaw trust report documented how workspace files (TOOLS.md, AGENTS.md, etc.) are injected verbatim into the system prompt, creating a credential storage honeypot. Any prompt injection that gains tool access can read these files and exfiltrate secrets.
 
 The [OpenClaw threat model](https://trust.openclaw.ai/threatmodel) identifies 37 threats mapped to MITRE ATLAS. This plugin directly mitigates 8 of them and partially addresses 4 more:
 
@@ -157,6 +157,56 @@ For plugin-provided or custom tools, declare the action parameter in config:
 
 The lookup chain for any tool call: composite key → bare tool name → `untrusted` default.
 
+#### Example: TweetClaw Endpoint Policies
+
+[TweetClaw](https://github.com/Xquik-dev/tweetclaw) exposes one `tweetclaw`
+tool with a `path` parameter for X/Twitter reads and writes. This config lets
+public tweet search run without approval, treats returned X/Twitter data as
+external content, and asks before every other TweetClaw endpoint call:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "provenance": {
+        "config": {
+          "compositeTools": {
+            "tweetclaw": { "actionParam": "path" }
+          },
+          "uriExtractors": {
+            "tweetclaw": {
+              "params": ["path"],
+              "absolutePathScheme": "xquik"
+            }
+          },
+          "toolOutputTaints": {
+            "tweetclaw": "external"
+          },
+          "toolOverrides": {
+            "tweetclaw": { "*": "restrict" },
+            "tweetclaw./api/v1/x/tweets/search": { "*": "allow" },
+            "tweetclaw./api/v1/radar/trends": { "*": "allow" }
+          },
+          "uriTrust": {
+            "xquik://api/v1/x/accounts/**": "untrusted",
+            "xquik://api/v1/x/tweets/**": "external",
+            "xquik://api/v1/radar/**": "external"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The bare `tweetclaw` catch-all is the fallback for every endpoint path that
+does not have an exact composite override. Keep it at `restrict` or `confirm`
+so new or unrecognized paths cannot silently inherit `allow`.
+
+The endpoint path `/api/v1/x/tweets/search` is recorded as
+`xquik://api/v1/x/tweets/search`, so URI trust can distinguish public reads
+from account-management paths without treating API paths as local files.
+
 ### URI Source Tracking
 
 Every tool call that introduces data has an identifiable source address (URI). The plugin extracts and tracks these URIs in the provenance graph:
@@ -185,6 +235,10 @@ Built-in extractors cover all known OpenClaw tools. For custom tools, declare wh
   }
 }
 ```
+
+Use `absolutePathScheme` when a parameter contains API-style paths such as
+`/api/v1/x/tweets/search`. Without it, absolute paths keep the safe default
+`file://` classification for local filesystem tools.
 
 ### URI Trust Classification
 

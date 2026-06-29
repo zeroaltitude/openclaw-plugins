@@ -130,7 +130,8 @@
               "type": "array",
               "items": { "type": "string" }
             },
-            "scheme": { "type": "string" }
+            "scheme": { "type": "string" },
+            "absolutePathScheme": { "type": "string" }
           },
           "required": ["params"]
         }
