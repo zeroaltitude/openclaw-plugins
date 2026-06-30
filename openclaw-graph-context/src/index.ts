@@ -14,8 +14,8 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { initSchema, openDb, graphStats, recentSessions, neighbourhood, hierarchyGraph, resolveDbPath, classifyHeartbeats, markDuplicateNodes } from "./db.js";
-import { ingestAll } from "./ingest.js";
+import { initSchema, openDb, graphStats, recentSessions, neighbourhood, hierarchyGraph, resolveDbPath, classifyHeartbeats, markDuplicateNodes, migrateVirtualHierarchy } from "./db.js";
+import { ingestAll, buildVirtualHierarchy } from "./ingest.js";
 import type Database from "better-sqlite3";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -180,6 +180,23 @@ export function activate(api: PluginApi): void {
         const result = markDuplicateNodes(db);
         log.info(`[graph-context] prune: heartbeats=${result.heartbeatSessionsHidden} dup-ref_files=${result.duplicateRefFilesHidden} empty-session_types=${result.emptySessionTypesHidden}`);
         return sendJson(res, 200, result);
+      } catch (err) {
+        return sendJson(res, 500, { error: String(err) });
+      }
+    }
+
+    // --- POST /graph-context/api/migrate ---
+    // Wipe stale virtual hierarchy nodes, reclassify sessions, rebuild hierarchy, re-prune.
+    // Use this after pulling a new version of the plugin to apply schema migrations.
+    if (path === "/graph-context/api/migrate" && (req.method ?? "GET").toUpperCase() === "POST") {
+      try {
+        const migration = migrateVirtualHierarchy(db);
+        log.info(`[graph-context] migrate: wipedNodes=${migration.wipedNodes} reclassified=${migration.reclassified}`);
+        db.transaction(() => buildVirtualHierarchy(db, agentsDir))();
+        const classified = classifyHeartbeats(db);
+        const pruned = markDuplicateNodes(db);
+        log.info(`[graph-context] migrate complete: classified=${classified} heartbeats=${pruned.heartbeatSessionsHidden}`);
+        return sendJson(res, 200, { ...migration, classified, pruned });
       } catch (err) {
         return sendJson(res, 500, { error: String(err) });
       }

@@ -31,7 +31,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EdgeType, GraphEdge, GraphNode, NodeType } from "./db.js";
-import { insertEdge, upsertNode, isHeartbeatFirstMessage, markDuplicateNodes } from "./db.js";
+import { insertEdge, upsertNode, isHeartbeatFirstMessage, markDuplicateNodes, migrateVirtualHierarchy } from "./db.js";
 
 export interface IngestOptions {
   agentsDir?: string;
@@ -953,6 +953,10 @@ export async function ingestAll(
   if (opts.agentId) {
     agents = agents.filter((a) => a === opts.agentId);
   }
+
+  log("[graph-context] migrating virtual hierarchy (wipe stale nodes, reclassify sessions)");
+  const migration = migrateVirtualHierarchy(db);
+  log(`[graph-context] migration complete: wipedNodes=${migration.wipedNodes} reclassified=${migration.reclassified}`);
 
   for (const agentId of agents) {
     log(`[graph-context] ingesting agent: ${agentId}`);

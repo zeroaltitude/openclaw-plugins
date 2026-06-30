@@ -346,6 +346,63 @@ export function hierarchyGraph(
 }
 
 /**
+ * Migrate the virtual hierarchy to the current schema.
+ *
+ * Safe to call before every full ingest. Idempotent.
+ *
+ * What it does:
+ * 1. Wipes all virtual structural nodes (root, agent, session_type, ref_files)
+ *    and their edges — these are 100% derived from session data and will be
+ *    rebuilt by buildVirtualHierarchy().
+ * 2. Re-classifies all existing session nodes' sessionType property using the
+ *    transport segment of their session_key via a single SQL UPDATE (fast).
+ *
+ * This is a no-op on a fresh DB (no virtual nodes to wipe, no sessions to
+ * reclassify). On an existing DB it corrects any schema drift from old code.
+ */
+export function migrateVirtualHierarchy(db: Database.Database): { wipedNodes: number; reclassified: number } {
+  // Step 1: wipe all virtual structural nodes and their edges
+  let wipedNodes = 0;
+  for (const type of ["root", "agent", "session_type", "ref_files"] as const) {
+    const nodes = db.prepare(`SELECT id FROM nodes WHERE type = '${type}'`).all() as { id: string }[];
+    db.transaction(() => {
+      const delNode = db.prepare("DELETE FROM nodes WHERE id = ?");
+      const delSrc  = db.prepare("DELETE FROM edges WHERE src = ?");
+      const delDst  = db.prepare("DELETE FROM edges WHERE dst = ?");
+      for (const { id } of nodes) {
+        delSrc.run(id);
+        delDst.run(id);
+        delNode.run(id);
+        wipedNodes++;
+      }
+    })();
+  }
+
+  // Step 2: reclassify session nodes — derive sessionType from session_key transport segment
+  const result = db.prepare(`
+    UPDATE nodes SET properties = json_set(
+      COALESCE(properties, '{}'),
+      '$.sessionType',
+      CASE
+        WHEN session_key LIKE '%:heartbeat%'    THEN 'heartbeat'
+        WHEN session_key LIKE '%:cron:%'        THEN 'cron'
+        WHEN session_key LIKE '%:subagent:%'    THEN 'subagent'
+        WHEN session_key LIKE 'agent:%:slack:%'    THEN 'slack'
+        WHEN session_key LIKE 'agent:%:discord:%'  THEN 'discord'
+        WHEN session_key LIKE 'agent:%:direct:%'   THEN 'direct'
+        WHEN session_key LIKE 'agent:%:unknown:%'
+          AND json_extract(properties, '$.devInstructionsFingerprint') IS NOT NULL
+          THEN 'direct'
+        ELSE 'unknown'
+      END
+    )
+    WHERE type = 'session'
+  `).run();
+
+  return { wipedNodes, reclassified: result.changes };
+}
+
+/**
  * Mark near-duplicate and near-empty hierarchy nodes with display="hidden" so
  * they are omitted from the hierarchy view without destroying the data.
  *
