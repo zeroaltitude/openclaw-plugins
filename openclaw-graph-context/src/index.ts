@@ -14,7 +14,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { initSchema, openDb, graphStats, recentSessions, neighbourhood, hierarchyGraph, resolveDbPath, classifyHeartbeats, markDuplicateNodes, migrateVirtualHierarchy } from "./db.js";
+import { initSchema, openDb, graphStats, recentSessions, neighbourhood, hierarchyGraph, refFilesSessionNodes, resolveDbPath, classifyHeartbeats, markDuplicateNodes, migrateVirtualHierarchy } from "./db.js";
 import { ingestAll, buildVirtualHierarchy } from "./ingest.js";
 import type Database from "better-sqlite3";
 
@@ -169,6 +169,21 @@ export function activate(api: PluginApi): void {
       const includeHidden = q.hidden === "true";
       try {
         return sendJson(res, 200, hierarchyGraph(db, includeHidden));
+      } catch (err) {
+        return sendJson(res, 500, { error: String(err) });
+      }
+    }
+
+    // --- GET /graph-context/api/hierarchy/sessions ---
+    // Returns session nodes + their contains edges for a single ref_files node.
+    // Used by the UI for on-demand expansion when a ref_files node is double-clicked.
+    if (path === "/graph-context/api/hierarchy/sessions") {
+      const q = parseQuery(req.url ?? "");
+      const refFilesId = q.refFilesId;
+      if (!refFilesId) return sendJson(res, 400, { error: "refFilesId required" });
+      const includeHidden = q.hidden === "true";
+      try {
+        return sendJson(res, 200, refFilesSessionNodes(db, refFilesId, includeHidden));
       } catch (err) {
         return sendJson(res, 500, { error: String(err) });
       }
