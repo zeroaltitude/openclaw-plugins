@@ -441,18 +441,22 @@ export async function ingestAgent(
       const kind = (isHeartbeatByKey || isHeartbeatByContent) ? "heartbeat" : undefined;
 
       // Classify session type for the virtual hierarchy.
-      // Mirrors OpenClaw's filterBootstrapFilesForSession logic.
-      // If a session has a devInstructionsFingerprint from its binding, it was a real
-      // interactive claude-server session — treat as "normal" even if the key is "unknown"
-      // (unknown keys happen when sessions.json and trajectory files both lack the routing key).
+      // Derived from the transport segment of the session key: agent:<id>:<transport>:...
+      // This is the canonical classification — transport determines both the session_type
+      // node and the expected ref_files list.
       const sessionType: string = (() => {
         if (sessionKey.includes(":heartbeat")) return "heartbeat";
         if (sessionKey.includes(":cron:")) return "cron";
-        if (sessionKey.includes(":subagent:") || sessionKey.includes("subagent")) return "subagent";
-        if (sessionKey.includes("unknown:")) {
-          return devInstructionsFingerprint ? "normal" : "unknown";
-        }
-        return "normal";
+        if (sessionKey.includes(":subagent:")) return "subagent";
+        const parts = sessionKey.split(":");
+        const transport = parts[2] ?? "";
+        if (transport === "slack") return "slack";
+        if (transport === "discord") return "discord";
+        if (transport === "direct") return "direct";
+        // Sessions with unknown routing key but a real devInstructions fingerprint
+        // are genuine interactive sessions whose routing was not recorded.
+        if (transport === "unknown" && devInstructionsFingerprint) return "direct";
+        return "unknown";
       })();
 
       const sessionNodeId = `session:${sessionId}`;
@@ -792,24 +796,27 @@ export async function ingestAgent(
  * Mirrors filterBootstrapFilesForSession in openclaw/src/agents/workspace.ts.
  */
 const REF_FILES_BY_SESSION_TYPE: Record<string, string[]> = {
-  normal:    ["SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "AGENTS.md", "HEARTBEAT.md", "MEMORY.md"],
+  slack:     ["SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "AGENTS.md", "HEARTBEAT.md", "MEMORY.md"],
+  discord:   ["SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "AGENTS.md", "HEARTBEAT.md", "MEMORY.md"],
+  direct:    ["SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "AGENTS.md", "HEARTBEAT.md", "MEMORY.md"],
   heartbeat: ["HEARTBEAT.md"],
   cron:      ["SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "AGENTS.md"],
-  subagent:  ["AGENTS.md", "TOOLS.md"],
+  subagent:  [],
   unknown:   [],
 };
 
 /**
  * Build (or rebuild) the virtual structural hierarchy on top of the ingested sessions:
  *
- *   root → agent:<id> → session_type:<type> → ref_files:<agent>:<type>:<fingerprint> → session
+ *   root → agent:<id> → session_type:<type> → ref_files:<agent>:<type> → session
+ *
+ * One ref_files node per (agent, sessionType) — the file list is determined by
+ * session type, not by the devInstructions fingerprint. Fingerprints are stored
+ * as a collected set in ref_files properties for informational purposes only.
  *
  * All virtual nodes are upserted so this is safe to run after every ingest pass.
- * The fingerprint groups sessions that saw exactly the same developer instructions;
- * within a session_type there may be multiple ref_files nodes if the fingerprint changed
- * over time (e.g. after editing SOUL.md).
  */
-export function buildVirtualHierarchy(db: Database.Database, agentsDir: string): void {
+export function buildVirtualHierarchy(db: Database.Database, _agentsDir: string): void {
   const VIRTUAL_AGENT_ID = "__virtual__";
   const VIRTUAL_SESSION_ID = "__virtual__";
   const VIRTUAL_SESSION_KEY = "__virtual__";
@@ -827,21 +834,24 @@ export function buildVirtualHierarchy(db: Database.Database, agentsDir: string):
     content_text: "OpenClaw",
   });
 
-  // 2. Query all distinct (agent_id, sessionType, devInstructionsFingerprint) tuples
+  // 2. Query all sessions
   type SessionRow = { session_id: string; agent_id: string; properties: string | null };
   const sessions = db.prepare(
     "SELECT session_id, agent_id, properties FROM nodes WHERE type='session'"
   ).all() as SessionRow[];
 
-  // Track which agent/session_type/reffiles nodes we've already created this run
+  // Track created virtual nodes to avoid redundant upserts
   const createdAgents = new Set<string>();
   const createdSessionTypes = new Set<string>();
   const createdRefFiles = new Set<string>();
 
+  // Collect fingerprints per ref_files node for informational storage
+  const refFilesFingerprints = new Map<string, Set<string>>();
+
   for (const row of sessions) {
     const props = (() => { try { return JSON.parse(row.properties ?? "{}"); } catch { return {}; } })();
     const sessionType: string = props.sessionType ?? "unknown";
-    const fingerprint: string = props.devInstructionsFingerprint ?? "default";
+    const fingerprint: string | undefined = props.devInstructionsFingerprint;
     const agentId = row.agent_id;
 
     // 2a. Agent node
@@ -860,7 +870,7 @@ export function buildVirtualHierarchy(db: Database.Database, agentsDir: string):
       createdAgents.add(agentNodeId);
     }
 
-    // 2b. SessionType node
+    // 2b. SessionType node — one per (agent, sessionType)
     const sessionTypeNodeId = `session_type:${agentId}:${sessionType}`;
     if (!createdSessionTypes.has(sessionTypeNodeId)) {
       ensureNode({
@@ -876,16 +886,23 @@ export function buildVirtualHierarchy(db: Database.Database, agentsDir: string):
       createdSessionTypes.add(sessionTypeNodeId);
     }
 
-    // 2c. RefFiles node (one per unique fingerprint within a session_type)
-    const refFilesNodeId = `ref_files:${agentId}:${sessionType}:${fingerprint}`;
+    // 2c. RefFiles node — exactly one per (agent, sessionType)
+    // ID uses no fingerprint so all sessions of the same type share one ref_files node.
+    const refFilesNodeId = `ref_files:${agentId}:${sessionType}`;
+    if (!refFilesFingerprints.has(refFilesNodeId)) {
+      refFilesFingerprints.set(refFilesNodeId, new Set());
+    }
+    if (fingerprint) refFilesFingerprints.get(refFilesNodeId)!.add(fingerprint);
+
     if (!createdRefFiles.has(refFilesNodeId)) {
-      const fileList = REF_FILES_BY_SESSION_TYPE[sessionType] ?? [];
+      const fileList: string[] = REF_FILES_BY_SESSION_TYPE[sessionType] ?? [];
       ensureNode({
         id: refFilesNodeId, type: "ref_files" as NodeType,
         agent_id: agentId, session_id: VIRTUAL_SESSION_ID,
         session_key: VIRTUAL_SESSION_KEY, ts: now,
-        content_text: fileList.join(", ") || "(none)",
-        properties: JSON.stringify({ files: fileList, fingerprint }),
+        // content_text is a JSON array for UI rendering; human-readable fallback to "(none)"
+        content_text: fileList.length ? JSON.stringify(fileList) : "(none)",
+        properties: JSON.stringify({ files: fileList }),
       });
       ensureEdge({
         id: shortHash("contains", sessionTypeNodeId, refFilesNodeId),
@@ -901,6 +918,17 @@ export function buildVirtualHierarchy(db: Database.Database, agentsDir: string):
       src: refFilesNodeId, dst: sessionNodeId, type: "contains" as EdgeType, weight: 1,
     });
   }
+
+  // 2e. Update ref_files nodes with the collected fingerprint set
+  const updateRefFiles = db.prepare(`
+    UPDATE nodes SET properties = json_set(COALESCE(properties,'{}'), '$.fingerprints', ?)
+    WHERE id = ?
+  `);
+  db.transaction(() => {
+    for (const [id, fps] of refFilesFingerprints) {
+      updateRefFiles.run(JSON.stringify([...fps]), id);
+    }
+  })();
 }
 
 export async function ingestAll(

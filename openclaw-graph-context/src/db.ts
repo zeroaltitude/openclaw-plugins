@@ -372,9 +372,6 @@ export function markDuplicateNodes(db: Database.Database): {
   const setHidden = db.prepare(
     "UPDATE nodes SET properties = json_set(COALESCE(properties,'{}'), '$.display', 'hidden') WHERE id = ?"
   );
-  const clearHidden = db.prepare(
-    "UPDATE nodes SET properties = json_remove(COALESCE(properties,'{}'), '$.display') WHERE id = ?"
-  );
 
   db.transaction(() => {
     // First, clear all existing display=hidden flags so we recompute from scratch.
@@ -397,93 +394,41 @@ export function markDuplicateNodes(db: Database.Database): {
     for (const { id } of heartbeatSessions) setHidden.run(id);
   })();
 
-  // --- Rule 2: duplicate ref_files within each (agent_id, session_type) ---
-  // For each group, count visible sessions attached via contains edges.
-  // Keep the one with the most visible sessions; hide the rest.
-  // Tie-break: prefer non-default fingerprint > default.
-  type RefFilesRow = { id: string; agent_id: string; session_type: string; fingerprint: string };
-  const refFilesNodes = db.prepare(`
-    SELECT id, agent_id,
-           json_extract(properties,'$.fingerprint') as fingerprint,
-           -- Extract session_type from the id: ref_files:<agent>:<session_type>:<fingerprint>
-           substr(id, length('ref_files:' || agent_id || ':') + 1,
-                  instr(substr(id, length('ref_files:' || agent_id || ':') + 1), ':') - 1) as session_type
-    FROM nodes WHERE type = 'ref_files'
-  `).all() as RefFilesRow[];
-
-  // Group by (agent_id, session_type)
-  const groups = new Map<string, RefFilesRow[]>();
-  for (const row of refFilesNodes) {
-    const key = `${row.agent_id}:${row.session_type}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(row);
-  }
-
-  let duplicateRefFilesHidden = 0;
+  // --- Rule 2: hide ref_files nodes for session types that are always hidden ---
+  // With the new scheme (one ref_files per agent+session_type), there are no duplicates
+  // to collapse. Instead, hide the ref_files nodes for heartbeat/cron session types,
+  // since all their sessions will be hidden anyway.
+  const ALWAYS_HIDDEN_TYPES = ["heartbeat", "cron"];
+  const hiddenRefFilesIds: string[] = [];
   db.transaction(() => {
-    for (const [, members] of groups) {
-      if (members.length <= 1) continue; // no duplicates in this group
-
-      // Count visible (non-heartbeat) sessions per ref_files node
-      const countStmt = db.prepare(`
-        SELECT COUNT(*) as c FROM edges e
-        JOIN nodes s ON e.dst = s.id
-        WHERE e.src = ? AND e.type = 'contains' AND s.type = 'session'
-          AND (s.properties IS NULL OR json_extract(s.properties,'$.kind') IS NOT 'heartbeat')
-      `);
-
-      const scored = members.map(m => {
-        const c = (countStmt.get(m.id) as { c: number }).c;
-        const isDefault = !m.fingerprint || m.fingerprint === 'default';
-        return { ...m, visibleSessions: c, isDefault };
-      });
-
-      // Sort: most visible sessions first; non-default preferred on tie
-      scored.sort((a, b) =>
-        b.visibleSessions !== a.visibleSessions
-          ? b.visibleSessions - a.visibleSessions
-          : (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0)
-      );
-
-      // Keep the first (best), hide the rest
-      for (let i = 1; i < scored.length; i++) {
-        setHidden.run(scored[i].id);
-        duplicateRefFilesHidden++;
+    for (const sessionType of ALWAYS_HIDDEN_TYPES) {
+      const nodes = db.prepare(
+        `SELECT id FROM nodes WHERE type = 'ref_files' AND id LIKE 'ref_files:%:${sessionType}'`
+      ).all() as { id: string }[];
+      for (const { id } of nodes) {
+        setHidden.run(id);
+        hiddenRefFilesIds.push(id);
       }
     }
   })();
+  const duplicateRefFilesHidden = hiddenRefFilesIds.length;
 
-  // --- Rule 3: session_type nodes with zero visible sessions (after hiding above) ---
-  // A session_type node is effectively empty if all its ref_files children are hidden
-  // OR if all sessions under its ref_files children are hidden.
-  const sessionTypeNodes = db.prepare(
-    "SELECT id FROM nodes WHERE type = 'session_type'"
-  ).all() as { id: string }[];
-
+  // --- Rule 3: hide session_type nodes for always-hidden session types ---
+  // Heartbeat and cron session_type nodes are never useful in the hierarchy view.
+  // Other session_types (slack, discord, direct, subagent, unknown) are kept visible
+  // even if they currently have few sessions — they represent real interaction channels.
   let emptySessionTypesHidden = 0;
   db.transaction(() => {
-    const visibleSessionsUnderType = db.prepare(`
-      SELECT COUNT(*) as c
-      FROM edges e1  -- session_type → ref_files
-      JOIN nodes rf ON e1.dst = rf.id AND rf.type = 'ref_files'
-        AND (rf.properties IS NULL OR json_extract(rf.properties,'$.display') IS NOT 'hidden')
-      JOIN edges e2 ON e2.src = rf.id AND e2.type = 'contains'  -- ref_files → session
-      JOIN nodes s ON e2.dst = s.id AND s.type = 'session'
-        AND (s.properties IS NULL OR json_extract(s.properties,'$.display') IS NOT 'hidden')
-      WHERE e1.src = ? AND e1.type = 'contains'
-    `);
-
-    for (const { id } of sessionTypeNodes) {
-      const { c } = visibleSessionsUnderType.get(id) as { c: number };
-      if (c === 0) {
+    for (const sessionType of ALWAYS_HIDDEN_TYPES) {
+      const nodes = db.prepare(
+        `SELECT id FROM nodes WHERE type = 'session_type' AND id LIKE 'session_type:%:${sessionType}'`
+      ).all() as { id: string }[];
+      for (const { id } of nodes) {
         setHidden.run(id);
         emptySessionTypesHidden++;
       }
     }
   })();
-
-  // Unused — satisfies TS about clearHidden being referenced
-  void clearHidden;
 
   return {
     heartbeatSessionsHidden: heartbeatSessions.length,
