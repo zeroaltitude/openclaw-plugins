@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Graph Context — Conversation Graph</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body, #root { height: 100%; margin: 0; padding: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #0c0d0f; color: #e5e7eb; }
+    button, input, select { font: inherit; color: inherit; }
+
+    .topbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #1f2937; background: #11131a; height: 49px; flex-shrink: 0; }
+    .topbar h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
+    .topbar select { background: #0c0d0f; color: #e5e7eb; border: 1px solid #374151; border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+    .topbar .stat { font-size: 12px; color: #9ca3af; }
+    .topbar .spacer { flex: 1; }
+    .topbar .btn { background: #1e40af; color: white; border: 1px solid #2563eb; border-radius: 6px; padding: 4px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
+    .topbar .btn:hover { background: #2563eb; }
+    .topbar .btn.secondary { background: #0c0d0f; color: #bfdbfe; border: 1px solid #1e3a8a; }
+    .topbar .btn.secondary:hover { background: #172554; }
+    .topbar .btn:disabled { background: #374151; border-color: #4b5563; cursor: not-allowed; color: #6b7280; }
+
+    .main { display: flex; height: calc(100vh - 49px); }
+
+    /* Session list sidebar */
+    .sidebar { width: 280px; flex-shrink: 0; border-right: 1px solid #1f2937; background: #0f1117; display: flex; flex-direction: column; overflow: hidden; }
+    .sidebar .sidebar-header { padding: 8px 12px; border-bottom: 1px solid #1f2937; font-size: 11px; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 8px; }
+    .sidebar .sidebar-header select { font-size: 11px; padding: 2px 4px; flex: 1; }
+    .sidebar-list { flex: 1; overflow-y: auto; }
+    .session-row { padding: 8px 12px; border-bottom: 1px solid #1a1f2e; cursor: pointer; transition: background 0.1s; }
+    .session-row:hover { background: #1f2937; }
+    .session-row.active { background: #1e3a8a; }
+    .session-row .sk { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; color: #93c5fd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .session-row .ts { font-size: 10px; color: #6b7280; margin-top: 2px; }
+    .session-row .agent-badge { display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px; margin-right: 4px; font-weight: 600; }
+
+    /* Graph canvas */
+    .canvas-wrap { flex: 1; overflow: hidden; position: relative; background: #0c0d0f; cursor: grab; }
+    .canvas-wrap:active { cursor: grabbing; }
+    .empty-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: #6b7280; }
+    .empty-state h2 { font-size: 16px; font-weight: 500; margin: 0; }
+    .empty-state p { font-size: 13px; margin: 0; }
+
+    /* Node modal overlay */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .modal { background: #0f1117; border: 1px solid #374151; border-radius: 10px; width: min(760px, 90vw); max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 24px 64px rgba(0,0,0,0.6); }
+    .modal-header { display: flex; align-items: baseline; gap: 10px; padding: 14px 16px 10px; border-bottom: 1px solid #1f2937; flex-shrink: 0; }
+    .modal-header .node-type-chip { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 3px; }
+    .modal-header h2 { font-size: 12px; font-family: ui-monospace, SFMono-Regular, monospace; color: #93c5fd; margin: 0; word-break: break-all; flex: 1; }
+    .modal-header .close-x { background: transparent; color: #6b7280; border: none; font-size: 22px; cursor: pointer; line-height: 1; padding: 0 2px; flex-shrink: 0; }
+    .modal-header .close-x:hover { color: #e5e7eb; }
+    .modal-meta { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 16px; border-bottom: 1px solid #1f2937; flex-shrink: 0; }
+    .modal-meta .badge { font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #374151; background: #0c0d0f; color: #9ca3af; }
+    .modal-meta .badge.role-user { border-color: #1d4ed8; color: #93c5fd; }
+    .modal-meta .badge.role-assistant { border-color: #065f46; color: #6ee7b7; }
+    .modal-meta .badge.type-tool_call { border-color: #78350f; color: #fcd34d; }
+    .modal-meta .badge.type-tool_result { border-color: #7c2d12; color: #fca5a5; }
+    .modal-body { overflow-y: auto; padding: 14px 16px; flex: 1; display: flex; flex-direction: column; gap: 12px; }
+    .modal-body .section-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin-bottom: 4px; }
+    .modal-body .content-box { font-size: 12px; font-family: ui-monospace, SFMono-Regular, monospace; padding: 10px 12px; background: #0c0d0f; border: 1px solid #1f2937; border-radius: 6px; white-space: pre-wrap; word-break: break-word; line-height: 1.55; color: #d1d5db; }
+
+    /* Legend */
+    .legend { position: absolute; right: 16px; bottom: 16px; padding: 8px 10px; background: #11131a; border: 1px solid #1f2937; border-radius: 6px; font-size: 11px; line-height: 1.8; z-index: 1; }
+    .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+
+    /* Stats bar */
+    .stats-bar { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 8px; z-index: 1; }
+    .stats-bar .stat-chip { font-size: 11px; color: #9ca3af; background: #11131a; border: 1px solid #1f2937; border-radius: 4px; padding: 2px 8px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "reaflow": "https://esm.sh/reaflow@5.3.4?deps=react@18.3.1,react-dom@18.3.1"
+    }
+  }
+  </script>
+  <script type="module">
+    import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+    import { createRoot } from "react-dom/client";
+    import { Canvas, Node as ReaNode, Edge as ReaEdge } from "reaflow";
+
+    // --- Color palettes ---
+    const AGENT_COLORS = {
+      tank:      "#1e40af",
+      main:      "#065f46",
+      narcissus: "#7c2d12",
+      "codex-acp": "#4c1d95",
+      shiva:     "#831843",
+    };
+    const agentColor = (id) => AGENT_COLORS[id] ?? "#374151";
+
+    const NODE_COLORS = {
+      // Virtual structural nodes
+      root:              "#111827",
+      agent:             "#1e1b4b",
+      session_type:      "#0f172a",
+      ref_files:         "#14532d",
+      // Conversation nodes
+      session:           "#1e3a8a",
+      message_user:      "#1d4ed8",
+      message_assistant: "#065f46",
+      tool_call:         "#78350f",
+      tool_result:       "#7c2d12",
+      summary:           "#4a044e",
+    };
+    function nodeColor(n) {
+      if (!n) return "#374151";
+      if (n.type === "root")         return NODE_COLORS.root;
+      if (n.type === "agent")        return NODE_COLORS.agent;
+      if (n.type === "session_type") return NODE_COLORS.session_type;
+      if (n.type === "ref_files")    return NODE_COLORS.ref_files;
+      if (n.type === "session") return NODE_COLORS.session;
+      if (n.type === "message") {
+        if (n.role === "user") return NODE_COLORS.message_user;
+        return NODE_COLORS.message_assistant;
+      }
+      if (n.type === "tool_call")   return NODE_COLORS.tool_call;
+      if (n.type === "tool_result") return NODE_COLORS.tool_result;
+      if (n.type === "summary")     return NODE_COLORS.summary;
+      return "#374151";
+    }
+
+    const EDGE_COLORS = {
+      sequence:    "#374151",
+      invokes:     "#d97706",
+      returns:     "#b45309",
+      peer:        "#7c3aed",
+      channel:     "#0891b2",
+      agent:       "#ca8a04",
+      task:        "#dc2626",
+      summarizes:  "#9ca3af",
+      session_key: "#4b5563",
+      contains:    "#6b7280",
+    };
+
+    function formatTs(ts) {
+      if (!ts) return "–";
+      const d = new Date(ts);
+      return d.toLocaleString();
+    }
+
+    function truncate(s, n = 60) {
+      if (!s) return "";
+      return s.length > n ? s.slice(0, n) + "…" : s;
+    }
+
+    // --- API helpers ---
+    async function apiFetch(path) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(`${path}: ${res.status}`);
+      return res.json();
+    }
+
+    // --- NodeModal ---
+    const NODE_TYPE_CHIP_COLORS = {
+      // Virtual structural
+      root:         { bg: "#111827", color: "#9ca3af" },
+      agent:        { bg: "#1e1b4b", color: "#c4b5fd" },
+      session_type: { bg: "#0f172a", color: "#94a3b8" },
+      ref_files:    { bg: "#14532d", color: "#86efac" },
+      // Conversation
+      session:      { bg: "#1e3a8a", color: "#bfdbfe" },
+      message:      { bg: "#065f46", color: "#6ee7b7" },
+      tool_call:    { bg: "#78350f", color: "#fcd34d" },
+      tool_result:  { bg: "#7c2d12", color: "#fca5a5" },
+      summary:      { bg: "#4a044e", color: "#e9d5ff" },
+    };
+    function NodeModal({ node, onClose }) {
+      if (!node) return null;
+      const chipStyle = NODE_TYPE_CHIP_COLORS[node.type] ?? { bg: "#374151", color: "#9ca3af" };
+      const roleClass = node.role ? `role-${node.role}` : "";
+      const typeClass = (node.type === "tool_call" || node.type === "tool_result") ? `type-${node.type}` : "";
+      const props = (() => { try { return node.properties ? JSON.parse(node.properties) : null; } catch { return null; } })();
+
+      // Full JSON for the raw dump
+      const fullJson = JSON.stringify({
+        id: node.id,
+        type: node.type,
+        role: node.role,
+        agent_id: node.agent_id,
+        session_id: node.session_id,
+        session_key: node.session_key,
+        ts: node.ts,
+        ts_human: formatTs(node.ts),
+        content_tokens: node.content_tokens,
+        properties: props,
+        content_text: node.content_text,
+      }, null, 2);
+
+      // Close on overlay click
+      const handleOverlayClick = (e) => { if (e.target === e.currentTarget) onClose(); };
+      // Close on Escape
+      useEffect(() => {
+        const handler = (e) => { if (e.key === "Escape") onClose(); };
+        window.addEventListener("keydown", handler);
+        return () => window.removeEventListener("keydown", handler);
+      }, [onClose]);
+
+      return React.createElement("div", { className: "modal-overlay", onClick: handleOverlayClick },
+        React.createElement("div", { className: "modal" },
+          // Header
+          React.createElement("div", { className: "modal-header" },
+            React.createElement("span", {
+              className: "node-type-chip",
+              style: { background: chipStyle.bg, color: chipStyle.color },
+            }, node.type),
+            React.createElement("h2", null, node.id),
+            React.createElement("button", { className: "close-x", onClick: onClose }, "×"),
+          ),
+          // Meta badges
+          React.createElement("div", { className: "modal-meta" },
+            node.agent_id && React.createElement("span", { className: "badge", style: { borderColor: agentColor(node.agent_id), color: agentColor(node.agent_id) } }, node.agent_id),
+            node.role && React.createElement("span", { className: `badge ${roleClass}` }, node.role),
+            typeClass && React.createElement("span", { className: `badge ${typeClass}` }, node.type),
+            props?.name && React.createElement("span", { className: "badge" }, `tool: ${props.name}`),
+            props?.toolCallId && React.createElement("span", { className: "badge", style: { fontFamily: "ui-monospace, monospace" } }, `callId: ${props.toolCallId.slice(0, 16)}`),
+            props?.exitCode !== undefined && React.createElement("span", { className: "badge" }, `exit: ${props.exitCode}`),
+            node.content_tokens && React.createElement("span", { className: "badge" }, `~${node.content_tokens} tok`),
+            React.createElement("span", { className: "badge" }, formatTs(node.ts)),
+          ),
+          // Body
+          React.createElement("div", { className: "modal-body" },
+            node.content_text && React.createElement("div", null,
+              React.createElement("div", { className: "section-label" }, "Content"),
+              React.createElement("div", { className: "content-box" }, node.content_text),
+            ),
+            React.createElement("div", null,
+              React.createElement("div", { className: "section-label" }, "Full JSON"),
+              React.createElement("div", { className: "content-box", style: { fontSize: 11 } }, fullJson),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // --- Main App ---
+    function App() {
+      const [stats, setStats] = useState(null);
+      const HIERARCHY_ID = "__hierarchy__";
+      const [sessions, setSessions] = useState([]);
+      const [agentFilter, setAgentFilter] = useState("all");
+      const [hideHeartbeats, setHideHeartbeats] = useState(true);
+      const [selectedSessionId, setSelectedSessionId] = useState(null);
+      const [graph, setGraph] = useState(null);
+      const [selectedNode, setSelectedNode] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [ingesting, setIngesting] = useState(false);
+      const [error, setError] = useState(null);
+      const [canvasSize, setCanvasSize] = useState({ w: 5000, h: 5000 });
+      const canvasRef = useRef(null);
+      const canvasWrapRef = useRef(null);
+      // Track whether we've done the initial fit for the current session.
+      // Reset to false whenever the session changes so the new graph gets fitted once.
+      const hasFittedRef = useRef(false);
+
+      // Tame Reaflow's wheel zoom: it maps wheel to a pinch gesture internally.
+      // useGesture accumulates deltaY into a pinch offset; one mouse notch (~100px)
+      // adds ~50 to the offset, which maps to a 0.5 zoom jump — far too much.
+      // We intercept the wheel event and re-dispatch a scaled version so Reaflow's
+      // pinch handler sees a small delta while still having the correct clientX/Y
+      // for focal-point zoom.
+      useEffect(() => {
+        const el = canvasWrapRef.current;
+        if (!el) return;
+        const onWheel = (e) => {
+          if (e.__scaled) return; // avoid re-processing our own dispatched event
+          e.preventDefault();
+          e.stopImmediatePropagation();
+
+          // Snapshot the scroll container position before zoom fires.
+          // Reaflow's zoom handler recenters the SVG translate but does not adjust
+          // scroll, so the graph jumps sideways proportional to how far we've panned.
+          // canvasRef.current.containerRef is Reaflow's exposed scroll container ref.
+          const inner = canvasRef.current?.containerRef?.current ?? null;
+          const scrollBefore = inner ? { left: inner.scrollLeft, top: inner.scrollTop } : null;
+
+          const rect = el.getBoundingClientRect();
+          const scaled = new WheelEvent("wheel", {
+            bubbles: true, cancelable: true,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+            deltaX: 0,
+            deltaY: e.deltaY * 0.05,
+            deltaMode: e.deltaMode,
+            ctrlKey: true,
+          });
+          Object.defineProperty(scaled, "__scaled", { value: true });
+          e.target.dispatchEvent(scaled);
+
+          // Restore scroll after Reaflow's zoom handler runs (it runs synchronously
+          // inside dispatchEvent, so the rAF fires after the DOM has been updated).
+          if (scrollBefore && inner) {
+            requestAnimationFrame(() => {
+              inner.scrollLeft = scrollBefore.left;
+              inner.scrollTop  = scrollBefore.top;
+            });
+          }
+        };
+        el.addEventListener("wheel", onWheel, { capture: true, passive: false });
+        return () => el.removeEventListener("wheel", onWheel, { capture: true });
+      }, []);
+
+      // Load stats on mount
+      useEffect(() => {
+        apiFetch("/graph-context/api/stats").then(setStats).catch(e => setError(e.message));
+      }, []);
+
+      // Load sessions
+      useEffect(() => {
+        const params = new URLSearchParams({ limit: "200" });
+        if (agentFilter !== "all") params.set("agent", agentFilter);
+        if (hideHeartbeats) params.set("heartbeats", "false");
+        apiFetch(`/graph-context/api/sessions?${params}`).then(setSessions).catch(e => setError(e.message));
+      }, [agentFilter, hideHeartbeats]);
+
+      // Load graph when session selected (or full hierarchy)
+      useEffect(() => {
+        if (!selectedSessionId) { setGraph(null); return; }
+        hasFittedRef.current = false;
+        setCanvasSize({ w: 5000, h: 5000 });
+        setLoading(true);
+        setError(null);
+        const url = selectedSessionId === HIERARCHY_ID
+          ? "/graph-context/api/hierarchy"
+          : `/graph-context/api/neighbourhood?sessionId=${encodeURIComponent(selectedSessionId)}&maxNodes=300`;
+        apiFetch(url)
+          .then(data => { setGraph(data); setLoading(false); })
+          .catch(e => { setError(e.message); setLoading(false); });
+      }, [selectedSessionId]);
+
+      const triggerIngest = useCallback(async () => {
+        setIngesting(true);
+        try {
+          await fetch("/graph-context/api/ingest", { method: "POST" });
+          // Reload stats after a short delay
+          setTimeout(() => {
+            apiFetch("/graph-context/api/stats").then(setStats).catch(() => {});
+            setIngesting(false);
+          }, 2000);
+        } catch (e) {
+          setError(e.message);
+          setIngesting(false);
+        }
+      }, []);
+
+      // Build reaflow nodes + edges from graph data
+      const { reaNodes, reaEdges } = useMemo(() => {
+        if (!graph) return { reaNodes: [], reaEdges: [] };
+        const reaNodes = graph.nodes.map(n => ({
+          id: n.id,
+          data: n,
+          width:  n.type === "session" ? 200 : n.type === "tool_call" || n.type === "tool_result" ? 160 : 180,
+          height: n.type === "session" ? 44  : n.type === "tool_call" || n.type === "tool_result" ? 32  : 36,
+        }));
+        const reaEdges = graph.edges.map(e => ({
+          id: e.id,
+          from: e.src,
+          to: e.dst,
+          data: e,          // accessible as edge.data in the renderer
+        }));
+        return { reaNodes, reaEdges };
+      }, [graph]);
+
+
+      const agents = useMemo(() => {
+        if (!stats) return [];
+        return Object.keys(stats.agentCounts ?? {}).sort();
+      }, [stats]);
+
+      const filteredSessions = useMemo(() => {
+        if (agentFilter === "all") return sessions;
+        return sessions.filter(s => s.agent_id === agentFilter);
+      }, [sessions, agentFilter]);
+
+      return React.createElement(React.Fragment, null,
+        // Topbar
+        React.createElement("div", { className: "topbar" },
+          React.createElement("h1", null, "⚡ Graph Context"),
+          stats && React.createElement("span", { className: "stat" },
+            `${stats.nodeCount.toLocaleString()} nodes · ${stats.edgeCount.toLocaleString()} edges · ${stats.sessionCount.toLocaleString()} sessions`
+          ),
+          React.createElement("div", { className: "spacer" }),
+          React.createElement("button", {
+            className: "btn secondary",
+            onClick: triggerIngest,
+            disabled: ingesting,
+          }, ingesting ? "Ingesting…" : "Ingest Now"),
+        ),
+
+        React.createElement("div", { className: "main" },
+          // Sidebar
+          React.createElement("div", { className: "sidebar" },
+            React.createElement("div", { className: "sidebar-header", style: { flexWrap: "wrap", gap: 6 } },
+              "Sessions",
+              React.createElement("select", {
+                value: agentFilter,
+                onChange: e => setAgentFilter(e.target.value),
+              },
+                React.createElement("option", { value: "all" }, "All agents"),
+                agents.map(a => React.createElement("option", { key: a, value: a }, a)),
+              ),
+              React.createElement("label", {
+                style: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#9ca3af", cursor: "pointer", whiteSpace: "nowrap" },
+                title: "Hide sessions whose first message is HEARTBEAT_OK",
+              },
+                React.createElement("input", {
+                  type: "checkbox",
+                  checked: hideHeartbeats,
+                  onChange: e => setHideHeartbeats(e.target.checked),
+                  style: { cursor: "pointer" },
+                }),
+                "Hide heartbeats",
+              ),
+            ),
+            React.createElement("div", { className: "sidebar-list" },
+              // Pinned "Full Hierarchy" entry
+              React.createElement("div", {
+                className: `session-row${selectedSessionId === HIERARCHY_ID ? " active" : ""}`,
+                onClick: () => { setSelectedSessionId(HIERARCHY_ID); setSelectedNode(null); },
+                style: { borderBottom: "1px solid #2d3748" },
+              },
+                React.createElement("div", { className: "sk" },
+                  React.createElement("span", {
+                    className: "agent-badge",
+                    style: { background: "#14532d55", color: "#86efac", fontStyle: "italic" },
+                  }, "⬡"),
+                  " Full Hierarchy",
+                ),
+                React.createElement("div", { className: "ts" }, "root → agent → type → ref_files → sessions"),
+              ),
+              filteredSessions.length === 0
+                ? React.createElement("div", { style: { padding: "16px", color: "#6b7280", fontSize: "13px" } },
+                    stats?.sessionCount === 0 ? "No sessions yet — click Ingest Now" : "Loading…")
+                : filteredSessions.map(s =>
+                    React.createElement("div", {
+                      key: s.id,
+                      className: `session-row${selectedSessionId === s.session_id ? " active" : ""}`,
+                      onClick: () => { setSelectedSessionId(s.session_id); setSelectedNode(null); },
+                    },
+                      React.createElement("div", { className: "sk" },
+                        React.createElement("span", {
+                          className: "agent-badge",
+                          style: { background: agentColor(s.agent_id) + "33", color: agentColor(s.agent_id) },
+                        }, s.agent_id),
+                        truncate(s.session_key.replace(/^agent:[^:]+:/, ""), 38),
+                      ),
+                      React.createElement("div", { className: "ts" }, formatTs(s.ts)),
+                    )
+                  ),
+            ),
+          ),
+
+          // Canvas
+          React.createElement("div", { className: "canvas-wrap", ref: canvasWrapRef },
+            error && React.createElement("div", {
+              style: { position: "absolute", top: 12, left: 12, right: 12, background: "#1f0d0d", border: "1px solid #7f1d1d", borderRadius: 6, padding: "8px 12px", fontSize: 12, color: "#fecaca", zIndex: 10 }
+            }, error),
+
+            !selectedSessionId && !loading &&
+              React.createElement("div", { className: "empty-state" },
+                React.createElement("h2", null, "Select a session"),
+                React.createElement("p", null, "Choose a session from the sidebar to visualize its conversation graph."),
+                stats?.sessionCount === 0 &&
+                  React.createElement("p", { style: { color: "#f59e0b" } }, "No sessions in DB yet — click 'Ingest Now' to load your history."),
+              ),
+
+            loading &&
+              React.createElement("div", { className: "empty-state" },
+                React.createElement("p", null, "Loading graph…"),
+              ),
+
+            !loading && graph && reaNodes.length > 0 &&
+              React.createElement(Canvas, {
+                ref: canvasRef,
+                nodes: reaNodes,
+                edges: reaEdges,
+                direction: "RIGHT",
+                animated: false,
+                fit: !hasFittedRef.current,
+                onLayoutChange: (layout) => {
+                  hasFittedRef.current = true;
+                  if (layout?.width && layout?.height) {
+                    // Give 3× headroom so zooming in never runs out of scrollable canvas.
+                    setCanvasSize({ w: Math.ceil(layout.width * 3 + 2000), h: Math.ceil(layout.height * 3 + 2000) });
+                  }
+                },
+                zoomable: true,
+                pannable: true,
+                panType: "drag",
+                minZoom: -0.98,
+                maxZoom: 3,
+                maxWidth: canvasSize.w,
+                maxHeight: canvasSize.h,
+                node: React.createElement(ReaNode, {
+                  linkable: false,
+                  removable: false,
+                  style: (n) => {
+                    const gn = n?.data ?? null;
+                    const isSelected = selectedNode?.id === gn?.id;
+                    return {
+                      fill: nodeColor(gn),
+                      stroke: isSelected ? "#f59e0b" : "#374151",
+                      strokeWidth: isSelected ? 2 : 1,
+                      rx: 6,
+                      ry: 6,
+                    };
+                  },
+                  children: (event) => {
+                    const gn = event?.node?.data ?? null;
+                    const w = event?.width ?? 180;
+                    const h = event?.height ?? 36;
+                    // Virtual nodes show their label prominently; conversation nodes show type + snippet
+                    const isVirtual = gn?.type === "root" || gn?.type === "agent" ||
+                                      gn?.type === "session_type" || gn?.type === "ref_files";
+                    const line1 = isVirtual
+                      ? (gn?.type === "session_type" ? `[${gn?.content_text ?? "?"}]`
+                         : gn?.type === "ref_files"   ? "RefFiles"
+                         : gn?.type === "agent"        ? `agent:${gn?.content_text ?? "?"}`
+                         : "root")
+                      : (gn?.type ?? "");
+                    const line2 = isVirtual
+                      ? (gn?.type === "ref_files" ? truncate(gn?.content_text ?? "", 30) : "")
+                      : truncate(gn?.content_text ?? gn?.session_key ?? gn?.id ?? "", 26);
+                    return React.createElement("foreignObject", { width: w, height: h, x: 0, y: 0 },
+                      React.createElement("div", {
+                        xmlns: "http://www.w3.org/1999/xhtml",
+                        style: {
+                          width: "100%", height: "100%", display: "flex", flexDirection: "column",
+                          justifyContent: "center", padding: "2px 6px", boxSizing: "border-box",
+                          overflow: "hidden", cursor: "pointer", pointerEvents: "auto",
+                        },
+                        onClick: (e) => { e.stopPropagation(); if (gn) setSelectedNode(gn); },
+                      },
+                        React.createElement("div", {
+                          style: { fontSize: 8, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: "ui-monospace, monospace", lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+                        }, line1),
+                        React.createElement("div", {
+                          style: { fontSize: 10, color: "#e5e7eb", fontFamily: "ui-monospace, monospace", lineHeight: 1.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+                        }, line2),
+                      )
+                    );
+                  },
+                }),
+                edge: (edge) =>
+                  React.createElement(ReaEdge, {
+                    ...edge,
+                    style: {
+                      stroke: EDGE_COLORS[edge.data?.type] ?? "#374151",
+                      strokeWidth: edge.data?.type === "sequence" ? 1 : 1.5,
+                      strokeDasharray: edge.data?.type === "sequence" ? "none" : "4,3",
+                    },
+                  }),
+              }),
+
+            // Legend
+            !loading && graph &&
+              React.createElement("div", { className: "legend" },
+                ["session", "message (user)", "message (asst)", "tool_call", "tool_result", "summary"].map((label, i) => {
+                  const colors = ["#1e3a8a", "#1d4ed8", "#065f46", "#78350f", "#7c2d12", "#4a044e"];
+                  return React.createElement("div", { key: i },
+                    React.createElement("span", { className: "swatch", style: { background: colors[i] } }),
+                    label,
+                  );
+                }),
+                React.createElement("hr", { style: { border: "none", borderTop: "1px solid #1f2937", margin: "6px 0" } }),
+                Object.entries(EDGE_COLORS).map(([type, color]) =>
+                  React.createElement("div", { key: type },
+                    React.createElement("span", { style: { display: "inline-block", width: 20, height: 2, background: color, verticalAlign: "middle", marginRight: 6, borderRadius: 1 } }),
+                    type,
+                  )
+                ),
+              ),
+
+            // Stats bar
+            !loading && graph &&
+              React.createElement("div", { className: "stats-bar" },
+                React.createElement("span", { className: "stat-chip" }, `${graph.nodes.length} nodes`),
+                React.createElement("span", { className: "stat-chip" }, `${graph.edges.length} edges`),
+              ),
+          ),
+        ),
+
+        // Node detail modal (rendered outside .main so it overlays everything)
+        selectedNode &&
+          React.createElement(NodeModal, {
+            node: selectedNode,
+            onClose: () => setSelectedNode(null),
+          }),
+      );
+    }
+
+    createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</body>
+</html>

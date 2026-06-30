@@ -1,0 +1,35 @@
+{
+  "id": "graph-context",
+  "name": "Graph Context",
+  "version": "0.1.0",
+  "description": "SQLite-backed conversation graph store with gateway-mounted /graph-context visualizer.",
+  "author": "Tank (Eddie's stack)",
+  "main": "dist/index.js",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dbPath": {
+        "type": "string",
+        "description": "Absolute path to the SQLite graph database file.",
+        "default": "~/.openclaw/graph-context.db"
+      },
+      "agentsDir": {
+        "type": "string",
+        "description": "Path to the OpenClaw agents directory (contains per-agent session JSONL files).",
+        "default": "~/.openclaw/agents"
+      }
+    }
+  },
+  "uiHints": {
+    "dbPath": {
+      "label": "SQLite DB Path"
+    },
+    "agentsDir": {
+      "label": "Agents Directory"
+    }
+  }
+}

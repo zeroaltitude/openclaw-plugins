@@ -1,0 +1,32 @@
+{
+  "name": "@openclaw/graph-context",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenClaw plugin: graph-based session context engine — SQLite adjacency store + gateway-mounted /graph-context visualizer",
+  "main": "dist/index.js",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "ingest": "node dist/ingest-cli.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.2.1",
+    "typescript": "^5.4.0"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "ui",
+    "README.md"
+  ]
+}
