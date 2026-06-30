@@ -190,6 +190,8 @@ async function readJsonlLines(filePath: string): Promise<{ lines: string[]; tota
  *
  * Returns an array of { ts, text } in chronological order.
  */
+const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024; // skip transcripts > 2 MB
+
 async function readClaudeTranscriptUserTurns(
   threadId: string,
   cwd: string,
@@ -197,10 +199,15 @@ async function readClaudeTranscriptUserTurns(
   maxChars: number,
 ): Promise<Array<{ ts: number; text: string }>> {
   try {
-    const { readFile } = await import("node:fs/promises");
     // Map cwd → Claude project dir: every / and . becomes -
     const projectKey = cwd.replace(/[/.]/g, "-");
     const transcriptPath = join(claudeProjectsBase, projectKey, `${threadId}.jsonl`);
+
+    // Guard: skip very large transcripts to avoid OOM
+    const fileStat = await stat(transcriptPath);
+    if (fileStat.size > MAX_TRANSCRIPT_BYTES) return [];
+
+    const { readFile } = await import("node:fs/promises");
     const raw = await readFile(transcriptPath, "utf8");
     const results: Array<{ ts: number; text: string }> = [];
     for (const line of raw.split("\n")) {
@@ -296,16 +303,36 @@ export async function ingestAgent(
     // best effort
   }
 
+  // Bulk-load all ingest_state records for this agent into a Map to avoid per-file DB lookups.
+  type IngestStateRow = { session_file: string; bytes_read: number; session_id: string };
+  const ingestStateMap = new Map<string, IngestStateRow>(
+    (db.prepare("SELECT session_file, bytes_read, session_id FROM ingest_state WHERE agent_id = ?")
+      .all(agentId) as IngestStateRow[])
+      .map((r) => [r.session_file, r])
+  );
+
+  // Bulk-load session IDs that already have user-role message nodes, so the backfill
+  // path can be skipped without a per-session DB query.
+  const sessionsWithUserTurns = new Set<string>(
+    (db.prepare(
+      "SELECT DISTINCT session_id FROM nodes WHERE agent_id = ? AND type = 'message' AND role = 'user'"
+    ).all(agentId) as { session_id: string }[]).map((r) => r.session_id)
+  );
+
   for (const file of files) {
     const filePath = join(sessionsDir, file);
     try {
+      const existing = ingestStateMap.get(filePath);
+
+      // Fast skip: if already fully ingested and user turns are present, no work to do.
+      // Avoid stat entirely for these — they are the vast majority on repeated ingests.
+      if (existing && existing.bytes_read > 0 && sessionsWithUserTurns.has(existing.session_id)) {
+        result.filesSkipped++;
+        continue;
+      }
+
       const fileStat = await stat(filePath);
       const fileSize = fileStat.size;
-
-      // Check ingest state
-      const existing = db
-        .prepare("SELECT bytes_read, session_id FROM ingest_state WHERE session_file = ?")
-        .get(filePath) as { bytes_read: number; session_id: string } | undefined;
 
       if (existing && existing.bytes_read >= fileSize) {
         // File is fully ingested — but user turns from the Claude transcript may not
