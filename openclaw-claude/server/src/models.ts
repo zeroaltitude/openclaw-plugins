@@ -77,7 +77,51 @@ export const ANTHROPIC_MODELS: Model[] = [
     supportedReasoningEfforts: REASONING_EFFORTS_NONE,
     inputModalities: ["text", "image"],
   },
+  {
+    id: "claude-opus-4-8",
+    model: "claude-opus-4-8",
+    displayName: "Claude Opus 4.8",
+    description: "Latest-generation Opus; 1M-token context, extended thinking, vision.",
+    hidden: false,
+    isDefault: false,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: REASONING_EFFORTS_DEFAULT,
+    inputModalities: ["text", "image"],
+  },
+  {
+    id: "claude-fable-5",
+    model: "claude-fable-5",
+    displayName: "Claude Fable 5",
+    description:
+      "Preview model with always-on adaptive extended thinking; 1M-token context, vision. " +
+      "Unlike other Claude models, the Anthropic API rejects thinking.type=disabled for this " +
+      "model outright, so \"none\"/\"minimal\" are deliberately not offered here — see " +
+      "MODELS_REQUIRING_THINKING below, which forces a real budget even if a caller somehow " +
+      "requests a disabled/unrecognized effort anyway.",
+    hidden: false,
+    isDefault: false,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: REASONING_EFFORTS_DEFAULT,
+    inputModalities: ["text", "image"],
+  },
 ];
+
+/**
+ * Model IDs that cannot accept thinking.type="disabled" at all — the Anthropic
+ * API hard-rejects the request (400 "thinking.type.disabled is not supported
+ * for this model"). Keyed by model, not by reasoning-effort string, because
+ * callers upstream (OpenClaw core) may pass effort values outside this
+ * bridge's own ReasoningEffort enum (e.g. "adaptive"/"max" from core's newer
+ * thinking-level vocabulary) — those fall through thinkingBudgetForEffort's
+ * default case to null/disabled just like "none" would. Checking the model
+ * directly in runTurn (turn-runner.ts) catches every such case, not just the
+ * ones spelled "none"/"minimal".
+ */
+const MODELS_REQUIRING_THINKING = new Set<string>(["claude-fable-5"]);
+
+export function requiresAlwaysOnThinking(modelId: string | undefined): boolean {
+  return !!modelId && MODELS_REQUIRING_THINKING.has(modelId);
+}
 
 export function buildModelListResponse(): ModelListResponse {
   return { data: ANTHROPIC_MODELS, nextCursor: null };

@@ -30,6 +30,7 @@ import {
 import { formatRateLimitMessage, parseAnthropicRateLimitError } from "./rate-limits.js";
 import {
   thinkingBudgetForEffort,
+  requiresAlwaysOnThinking,
 } from "./models.js";
 import type {
   DynamicToolCallOutputContentItem,
@@ -105,11 +106,36 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   inputQueue.close();
 
   // Map codex effort → SDK thinking config.
-  const budget = thinkingBudgetForEffort(effort ?? null);
-  const thinking =
-    budget === null
-      ? ({ type: "disabled" } as const)
-      : ({ type: "enabled", budgetTokens: budget } as const);
+  //
+  // Anthropic's own 400 message spells out the contract: "Thinking defaults
+  // to adaptive mode when not specified" — omitting the thinking param is
+  // how a caller asks for model-default behavior, and is NOT the same as
+  // explicitly disabling it. Previously this bridge conflated the two: any
+  // unresolved effort (including OpenClaw's "adaptive"/"max" thinkLevels,
+  // which this bridge's ReasoningEffort enum has no equivalent for and so
+  // arrive as null/undefined) fell through to an explicit
+  // thinking.type="disabled", which most models silently tolerate but which
+  // Anthropic hard-rejects specifically for claude-fable-5.
+  //
+  // Only send `disabled` when the caller explicitly asked for none/minimal.
+  // Otherwise, if a real budget resolves, send it; if nothing resolves at
+  // all, omit `thinking` entirely and let Anthropic apply its own default —
+  // which is exactly what "adaptive" should mean, and avoids ever sending a
+  // disabled request a given model might reject.
+  //
+  // requiresAlwaysOnThinking is a narrower safety net on top of that: it
+  // overrides even an *explicit* none/minimal request for models (like
+  // fable-5) that reject disabled thinking outright, so a user picking "off"
+  // for such a model degrades to a small real budget instead of a 400.
+  const explicitlyDisabled = effort === "none" || effort === "minimal";
+  const resolvedBudget = thinkingBudgetForEffort(effort ?? null);
+  const thinking = requiresAlwaysOnThinking(model)
+    ? ({ type: "enabled", budgetTokens: resolvedBudget ?? thinkingBudgetForEffort("low")! } as const)
+    : explicitlyDisabled
+    ? ({ type: "disabled" } as const)
+    : resolvedBudget !== null
+    ? ({ type: "enabled", budgetTokens: resolvedBudget } as const)
+    : undefined;
 
   // `resume` is only safe when there's actual history to load — passing it
   // for a brand-new thread makes the SDK silently no-op the turn. We probe
@@ -167,7 +193,9 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     model,
     sessionStore: sessionStore as unknown,
     abortController: turn.abortController,
-    thinking,
+    // Omitted entirely (not sent as thinking: undefined) when unresolved —
+    // see the comment above `thinking`'s computation for why that matters.
+    ...(thinking ? { thinking } : {}),
     includePartialMessages: true,
     // Pin the SDK's working directory to the thread's cwd so the claude_code
     // preset's native Read/Edit/Bash tools operate inside the OpenClaw
