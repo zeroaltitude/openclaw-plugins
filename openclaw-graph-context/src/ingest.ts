@@ -244,6 +244,40 @@ async function readClaudeTranscriptUserTurns(
   }
 }
 
+const SESSION_UUID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+
+/**
+ * Classify a filename from an agent's sessions directory.
+ *
+ * Beyond the live `<uuid>.jsonl` transcript, the daily auto-reset and retention
+ * policy produce `<uuid>.jsonl.reset.<ISO-timestamp>` and
+ * `<uuid>.jsonl.deleted.<ISO-timestamp>` snapshots — the live file is deleted on
+ * reset, so the `.reset.`/`.deleted.` file IS the only remaining record of that
+ * session. These carry the same UUID prefix (optionally followed by a
+ * `-topic-<ts>` infix) but don't end in exactly ".jsonl", so a naive
+ * `.endsWith(".jsonl")` filter silently excludes them from ingestion entirely.
+ *
+ * Returns null for sidecar/metadata files (.trajectory., .checkpoint.,
+ * .claude-binding.json, etc.) that aren't themselves a session transcript.
+ */
+function classifySessionFile(filename: string): { uuid: string } | null {
+  if (filename.includes(".trajectory.")) return null;
+  if (filename.includes(".checkpoint.")) return null;
+  if (filename.endsWith(".claude-binding.json")) return null;
+  if (filename.endsWith(".trajectory-path.json")) return null;
+  if (filename.endsWith(".codex-app-server.json")) return null;
+  if (filename === "sessions.json" || filename.startsWith("sessions.json.")) return null;
+
+  const isLive = filename.endsWith(".jsonl");
+  const isReset = filename.includes(".jsonl.reset.");
+  const isDeleted = filename.includes(".jsonl.deleted.");
+  if (!isLive && !isReset && !isDeleted) return null;
+
+  const uuidMatch = filename.match(SESSION_UUID_RE);
+  if (!uuidMatch) return null;
+  return { uuid: uuidMatch[1] };
+}
+
 /**
  * Try to read sessionKey from the companion .trajectory.jsonl file.
  * The trajectory's first "session.started" entry has a `sessionKey` field
@@ -284,7 +318,7 @@ export async function ingestAgent(
   let files: string[];
   try {
     const entries = await readdir(sessionsDir);
-    files = entries.filter((f) => f.endsWith(".jsonl") && !f.includes(".trajectory."));
+    files = entries.filter((f) => classifySessionFile(f) !== null);
   } catch {
     log(`[graph-context] no sessions dir for agent ${agentId}, skipping`);
     return result;
@@ -322,6 +356,18 @@ export async function ingestAgent(
   for (const file of files) {
     const filePath = join(sessionsDir, file);
     try {
+      // Already validated by the files[] filter above, but classify again here to get
+      // the canonical UUID — needed to build trajectory/binding sidecar paths correctly
+      // for reset/deleted filenames, which don't end in plain ".jsonl".
+      const classified = classifySessionFile(file);
+      if (!classified) {
+        result.filesSkipped++;
+        continue;
+      }
+      const fileUuid = classified.uuid;
+      const trajectoryPath = join(sessionsDir, `${fileUuid}.trajectory.jsonl`);
+      const bindingPath = join(sessionsDir, `${fileUuid}.jsonl.claude-binding.json`);
+
       const existing = ingestStateMap.get(filePath);
 
       // Fast skip: if already fully ingested and user turns are present, no work to do.
@@ -343,7 +389,6 @@ export async function ingestAgent(
         ).get(existing.session_id) as { c: number }).c > 0;
 
         if (!hasUserTurns) {
-          const bindingPath = filePath.replace(/\.jsonl$/, ".jsonl.claude-binding.json");
           try {
             const { readFile } = await import("node:fs/promises");
             const binding = JSON.parse(await readFile(bindingPath, "utf8")) as Record<string, unknown>;
@@ -410,14 +455,14 @@ export async function ingestAgent(
         continue;
       }
 
-      const sessionId = sessionHeader.id ?? file.replace(".jsonl", "");
-      const fileUuid = file.replace(".jsonl", "");
+      const sessionId = sessionHeader.id ?? fileUuid;
       const sessionTs = sessionHeader.timestamp ? new Date(sessionHeader.timestamp).getTime() : 0;
 
       // Resolve session key: sessions.json (Slack sessions) → trajectory file → unknown fallback.
       // sessions.json uses the filename UUID as the sessionId key; the JSONL header may have a
-      // different internal ID. Try both.
-      const trajectoryPath = filePath.replace(/\.jsonl$/, ".trajectory.jsonl");
+      // different internal ID. Try both. For reset/deleted sessions, sessions.json only ever
+      // tracks the *current* live pointer, so the trajectory sidecar is typically the only way
+      // to recover the true sessionKey for these.
       const sessionKey =
         sessionKeyMap[sessionId] ??
         sessionKeyMap[fileUuid] ??
@@ -427,7 +472,6 @@ export async function ingestAgent(
 
       // Cross-reference Claude Code transcript for user prompts, and capture the
       // developerInstructionsFingerprint which identifies the exact RefFiles set injected.
-      const bindingPath = filePath.replace(/\.jsonl$/, ".jsonl.claude-binding.json");
       let claudeUserTurns: Array<{ ts: number; text: string }> = [];
       let devInstructionsFingerprint: string | null = null;
       try {
@@ -450,8 +494,14 @@ export async function ingestAgent(
       const ingestFile = db.transaction(() => {
       // --- Session node ---
       // Detect heartbeat sessions: first message content is exactly "HEARTBEAT_OK"
-      // (or the session key contains ":heartbeat" from the trajectory resolution).
-      const isHeartbeatByKey = sessionKey.includes(":heartbeat") || sessionKey.includes("unknown:") || sessionKey.includes(":cron:");
+      // (or the session key genuinely routes through ":heartbeat"/":cron:"). Do NOT
+      // treat an "unknown:" fallback key as a heartbeat signal — that fallback only
+      // means session_key resolution failed (no sessions.json entry, no trajectory
+      // sidecar), which says nothing about whether the session was automated. Real
+      // Slack/Discord DMs and direct requests can and do land in the unknown bucket
+      // when resolution fails; only content (isHeartbeatByContent, below) can tell
+      // heartbeat noise apart from a real conversation in that case.
+      const isHeartbeatByKey = sessionKey.includes(":heartbeat") || sessionKey.includes(":cron:");
       const isHeartbeatByContent = (() => {
         for (const line of lines.slice(1)) {
           try {

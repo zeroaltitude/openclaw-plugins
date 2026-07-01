@@ -31,6 +31,11 @@
 import Database from "better-sqlite3";
 import { homedir } from "node:os";
 
+// Hard cap for any session list returned to the UI (sidebar, ref_files expansion, etc).
+// A ref_files set with a large fan-out can otherwise return hundreds of session nodes
+// in one shot, which both floods the UI and produces unusably large graph layouts.
+export const MAX_SESSION_LIST = 100;
+
 export type NodeType =
   | "session"
   | "message"
@@ -289,6 +294,7 @@ export function recentSessions(
   agentId?: string,
   includeHeartbeats = true,
 ): GraphNode[] {
+  limit = Math.min(limit, MAX_SESSION_LIST);
   const heartbeatFilter = includeHeartbeats
     ? ""
     : "AND (properties IS NULL OR json_extract(properties,'$.kind') IS NOT 'heartbeat')";
@@ -365,15 +371,16 @@ export function refFilesSessionNodes(
   let sessionNodes: GraphNode[];
   if (includeHidden) {
     sessionNodes = db.prepare(
-      `SELECT * FROM nodes WHERE id IN (${placeholders}) AND type='session' ORDER BY ts DESC`
-    ).all(...sessionIds) as GraphNode[];
+      `SELECT * FROM nodes WHERE id IN (${placeholders}) AND type='session' ORDER BY ts DESC LIMIT ?`
+    ).all(...sessionIds, MAX_SESSION_LIST) as GraphNode[];
   } else {
     sessionNodes = db.prepare(`
       SELECT * FROM nodes
       WHERE id IN (${placeholders}) AND type='session'
         AND (properties IS NULL OR json_extract(properties,'$.display') IS NOT 'hidden')
       ORDER BY ts DESC
-    `).all(...sessionIds) as GraphNode[];
+      LIMIT ?
+    `).all(...sessionIds, MAX_SESSION_LIST) as GraphNode[];
   }
 
   const visibleIds = new Set(sessionNodes.map(n => n.id));
@@ -541,6 +548,7 @@ export function isHeartbeatFirstMessage(text: string | null | undefined): boolea
   if (stripped.toUpperCase() === "HEARTBEAT_OK") return true;
   if (stripped.startsWith("✓ Heartbeat") || stripped.startsWith("✓ **Heartbeat")) return true;
   if (/^heartbeat (complete|ok|done)/i.test(stripped)) return true;
+  if (/^read heartbeat\.md/i.test(stripped)) return true;
   return false;
 }
 
@@ -618,4 +626,58 @@ export function classifyHeartbeats(db: Database.Database): number {
 
   run();
   return candidates.length;
+}
+
+/**
+ * Retroactively fix false-positive heartbeat sessions from before the fix that
+ * removed the "unknown:" key-substring heuristic from ingest's isHeartbeatByKey.
+ * That heuristic used to mark ANY session whose session_key resolution failed
+ * (falling back to "agent:<id>:unknown:<sessionId>") as a heartbeat, hiding real
+ * Slack/Discord DMs and direct requests whose channel just couldn't be resolved.
+ *
+ * Re-evaluates every session tagged kind=heartbeat whose session_key does NOT
+ * genuinely route through ":heartbeat" or ":cron:" (i.e. was only caught by the
+ * removed key heuristic) against its actual first-message content. Sessions that
+ * still look like a real heartbeat by content keep kind=heartbeat; everything
+ * else gets the kind flag cleared so it's no longer hidden by markDuplicateNodes.
+ *
+ * Idempotent — safe to call on every ingest/migrate.
+ */
+export function reclassifyUnknownHeartbeats(db: Database.Database): { reevaluated: number; cleared: number } {
+  const candidates = db.prepare(`
+    SELECT id, session_id FROM nodes
+    WHERE type = 'session'
+      AND json_extract(properties, '$.kind') = 'heartbeat'
+      AND session_key NOT LIKE '%:heartbeat%'
+      AND session_key NOT LIKE '%:cron:%'
+  `).all() as { id: string; session_id: string }[];
+
+  if (candidates.length === 0) return { reevaluated: 0, cleared: 0 };
+
+  const firstTsBySession = new Map<string, number>(
+    (db.prepare("SELECT session_id, MIN(ts) as min_ts FROM nodes WHERE type = 'message' GROUP BY session_id")
+      .all() as { session_id: string; min_ts: number }[])
+      .map((r) => [r.session_id, r.min_ts])
+  );
+  const getMsg = db.prepare(
+    "SELECT content_text FROM nodes WHERE session_id = ? AND type = 'message' AND ts = ? AND role IS NOT NULL AND role != 'toolResult' LIMIT 1"
+  );
+  const clearKind = db.prepare("UPDATE nodes SET properties = json_remove(properties, '$.kind') WHERE id = ?");
+
+  let cleared = 0;
+  const run = db.transaction(() => {
+    for (const c of candidates) {
+      const minTs = firstTsBySession.get(c.session_id);
+      const msg = minTs !== undefined
+        ? getMsg.get(c.session_id, minTs) as { content_text: string | null } | undefined
+        : undefined;
+      if (!isHeartbeatFirstMessage(msg?.content_text)) {
+        clearKind.run(c.id);
+        cleared++;
+      }
+    }
+  });
+  run();
+
+  return { reevaluated: candidates.length, cleared };
 }

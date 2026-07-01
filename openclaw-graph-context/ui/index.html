@@ -27,12 +27,16 @@
     .sidebar .sidebar-header { padding: 8px 12px; border-bottom: 1px solid #1f2937; font-size: 11px; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 8px; }
     .sidebar .sidebar-header select { font-size: 11px; padding: 2px 4px; flex: 1; }
     .sidebar-list { flex: 1; overflow-y: auto; }
-    .session-row { padding: 8px 12px; border-bottom: 1px solid #1a1f2e; cursor: pointer; transition: background 0.1s; }
+    .session-row { padding: 8px 12px; border-bottom: 1px solid #1a1f2e; border-left: 2px solid transparent; cursor: pointer; transition: background 0.1s; }
     .session-row:hover { background: #1f2937; }
     .session-row.active { background: #1e3a8a; }
+    .session-row.live { border-left-color: #22c55e; background: #14532d22; }
+    .session-row.live:hover { background: #14532d44; }
     .session-row .sk { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; color: #93c5fd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .session-row .ts { font-size: 10px; color: #6b7280; margin-top: 2px; }
     .session-row .agent-badge { display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px; margin-right: 4px; font-weight: 600; }
+    .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; margin-right: 5px; vertical-align: middle; animation: live-pulse 1.6s ease-in-out infinite; }
+    @keyframes live-pulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 #22c55e66; } 50% { opacity: 0.6; box-shadow: 0 0 0 4px #22c55e00; } }
 
     /* Graph canvas */
     .canvas-wrap { flex: 1; overflow: hidden; position: relative; background: #0c0d0f; cursor: grab; }
@@ -236,9 +240,17 @@
 
       // Graph state
       // skeleton: the root→agent→session_type→ref_files nodes+edges (never changes while on hierarchy view)
-      // expandedRefFiles: id of the ref_files node currently expanded (null = none)
+      // Single-expansion accordion per level: only one agent, one channel (session_type),
+      // and one ref_files set are ever drilled into at a time. Drilling into a sibling
+      // collapses whatever was previously shown below it, so the default view is just
+      // agent nodes and each double-click reveals exactly one more level.
+      // expandedAgentId: id of the agent node currently showing its channels
+      // expandedChannelId: id of the session_type node currently showing its ref_files
+      // expandedRefFiles: id of the ref_files node currently showing its sessions
       // expandedSessions: { nodes, edges } fetched for the expanded ref_files
       const [skeleton, setSkeleton] = useState(null);
+      const [expandedAgentId, setExpandedAgentId] = useState(null);
+      const [expandedChannelId, setExpandedChannelId] = useState(null);
       const [expandedRefFiles, setExpandedRefFiles] = useState(null);
       const [expandedSessions, setExpandedSessions] = useState(null);
       const [expandLoading, setExpandLoading] = useState(false);
@@ -254,6 +266,9 @@
       const canvasRef = useRef(null);
       const canvasWrapRef = useRef(null);
       const hasFittedRef = useRef(false);
+      // id of the node last double-clicked; the next layout recompute centers on it
+      // instead of the whole graph's bounding box.
+      const centerNodeIdRef = useRef(null);
 
       // Tame Reaflow wheel zoom
       useEffect(() => {
@@ -293,7 +308,7 @@
 
       // Load sessions sidebar
       useEffect(() => {
-        const params = new URLSearchParams({ limit: "200" });
+        const params = new URLSearchParams({ limit: "100" });
         if (agentFilter !== "all") params.set("agent", agentFilter);
         if (hideHeartbeats) params.set("heartbeats", "false");
         apiFetch(`/graph-context/api/sessions?${params}`).then(setSessions).catch(e => setError(e.message));
@@ -303,14 +318,19 @@
       useEffect(() => {
         if (selectedSessionId !== HIERARCHY_ID) {
           setSkeleton(null);
+          setExpandedAgentId(null);
+          setExpandedChannelId(null);
           setExpandedRefFiles(null);
           setExpandedSessions(null);
           return;
         }
         hasFittedRef.current = false;
+        centerNodeIdRef.current = null;
         setCanvasSize({ w: 5000, h: 5000 });
         setLoading(true);
         setError(null);
+        setExpandedAgentId(null);
+        setExpandedChannelId(null);
         setExpandedRefFiles(null);
         setExpandedSessions(null);
         apiFetch("/graph-context/api/hierarchy")
@@ -322,6 +342,7 @@
       useEffect(() => {
         if (!selectedSessionId || selectedSessionId === HIERARCHY_ID) { setSessionGraph(null); return; }
         hasFittedRef.current = false;
+        centerNodeIdRef.current = null;
         setCanvasSize({ w: 5000, h: 5000 });
         setLoading(true);
         setError(null);
@@ -330,34 +351,118 @@
           .catch(e => { setError(e.message); setLoading(false); });
       }, [selectedSessionId]);
 
-      // Handle double-click on a ref_files node: toggle its sessions
-      const handleRefFilesDoubleClick = useCallback(async (node) => {
-        if (node.type !== "ref_files") return;
+      // Map of parentId -> [childId, ...] derived from the skeleton's edges, used to
+      // resolve which session_type/ref_files nodes belong under the currently
+      // expanded agent/channel.
+      const childrenByParent = useMemo(() => {
+        const map = new Map();
+        if (!skeleton) return map;
+        for (const e of skeleton.edges) {
+          if (!map.has(e.src)) map.set(e.src, []);
+          map.get(e.src).push(e.dst);
+        }
+        return map;
+      }, [skeleton]);
 
-        // Collapse if already expanded
-        if (expandedRefFiles === node.id) {
+      // Single accordion handler for the three drill-down levels (agent -> channel ->
+      // ref_files). Re-clicking the currently expanded node at a level collapses it
+      // (and everything below); clicking a sibling switches directly, which implicitly
+      // hides whatever the previous sibling had revealed.
+      const handleNodeDoubleClick = useCallback(async (node) => {
+        if (!node) return;
+        // Whatever the user double-clicked stays centered once the resulting
+        // layout (expand or collapse) recomputes.
+        centerNodeIdRef.current = node.id;
+
+        if (node.type === "agent") {
+          hasFittedRef.current = false;
+          if (expandedAgentId === node.id) {
+            setExpandedAgentId(null);
+            setExpandedChannelId(null);
+            setExpandedRefFiles(null);
+            setExpandedSessions(null);
+            return;
+          }
+          setExpandedAgentId(node.id);
+          setExpandedChannelId(null);
           setExpandedRefFiles(null);
           setExpandedSessions(null);
-          hasFittedRef.current = false;
           return;
         }
 
-        setExpandedRefFiles(node.id);
-        setExpandedSessions(null);
-        setExpandLoading(true);
-        hasFittedRef.current = false;
-        try {
-          const data = await apiFetch(
-            `/graph-context/api/hierarchy/sessions?refFilesId=${encodeURIComponent(node.id)}`
-          );
-          setExpandedSessions(data);
-        } catch (e) {
-          setError(e.message);
+        if (node.type === "session_type") {
+          hasFittedRef.current = false;
+          if (expandedChannelId === node.id) {
+            setExpandedChannelId(null);
+            setExpandedRefFiles(null);
+            setExpandedSessions(null);
+            return;
+          }
+          setExpandedChannelId(node.id);
           setExpandedRefFiles(null);
-        } finally {
-          setExpandLoading(false);
+          setExpandedSessions(null);
+          return;
         }
-      }, [expandedRefFiles]);
+
+        if (node.type === "ref_files") {
+          hasFittedRef.current = false;
+          // Collapse if already expanded
+          if (expandedRefFiles === node.id) {
+            setExpandedRefFiles(null);
+            setExpandedSessions(null);
+            return;
+          }
+
+          setExpandedRefFiles(node.id);
+          setExpandedSessions(null);
+          setExpandLoading(true);
+          try {
+            const data = await apiFetch(
+              `/graph-context/api/hierarchy/sessions?refFilesId=${encodeURIComponent(node.id)}`
+            );
+            setExpandedSessions(data);
+          } catch (e) {
+            setError(e.message);
+            setExpandedRefFiles(null);
+          } finally {
+            setExpandLoading(false);
+          }
+        }
+      }, [expandedAgentId, expandedChannelId, expandedRefFiles]);
+
+      // Click vs. double-click disambiguation. A native dblclick fires click, click,
+      // dblclick in sequence — if the first click's handler causes a synchronous
+      // re-render (e.g. setSelectedNode forcing Reaflow to recompute node styles), the
+      // browser can lose track of the click pair and dblclick never fires. Deferring the
+      // single-click side effect behind a short timer keeps the DOM node stable across
+      // both clicks so the real dblclick reliably lands; a second click within the
+      // window cancels the pending single-click and is handled by onDoubleClick instead.
+      const clickTimerRef = useRef(null);
+      const CLICK_DELAY_MS = 220;
+
+      useEffect(() => () => {
+        if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+      }, []);
+
+      const handleNodeClick = useCallback((gn) => {
+        if (clickTimerRef.current) {
+          clearTimeout(clickTimerRef.current);
+          clickTimerRef.current = null;
+          return;
+        }
+        clickTimerRef.current = setTimeout(() => {
+          clickTimerRef.current = null;
+          if (gn) setSelectedNode(gn);
+        }, CLICK_DELAY_MS);
+      }, []);
+
+      const handleNodeDblClick = useCallback((gn) => {
+        if (clickTimerRef.current) {
+          clearTimeout(clickTimerRef.current);
+          clickTimerRef.current = null;
+        }
+        handleNodeDoubleClick(gn);
+      }, [handleNodeDoubleClick]);
 
       const triggerIngest = useCallback(async () => {
         setIngesting(true);
@@ -373,21 +478,39 @@
         }
       }, []);
 
-      // Compose the active graph for Reaflow
-      const activeGraph = useMemo(() => {
-        if (selectedSessionId === HIERARCHY_ID) {
-          if (!skeleton) return null;
-          // Merge skeleton + expanded sessions (if any)
-          const nodes = [...skeleton.nodes];
-          const edges = [...skeleton.edges];
-          if (expandedSessions) {
-            for (const n of expandedSessions.nodes) nodes.push(n);
-            for (const e of expandedSessions.edges) edges.push(e);
-          }
-          return { nodes, edges };
+      // Compose the active graph for Reaflow: only agent nodes by default, plus
+      // exactly one more level per drilled-into ancestor (agent -> channel -> ref_files
+      // -> sessions). Hiding the un-drilled branches is what keeps the layout from
+      // reflowing wildly on every click.
+      const hierarchyVisible = useMemo(() => {
+        if (!skeleton) return null;
+        const nodesById = new Map(skeleton.nodes.map(n => [n.id, n]));
+        const visibleIds = new Set();
+        for (const n of skeleton.nodes) {
+          if (n.type === "root" || n.type === "agent") visibleIds.add(n.id);
         }
+        if (expandedAgentId) {
+          for (const childId of childrenByParent.get(expandedAgentId) ?? []) visibleIds.add(childId);
+          if (expandedChannelId) {
+            for (const childId of childrenByParent.get(expandedChannelId) ?? []) visibleIds.add(childId);
+          }
+        }
+        const nodes = [...visibleIds].map(id => nodesById.get(id)).filter(Boolean);
+        if (expandedRefFiles && expandedSessions) {
+          nodes.push(...expandedSessions.nodes);
+        }
+        const idSet = new Set(nodes.map(n => n.id));
+        const edges = skeleton.edges.filter(e => idSet.has(e.src) && idSet.has(e.dst));
+        if (expandedRefFiles && expandedSessions) {
+          edges.push(...expandedSessions.edges);
+        }
+        return { nodes, edges };
+      }, [skeleton, expandedAgentId, expandedChannelId, expandedRefFiles, expandedSessions, childrenByParent]);
+
+      const activeGraph = useMemo(() => {
+        if (selectedSessionId === HIERARCHY_ID) return hierarchyVisible;
         return sessionGraph;
-      }, [selectedSessionId, skeleton, expandedSessions, sessionGraph]);
+      }, [selectedSessionId, hierarchyVisible, sessionGraph]);
 
       const { reaNodes, reaEdges } = useMemo(() => {
         if (!activeGraph) return { reaNodes: [], reaEdges: [] };
@@ -477,10 +600,12 @@
                 : sessions.map(s =>
                     React.createElement("div", {
                       key: s.id,
-                      className: `session-row${selectedSessionId === s.session_id ? " active" : ""}`,
+                      className: `session-row${selectedSessionId === s.session_id ? " active" : ""}${s.live ? " live" : ""}`,
+                      title: s.live ? "Live — turn currently in progress" : undefined,
                       onClick: () => { setSelectedSessionId(s.session_id); setSelectedNode(null); },
                     },
                       React.createElement("div", { className: "sk" },
+                        s.live && React.createElement("span", { className: "live-dot" }),
                         React.createElement("span", {
                           className: "agent-badge",
                           style: { background: agentColor(s.agent_id) + "33", color: agentColor(s.agent_id) },
@@ -515,9 +640,13 @@
             // Hint overlay for hierarchy view when skeleton is loaded
             isHierarchy && skeleton && !expandLoading &&
               React.createElement("div", { className: "hint-bar" },
-                expandedRefFiles
-                  ? "Double-click a ref_files node to collapse · single-click to inspect"
-                  : "Double-click a ref_files node to expand its sessions · single-click to inspect"
+                !expandedAgentId
+                  ? "Double-click an agent to see its channels · single-click to inspect"
+                  : !expandedChannelId
+                  ? "Double-click a channel to see its ref-file sets · double-click the agent again to collapse"
+                  : !expandedRefFiles
+                  ? "Double-click a ref-file set to see its sessions · double-click the channel again to collapse"
+                  : "Double-click the ref-file set again to collapse · single-click a session to inspect"
               ),
 
             !loading && activeGraph && reaNodes.length > 0 &&
@@ -531,7 +660,52 @@
                 onLayoutChange: (layout) => {
                   hasFittedRef.current = true;
                   if (layout?.width && layout?.height) {
-                    setCanvasSize({ w: Math.ceil(layout.width * 3 + 2000), h: Math.ceil(layout.height * 3 + 2000) });
+                    const w = Math.ceil(layout.width * 3 + 2000);
+                    const h = Math.ceil(layout.height * 3 + 2000);
+                    setCanvasSize({ w, h });
+                    // Reaflow re-centers its internal drawing translate on every layout
+                    // change (via the same formula as below, since defaultPosition stays
+                    // CENTER), but never re-centers the container's actual scroll offset.
+                    // A big fan-out (e.g. ~15 sibling sessions) grows the layout a lot on
+                    // one axis, so the translate shifts to keep the drawing centered in
+                    // the virtual canvas while the viewport keeps looking at the old scroll
+                    // position — the graph appears to "jump" until dragged back into view.
+                    // We recompute Reaflow's own translate (xy) ourselves — rather than
+                    // reading it back post-update, which races its internal effect — so we
+                    // can then target either the whole graph's center or, when the layout
+                    // change came from a double-click, that specific node's center.
+                    //
+                    // setCanvasSize above is a React state update — the container div's
+                    // actual scrollWidth/scrollHeight only grows to match `w`/`h` once React
+                    // re-renders and commits, which is not guaranteed to land within a single
+                    // requestAnimationFrame tick. Setting scrollLeft/scrollTop before that
+                    // commit lands gets silently clamped by the browser to the OLD (smaller)
+                    // scrollable range, so centering only "sticks" when the canvas happens to
+                    // already be big enough — i.e. it looked like it worked sometimes but not
+                    // when a big fan-out actually grows the canvas. Poll a few frames until
+                    // the container has actually grown before setting scroll.
+                    let centeringAttempts = 0;
+                    const applyCentering = () => {
+                      const inner = canvasRef.current?.containerRef?.current;
+                      const wrap = canvasWrapRef.current;
+                      if (!inner || !wrap) return;
+                      centeringAttempts += 1;
+                      if (inner.scrollWidth < w - 4 && centeringAttempts < 15) {
+                        requestAnimationFrame(applyCentering);
+                        return;
+                      }
+                      const zoom = canvasRef.current?.zoom ?? 1;
+                      const xyX = (w - layout.width * zoom) / 2;
+                      const xyY = (h - layout.height * zoom) / 2;
+                      const targetNode = centerNodeIdRef.current
+                        ? layout.children?.find(n => n.id === centerNodeIdRef.current)
+                        : null;
+                      const focusX = targetNode ? xyX + (targetNode.x + targetNode.width / 2) * zoom : xyX + (layout.width * zoom) / 2;
+                      const focusY = targetNode ? xyY + (targetNode.y + targetNode.height / 2) * zoom : xyY + (layout.height * zoom) / 2;
+                      inner.scrollLeft = focusX - wrap.clientWidth / 2;
+                      inner.scrollTop = focusY - wrap.clientHeight / 2;
+                    };
+                    requestAnimationFrame(applyCentering);
                   }
                 },
                 zoomable: true,
@@ -547,14 +721,19 @@
                   style: (n) => {
                     const gn = n?.data ?? null;
                     const isSelected = selectedNode?.id === gn?.id;
-                    const isExpanded = gn?.type === "ref_files" && expandedRefFiles === gn?.id;
+                    const isExpanded =
+                      (gn?.type === "agent" && expandedAgentId === gn?.id) ||
+                      (gn?.type === "session_type" && expandedChannelId === gn?.id) ||
+                      (gn?.type === "ref_files" && expandedRefFiles === gn?.id);
+                    const isLive = gn?.type === "session" && gn?.live;
                     return {
                       fill: nodeColor(gn),
                       stroke: isExpanded ? "#86efac"
                             : isSelected ? "#f59e0b"
+                            : isLive ? "#22c55e"
                             : gn?.type === "ref_files" ? "#22c55e44"
                             : "#374151",
-                      strokeWidth: isExpanded ? 2 : isSelected ? 2 : 1,
+                      strokeWidth: isExpanded ? 2 : isSelected ? 2 : isLive ? 2 : 1,
                       rx: 6, ry: 6,
                     };
                   },
@@ -564,14 +743,17 @@
                     const h = event?.height ?? 36;
                     const isVirtual = gn?.type === "root" || gn?.type === "agent" ||
                                       gn?.type === "session_type" || gn?.type === "ref_files";
-                    const isExpanded = gn?.type === "ref_files" && expandedRefFiles === gn?.id;
+                    const isExpanded =
+                      (gn?.type === "agent" && expandedAgentId === gn?.id) ||
+                      (gn?.type === "session_type" && expandedChannelId === gn?.id) ||
+                      (gn?.type === "ref_files" && expandedRefFiles === gn?.id);
                     const isRefFiles = gn?.type === "ref_files";
 
                     // Label lines
                     const line1 = isVirtual
-                      ? (gn?.type === "session_type" ? `[${gn?.content_text ?? "?"}]`
+                      ? (gn?.type === "session_type" ? `[${gn?.content_text ?? "?"}] ${isExpanded ? "▾" : "▸"}`
                          : gn?.type === "ref_files"   ? `RefFiles ${isExpanded ? "▾" : "▸"}`
-                         : gn?.type === "agent"        ? `agent:${gn?.content_text ?? "?"}`
+                         : gn?.type === "agent"        ? `agent:${gn?.content_text ?? "?"} ${isExpanded ? "▾" : "▸"}`
                          : "root")
                       : (gn?.type ?? "");
 
@@ -611,13 +793,14 @@
                           justifyContent: "center", padding: "2px 6px", boxSizing: "border-box",
                           overflow: "hidden", cursor: isRefFiles ? "pointer" : "pointer", pointerEvents: "auto",
                         },
-                        // Single-click: open modal
-                        onClick: (e) => { e.stopPropagation(); if (gn) setSelectedNode(gn); },
-                        // Double-click: expand/collapse sessions (ref_files only)
-                        onDoubleClick: (e) => {
-                          e.stopPropagation();
-                          if (gn?.type === "ref_files") handleRefFilesDoubleClick(gn);
-                        },
+                        // Single-click: open modal (deferred — see handleNodeClick).
+                        // Double-click: drill down a level (agent/session_type/ref_files).
+                        // The deferral is what lets dblclick actually fire: firing the
+                        // modal open synchronously on the first click used to re-render
+                        // the canvas before the second click landed, which broke the
+                        // browser's native click/click/dblclick sequence detection.
+                        onClick: (e) => { e.stopPropagation(); handleNodeClick(gn); },
+                        onDoubleClick: (e) => { e.stopPropagation(); handleNodeDblClick(gn); },
                       },
                         React.createElement("div", {
                           style: {
@@ -627,8 +810,16 @@
                             fontFamily: "ui-monospace, monospace", lineHeight: 1.2,
                             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
                             fontWeight: isRefFiles ? 600 : 400,
+                            display: "flex", alignItems: "center", gap: 4,
                           }
-                        }, line1),
+                        },
+                          gn?.type === "session" && gn?.live && React.createElement("span", {
+                            className: "live-dot",
+                            style: { flexShrink: 0, marginRight: 0 },
+                            title: "Live — turn currently in progress",
+                          }),
+                          line1,
+                        ),
                         line2 && React.createElement("div", {
                           style: {
                             fontSize: gn?.type === "session" ? 9 : 10,
@@ -665,15 +856,22 @@
               React.createElement("div", { className: "legend" },
                 isHierarchy
                   ? [
-                      ["root", "#111827"], ["agent", "#1e1b4b"],
-                      ["session_type", "#0f172a"], ["ref_files (expand: dbl-click)", "#14532d"],
+                      ["root", "#111827"],
+                      ["agent (dbl-click: channels)", "#1e1b4b"],
+                      ["session_type (dbl-click: ref_files)", "#0f172a"],
+                      ["ref_files (dbl-click: sessions)", "#14532d"],
                       ["session", "#1e3a8a"],
                     ].map(([label, color]) =>
                       React.createElement("div", { key: label },
                         React.createElement("span", { className: "swatch", style: { background: color } }),
                         label,
                       )
-                    )
+                    ).concat([
+                      React.createElement("div", { key: "live" },
+                        React.createElement("span", { className: "live-dot", style: { marginRight: 6 } }),
+                        "live — turn in progress",
+                      ),
+                    ])
                   : ["session", "message (user)", "message (asst)", "tool_call", "tool_result", "summary"].map((label, i) => {
                       const colors = ["#1e3a8a", "#1d4ed8", "#065f46", "#78350f", "#7c2d12", "#4a044e"];
                       return React.createElement("div", { key: i },
@@ -688,6 +886,10 @@
               React.createElement("div", { className: "stats-bar" },
                 React.createElement("span", { className: "stat-chip" }, `${activeGraph.nodes.length} nodes`),
                 React.createElement("span", { className: "stat-chip" }, `${activeGraph.edges.length} edges`),
+                isHierarchy && expandedAgentId &&
+                  React.createElement("span", { className: "stat-chip", style: { color: "#c4b5fd" } },
+                    `agent: ${expandedAgentId}${expandedChannelId ? ` › ${expandedChannelId}` : ""}`
+                  ),
                 isHierarchy && expandedRefFiles &&
                   React.createElement("span", { className: "stat-chip", style: { color: "#86efac" } },
                     `${expandedSessions?.nodes?.length ?? 0} sessions expanded`
