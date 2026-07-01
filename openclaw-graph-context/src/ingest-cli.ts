@@ -5,7 +5,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { initSchema, openDb, graphStats, resolveDbPath } from "./db.js";
+import { initSchema, openDb, graphStats, resolveDbPath, classifyHeartbeats, reclassifyUnknownHeartbeats, markDuplicateNodes } from "./db.js";
 import { ingestAll } from "./ingest.js";
 
 const args = process.argv.slice(2);
@@ -50,5 +50,13 @@ for (const [agent, r] of Object.entries(results)) {
     for (const e of r.errors.slice(0, 10)) console.warn("  ", e);
   }
 }
+
+console.log("\n=== Classification ===");
+const classified = classifyHeartbeats(db);
+console.log(`classifyHeartbeats: ${classified} sessions newly marked heartbeat`);
+const unknownHeartbeatFix = reclassifyUnknownHeartbeats(db);
+console.log(`reclassifyUnknownHeartbeats: reevaluated=${unknownHeartbeatFix.reevaluated} cleared=${unknownHeartbeatFix.cleared}`);
+const pruned = markDuplicateNodes(db);
+console.log(`markDuplicateNodes: heartbeats=${pruned.heartbeatSessionsHidden} dup-ref_files=${pruned.duplicateRefFilesHidden} empty-session_types=${pruned.emptySessionTypesHidden}`);
 
 db.close();
