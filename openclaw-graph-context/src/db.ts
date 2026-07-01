@@ -306,14 +306,11 @@ export function recentSessions(
 }
 
 /**
- * Return the full structural hierarchy:
- *   root → agent → session_type → ref_files → session (leaf, not expanded)
- *
- * Does NOT include message/tool_call/tool_result nodes — only structural and
- * session nodes. Used by the "Full Hierarchy" view in the visualizer.
+ * Return the hierarchy skeleton: root → agent → session_type → ref_files only.
+ * Session nodes are NOT included — they are loaded on demand via refFilesSessionNodes().
  *
  * By default, nodes tagged with properties.display="hidden" are excluded.
- * Pass includeHidden=true to see everything (e.g. for admin/debug views).
+ * Pass includeHidden=true for admin/debug views.
  */
 export function hierarchyGraph(
   db: Database.Database,
@@ -323,13 +320,12 @@ export function hierarchyGraph(
 
   if (includeHidden) {
     structuralNodes = db.prepare(
-      "SELECT * FROM nodes WHERE type IN ('root','agent','session_type','ref_files','session')"
+      "SELECT * FROM nodes WHERE type IN ('root','agent','session_type','ref_files')"
     ).all() as GraphNode[];
   } else {
-    // Exclude nodes tagged display=hidden (heartbeats, near-duplicates, near-empty)
     structuralNodes = db.prepare(`
       SELECT * FROM nodes
-      WHERE type IN ('root','agent','session_type','ref_files','session')
+      WHERE type IN ('root','agent','session_type','ref_files')
         AND (properties IS NULL OR json_extract(properties,'$.display') IS NOT 'hidden')
     `).all() as GraphNode[];
   }
@@ -339,10 +335,51 @@ export function hierarchyGraph(
   const allEdges = db.prepare(
     "SELECT * FROM edges WHERE type='contains'"
   ).all() as GraphEdge[];
-  // Only keep edges where both endpoints are in our visible set
+  // Only keep edges that connect nodes within our skeleton set
   const edges = allEdges.filter(e => nodeIds.has(e.src) && nodeIds.has(e.dst));
 
   return { nodes: structuralNodes, edges };
+}
+
+/**
+ * Return the session nodes (and their contains edges from the ref_files parent)
+ * for a single ref_files node, for on-demand expansion in the hierarchy view.
+ *
+ * Excludes sessions tagged display=hidden unless includeHidden is true.
+ */
+export function refFilesSessionNodes(
+  db: Database.Database,
+  refFilesId: string,
+  includeHidden = false,
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  // Find all session node IDs that are children of this ref_files node
+  const childEdges = db.prepare(
+    "SELECT * FROM edges WHERE type='contains' AND src=?"
+  ).all(refFilesId) as GraphEdge[];
+
+  if (childEdges.length === 0) return { nodes: [], edges: [] };
+
+  const sessionIds = childEdges.map(e => e.dst);
+  const placeholders = sessionIds.map(() => "?").join(",");
+
+  let sessionNodes: GraphNode[];
+  if (includeHidden) {
+    sessionNodes = db.prepare(
+      `SELECT * FROM nodes WHERE id IN (${placeholders}) AND type='session' ORDER BY ts DESC`
+    ).all(...sessionIds) as GraphNode[];
+  } else {
+    sessionNodes = db.prepare(`
+      SELECT * FROM nodes
+      WHERE id IN (${placeholders}) AND type='session'
+        AND (properties IS NULL OR json_extract(properties,'$.display') IS NOT 'hidden')
+      ORDER BY ts DESC
+    `).all(...sessionIds) as GraphNode[];
+  }
+
+  const visibleIds = new Set(sessionNodes.map(n => n.id));
+  const edges = childEdges.filter(e => visibleIds.has(e.dst));
+
+  return { nodes: sessionNodes, edges };
 }
 
 /**

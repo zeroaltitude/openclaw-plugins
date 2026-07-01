@@ -66,6 +66,9 @@
     /* Stats bar */
     .stats-bar { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 8px; z-index: 1; }
     .stats-bar .stat-chip { font-size: 11px; color: #9ca3af; background: #11131a; border: 1px solid #1f2937; border-radius: 4px; padding: 2px 8px; }
+
+    /* Hint bar */
+    .hint-bar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #6b7280; background: #11131a; border: 1px solid #1f2937; border-radius: 4px; padding: 3px 10px; z-index: 1; white-space: nowrap; pointer-events: none; }
   </style>
 </head>
 <body>
@@ -96,12 +99,10 @@
     const agentColor = (id) => AGENT_COLORS[id] ?? "#374151";
 
     const NODE_COLORS = {
-      // Virtual structural nodes
       root:              "#111827",
       agent:             "#1e1b4b",
       session_type:      "#0f172a",
       ref_files:         "#14532d",
-      // Conversation nodes
       session:           "#1e3a8a",
       message_user:      "#1d4ed8",
       message_assistant: "#065f46",
@@ -115,7 +116,7 @@
       if (n.type === "agent")        return NODE_COLORS.agent;
       if (n.type === "session_type") return NODE_COLORS.session_type;
       if (n.type === "ref_files")    return NODE_COLORS.ref_files;
-      if (n.type === "session") return NODE_COLORS.session;
+      if (n.type === "session")      return NODE_COLORS.session;
       if (n.type === "message") {
         if (n.role === "user") return NODE_COLORS.message_user;
         return NODE_COLORS.message_assistant;
@@ -141,8 +142,7 @@
 
     function formatTs(ts) {
       if (!ts) return "–";
-      const d = new Date(ts);
-      return d.toLocaleString();
+      return new Date(ts).toLocaleString();
     }
 
     function truncate(s, n = 60) {
@@ -159,12 +159,10 @@
 
     // --- NodeModal ---
     const NODE_TYPE_CHIP_COLORS = {
-      // Virtual structural
       root:         { bg: "#111827", color: "#9ca3af" },
       agent:        { bg: "#1e1b4b", color: "#c4b5fd" },
       session_type: { bg: "#0f172a", color: "#94a3b8" },
       ref_files:    { bg: "#14532d", color: "#86efac" },
-      // Conversation
       session:      { bg: "#1e3a8a", color: "#bfdbfe" },
       message:      { bg: "#065f46", color: "#6ee7b7" },
       tool_call:    { bg: "#78350f", color: "#fcd34d" },
@@ -178,53 +176,39 @@
       const typeClass = (node.type === "tool_call" || node.type === "tool_result") ? `type-${node.type}` : "";
       const props = (() => { try { return node.properties ? JSON.parse(node.properties) : null; } catch { return null; } })();
 
-      // Full JSON for the raw dump
       const fullJson = JSON.stringify({
-        id: node.id,
-        type: node.type,
-        role: node.role,
-        agent_id: node.agent_id,
-        session_id: node.session_id,
-        session_key: node.session_key,
-        ts: node.ts,
-        ts_human: formatTs(node.ts),
-        content_tokens: node.content_tokens,
-        properties: props,
-        content_text: node.content_text,
+        id: node.id, type: node.type, role: node.role,
+        agent_id: node.agent_id, session_id: node.session_id,
+        session_key: node.session_key, ts: node.ts,
+        ts_human: formatTs(node.ts), content_tokens: node.content_tokens,
+        properties: props, content_text: node.content_text,
       }, null, 2);
 
-      // Close on overlay click
       const handleOverlayClick = (e) => { if (e.target === e.currentTarget) onClose(); };
-      // Close on Escape
       useEffect(() => {
-        const handler = (e) => { if (e.key === "Escape") onClose(); };
-        window.addEventListener("keydown", handler);
-        return () => window.removeEventListener("keydown", handler);
+        const h = (e) => { if (e.key === "Escape") onClose(); };
+        window.addEventListener("keydown", h);
+        return () => window.removeEventListener("keydown", h);
       }, [onClose]);
 
       return React.createElement("div", { className: "modal-overlay", onClick: handleOverlayClick },
         React.createElement("div", { className: "modal" },
-          // Header
           React.createElement("div", { className: "modal-header" },
-            React.createElement("span", {
-              className: "node-type-chip",
-              style: { background: chipStyle.bg, color: chipStyle.color },
-            }, node.type),
+            React.createElement("span", { className: "node-type-chip", style: { background: chipStyle.bg, color: chipStyle.color } }, node.type),
             React.createElement("h2", null, node.id),
             React.createElement("button", { className: "close-x", onClick: onClose }, "×"),
           ),
-          // Meta badges
           React.createElement("div", { className: "modal-meta" },
             node.agent_id && React.createElement("span", { className: "badge", style: { borderColor: agentColor(node.agent_id), color: agentColor(node.agent_id) } }, node.agent_id),
             node.role && React.createElement("span", { className: `badge ${roleClass}` }, node.role),
             typeClass && React.createElement("span", { className: `badge ${typeClass}` }, node.type),
             props?.name && React.createElement("span", { className: "badge" }, `tool: ${props.name}`),
+            props?.sessionType && React.createElement("span", { className: "badge" }, `type: ${props.sessionType}`),
             props?.toolCallId && React.createElement("span", { className: "badge", style: { fontFamily: "ui-monospace, monospace" } }, `callId: ${props.toolCallId.slice(0, 16)}`),
             props?.exitCode !== undefined && React.createElement("span", { className: "badge" }, `exit: ${props.exitCode}`),
             node.content_tokens && React.createElement("span", { className: "badge" }, `~${node.content_tokens} tok`),
             React.createElement("span", { className: "badge" }, formatTs(node.ts)),
           ),
-          // Body
           React.createElement("div", { className: "modal-body" },
             node.content_text && React.createElement("div", null,
               React.createElement("div", { className: "section-label" }, "Content"),
@@ -243,11 +227,25 @@
     function App() {
       const [stats, setStats] = useState(null);
       const HIERARCHY_ID = "__hierarchy__";
+
+      // Sidebar state
       const [sessions, setSessions] = useState([]);
       const [agentFilter, setAgentFilter] = useState("all");
       const [hideHeartbeats, setHideHeartbeats] = useState(true);
       const [selectedSessionId, setSelectedSessionId] = useState(null);
-      const [graph, setGraph] = useState(null);
+
+      // Graph state
+      // skeleton: the root→agent→session_type→ref_files nodes+edges (never changes while on hierarchy view)
+      // expandedRefFiles: id of the ref_files node currently expanded (null = none)
+      // expandedSessions: { nodes, edges } fetched for the expanded ref_files
+      const [skeleton, setSkeleton] = useState(null);
+      const [expandedRefFiles, setExpandedRefFiles] = useState(null);
+      const [expandedSessions, setExpandedSessions] = useState(null);
+      const [expandLoading, setExpandLoading] = useState(false);
+
+      // For non-hierarchy session views
+      const [sessionGraph, setSessionGraph] = useState(null);
+
       const [selectedNode, setSelectedNode] = useState(null);
       const [loading, setLoading] = useState(false);
       const [ingesting, setIngesting] = useState(false);
@@ -255,46 +253,28 @@
       const [canvasSize, setCanvasSize] = useState({ w: 5000, h: 5000 });
       const canvasRef = useRef(null);
       const canvasWrapRef = useRef(null);
-      // Track whether we've done the initial fit for the current session.
-      // Reset to false whenever the session changes so the new graph gets fitted once.
       const hasFittedRef = useRef(false);
 
-      // Tame Reaflow's wheel zoom: it maps wheel to a pinch gesture internally.
-      // useGesture accumulates deltaY into a pinch offset; one mouse notch (~100px)
-      // adds ~50 to the offset, which maps to a 0.5 zoom jump — far too much.
-      // We intercept the wheel event and re-dispatch a scaled version so Reaflow's
-      // pinch handler sees a small delta while still having the correct clientX/Y
-      // for focal-point zoom.
+      // Tame Reaflow wheel zoom
       useEffect(() => {
         const el = canvasWrapRef.current;
         if (!el) return;
         const onWheel = (e) => {
-          if (e.__scaled) return; // avoid re-processing our own dispatched event
+          if (e.__scaled) return;
           e.preventDefault();
           e.stopImmediatePropagation();
-
-          // Snapshot the scroll container position before zoom fires.
-          // Reaflow's zoom handler recenters the SVG translate but does not adjust
-          // scroll, so the graph jumps sideways proportional to how far we've panned.
-          // canvasRef.current.containerRef is Reaflow's exposed scroll container ref.
           const inner = canvasRef.current?.containerRef?.current ?? null;
           const scrollBefore = inner ? { left: inner.scrollLeft, top: inner.scrollTop } : null;
-
           const rect = el.getBoundingClientRect();
           const scaled = new WheelEvent("wheel", {
             bubbles: true, cancelable: true,
             clientX: rect.left + rect.width / 2,
             clientY: rect.top + rect.height / 2,
-            deltaX: 0,
-            deltaY: e.deltaY * 0.05,
-            deltaMode: e.deltaMode,
-            ctrlKey: true,
+            deltaX: 0, deltaY: e.deltaY * 0.05,
+            deltaMode: e.deltaMode, ctrlKey: true,
           });
           Object.defineProperty(scaled, "__scaled", { value: true });
           e.target.dispatchEvent(scaled);
-
-          // Restore scroll after Reaflow's zoom handler runs (it runs synchronously
-          // inside dispatchEvent, so the rAF fires after the DOM has been updated).
           if (scrollBefore && inner) {
             requestAnimationFrame(() => {
               inner.scrollLeft = scrollBefore.left;
@@ -311,7 +291,7 @@
         apiFetch("/graph-context/api/stats").then(setStats).catch(e => setError(e.message));
       }, []);
 
-      // Load sessions
+      // Load sessions sidebar
       useEffect(() => {
         const params = new URLSearchParams({ limit: "200" });
         if (agentFilter !== "all") params.set("agent", agentFilter);
@@ -319,26 +299,70 @@
         apiFetch(`/graph-context/api/sessions?${params}`).then(setSessions).catch(e => setError(e.message));
       }, [agentFilter, hideHeartbeats]);
 
-      // Load graph when session selected (or full hierarchy)
+      // Load skeleton when hierarchy view is selected
       useEffect(() => {
-        if (!selectedSessionId) { setGraph(null); return; }
+        if (selectedSessionId !== HIERARCHY_ID) {
+          setSkeleton(null);
+          setExpandedRefFiles(null);
+          setExpandedSessions(null);
+          return;
+        }
         hasFittedRef.current = false;
         setCanvasSize({ w: 5000, h: 5000 });
         setLoading(true);
         setError(null);
-        const url = selectedSessionId === HIERARCHY_ID
-          ? "/graph-context/api/hierarchy"
-          : `/graph-context/api/neighbourhood?sessionId=${encodeURIComponent(selectedSessionId)}&maxNodes=300`;
-        apiFetch(url)
-          .then(data => { setGraph(data); setLoading(false); })
+        setExpandedRefFiles(null);
+        setExpandedSessions(null);
+        apiFetch("/graph-context/api/hierarchy")
+          .then(data => { setSkeleton(data); setLoading(false); })
           .catch(e => { setError(e.message); setLoading(false); });
       }, [selectedSessionId]);
+
+      // Load individual session neighbourhood
+      useEffect(() => {
+        if (!selectedSessionId || selectedSessionId === HIERARCHY_ID) { setSessionGraph(null); return; }
+        hasFittedRef.current = false;
+        setCanvasSize({ w: 5000, h: 5000 });
+        setLoading(true);
+        setError(null);
+        apiFetch(`/graph-context/api/neighbourhood?sessionId=${encodeURIComponent(selectedSessionId)}&maxNodes=300`)
+          .then(data => { setSessionGraph(data); setLoading(false); })
+          .catch(e => { setError(e.message); setLoading(false); });
+      }, [selectedSessionId]);
+
+      // Handle double-click on a ref_files node: toggle its sessions
+      const handleRefFilesDoubleClick = useCallback(async (node) => {
+        if (node.type !== "ref_files") return;
+
+        // Collapse if already expanded
+        if (expandedRefFiles === node.id) {
+          setExpandedRefFiles(null);
+          setExpandedSessions(null);
+          hasFittedRef.current = false;
+          return;
+        }
+
+        setExpandedRefFiles(node.id);
+        setExpandedSessions(null);
+        setExpandLoading(true);
+        hasFittedRef.current = false;
+        try {
+          const data = await apiFetch(
+            `/graph-context/api/hierarchy/sessions?refFilesId=${encodeURIComponent(node.id)}`
+          );
+          setExpandedSessions(data);
+        } catch (e) {
+          setError(e.message);
+          setExpandedRefFiles(null);
+        } finally {
+          setExpandLoading(false);
+        }
+      }, [expandedRefFiles]);
 
       const triggerIngest = useCallback(async () => {
         setIngesting(true);
         try {
           await fetch("/graph-context/api/ingest", { method: "POST" });
-          // Reload stats after a short delay
           setTimeout(() => {
             apiFetch("/graph-context/api/stats").then(setStats).catch(() => {});
             setIngesting(false);
@@ -349,34 +373,48 @@
         }
       }, []);
 
-      // Build reaflow nodes + edges from graph data
+      // Compose the active graph for Reaflow
+      const activeGraph = useMemo(() => {
+        if (selectedSessionId === HIERARCHY_ID) {
+          if (!skeleton) return null;
+          // Merge skeleton + expanded sessions (if any)
+          const nodes = [...skeleton.nodes];
+          const edges = [...skeleton.edges];
+          if (expandedSessions) {
+            for (const n of expandedSessions.nodes) nodes.push(n);
+            for (const e of expandedSessions.edges) edges.push(e);
+          }
+          return { nodes, edges };
+        }
+        return sessionGraph;
+      }, [selectedSessionId, skeleton, expandedSessions, sessionGraph]);
+
       const { reaNodes, reaEdges } = useMemo(() => {
-        if (!graph) return { reaNodes: [], reaEdges: [] };
-        const reaNodes = graph.nodes.map(n => ({
+        if (!activeGraph) return { reaNodes: [], reaEdges: [] };
+        const reaNodes = activeGraph.nodes.map(n => ({
           id: n.id,
           data: n,
-          width:  n.type === "session" ? 200 : n.type === "tool_call" || n.type === "tool_result" ? 160 : 180,
-          height: n.type === "session" ? 44  : n.type === "tool_call" || n.type === "tool_result" ? 32  : 36,
+          width:  n.type === "ref_files" ? 200
+                : n.type === "session"   ? 220
+                : n.type === "tool_call" || n.type === "tool_result" ? 160
+                : 180,
+          height: n.type === "ref_files" ? 52
+                : n.type === "session"   ? 48
+                : n.type === "tool_call" || n.type === "tool_result" ? 32
+                : 36,
         }));
-        const reaEdges = graph.edges.map(e => ({
-          id: e.id,
-          from: e.src,
-          to: e.dst,
-          data: e,          // accessible as edge.data in the renderer
+        const reaEdges = activeGraph.edges.map(e => ({
+          id: e.id, from: e.src, to: e.dst, data: e,
         }));
         return { reaNodes, reaEdges };
-      }, [graph]);
-
+      }, [activeGraph]);
 
       const agents = useMemo(() => {
         if (!stats) return [];
         return Object.keys(stats.agentCounts ?? {}).sort();
       }, [stats]);
 
-      const filteredSessions = useMemo(() => {
-        if (agentFilter === "all") return sessions;
-        return sessions.filter(s => s.agent_id === agentFilter);
-      }, [sessions, agentFilter]);
+      const isHierarchy = selectedSessionId === HIERARCHY_ID;
 
       return React.createElement(React.Fragment, null,
         // Topbar
@@ -410,8 +448,7 @@
                 title: "Hide sessions whose first message is HEARTBEAT_OK",
               },
                 React.createElement("input", {
-                  type: "checkbox",
-                  checked: hideHeartbeats,
+                  type: "checkbox", checked: hideHeartbeats,
                   onChange: e => setHideHeartbeats(e.target.checked),
                   style: { cursor: "pointer" },
                 }),
@@ -419,7 +456,7 @@
               ),
             ),
             React.createElement("div", { className: "sidebar-list" },
-              // Pinned "Full Hierarchy" entry
+              // Pinned hierarchy entry
               React.createElement("div", {
                 className: `session-row${selectedSessionId === HIERARCHY_ID ? " active" : ""}`,
                 onClick: () => { setSelectedSessionId(HIERARCHY_ID); setSelectedNode(null); },
@@ -432,12 +469,12 @@
                   }, "⬡"),
                   " Full Hierarchy",
                 ),
-                React.createElement("div", { className: "ts" }, "root → agent → type → ref_files → sessions"),
+                React.createElement("div", { className: "ts" }, "root → agent → type → ref_files"),
               ),
-              filteredSessions.length === 0
+              sessions.length === 0
                 ? React.createElement("div", { style: { padding: "16px", color: "#6b7280", fontSize: "13px" } },
                     stats?.sessionCount === 0 ? "No sessions yet — click Ingest Now" : "Loading…")
-                : filteredSessions.map(s =>
+                : sessions.map(s =>
                     React.createElement("div", {
                       key: s.id,
                       className: `session-row${selectedSessionId === s.session_id ? " active" : ""}`,
@@ -465,17 +502,25 @@
             !selectedSessionId && !loading &&
               React.createElement("div", { className: "empty-state" },
                 React.createElement("h2", null, "Select a session"),
-                React.createElement("p", null, "Choose a session from the sidebar to visualize its conversation graph."),
+                React.createElement("p", null, "Choose a session from the sidebar, or click Full Hierarchy to see the graph structure."),
                 stats?.sessionCount === 0 &&
                   React.createElement("p", { style: { color: "#f59e0b" } }, "No sessions in DB yet — click 'Ingest Now' to load your history."),
               ),
 
-            loading &&
+            (loading || expandLoading) &&
               React.createElement("div", { className: "empty-state" },
-                React.createElement("p", null, "Loading graph…"),
+                React.createElement("p", null, expandLoading ? "Loading sessions…" : "Loading graph…"),
               ),
 
-            !loading && graph && reaNodes.length > 0 &&
+            // Hint overlay for hierarchy view when skeleton is loaded
+            isHierarchy && skeleton && !expandLoading &&
+              React.createElement("div", { className: "hint-bar" },
+                expandedRefFiles
+                  ? "Double-click a ref_files node to collapse · single-click to inspect"
+                  : "Double-click a ref_files node to expand its sessions · single-click to inspect"
+              ),
+
+            !loading && activeGraph && reaNodes.length > 0 &&
               React.createElement(Canvas, {
                 ref: canvasRef,
                 nodes: reaNodes,
@@ -486,7 +531,6 @@
                 onLayoutChange: (layout) => {
                   hasFittedRef.current = true;
                   if (layout?.width && layout?.height) {
-                    // Give 3× headroom so zooming in never runs out of scrollable canvas.
                     setCanvasSize({ w: Math.ceil(layout.width * 3 + 2000), h: Math.ceil(layout.height * 3 + 2000) });
                   }
                 },
@@ -503,46 +547,104 @@
                   style: (n) => {
                     const gn = n?.data ?? null;
                     const isSelected = selectedNode?.id === gn?.id;
+                    const isExpanded = gn?.type === "ref_files" && expandedRefFiles === gn?.id;
                     return {
                       fill: nodeColor(gn),
-                      stroke: isSelected ? "#f59e0b" : "#374151",
-                      strokeWidth: isSelected ? 2 : 1,
-                      rx: 6,
-                      ry: 6,
+                      stroke: isExpanded ? "#86efac"
+                            : isSelected ? "#f59e0b"
+                            : gn?.type === "ref_files" ? "#22c55e44"
+                            : "#374151",
+                      strokeWidth: isExpanded ? 2 : isSelected ? 2 : 1,
+                      rx: 6, ry: 6,
                     };
                   },
                   children: (event) => {
                     const gn = event?.node?.data ?? null;
                     const w = event?.width ?? 180;
                     const h = event?.height ?? 36;
-                    // Virtual nodes show their label prominently; conversation nodes show type + snippet
                     const isVirtual = gn?.type === "root" || gn?.type === "agent" ||
                                       gn?.type === "session_type" || gn?.type === "ref_files";
+                    const isExpanded = gn?.type === "ref_files" && expandedRefFiles === gn?.id;
+                    const isRefFiles = gn?.type === "ref_files";
+
+                    // Label lines
                     const line1 = isVirtual
                       ? (gn?.type === "session_type" ? `[${gn?.content_text ?? "?"}]`
-                         : gn?.type === "ref_files"   ? "RefFiles"
+                         : gn?.type === "ref_files"   ? `RefFiles ${isExpanded ? "▾" : "▸"}`
                          : gn?.type === "agent"        ? `agent:${gn?.content_text ?? "?"}`
                          : "root")
                       : (gn?.type ?? "");
-                    const line2 = isVirtual
-                      ? (gn?.type === "ref_files" ? truncate(gn?.content_text ?? "", 30) : "")
-                      : truncate(gn?.content_text ?? gn?.session_key ?? gn?.id ?? "", 26);
+
+                    // For ref_files, parse the JSON array content_text into a readable file list
+                    let refFilesLine2 = "";
+                    if (isRefFiles && gn?.content_text) {
+                      try {
+                        const files = JSON.parse(gn.content_text);
+                        if (Array.isArray(files)) {
+                          refFilesLine2 = files.map(f => f.replace(/\.md$/, "")).join(" · ");
+                        }
+                      } catch {
+                        refFilesLine2 = gn.content_text;
+                      }
+                    }
+
+                    // For session nodes in the expanded view, show agent + session_key snippet + date
+                    let sessionLine1 = "";
+                    let sessionLine2 = "";
+                    if (gn?.type === "session") {
+                      const props = (() => { try { return gn.properties ? JSON.parse(gn.properties) : {}; } catch { return {}; } })();
+                      sessionLine1 = truncate(gn.session_key?.replace(/^agent:[^:]+:/, "") ?? gn.id, 28);
+                      sessionLine2 = formatTs(gn.ts);
+                    }
+
+                    const line2 = isRefFiles
+                      ? refFilesLine2
+                      : gn?.type === "session"
+                      ? sessionLine2
+                      : (gn?.type === "root" || gn?.type === "agent" ? "" : truncate(gn?.content_text ?? gn?.session_key ?? gn?.id ?? "", 26));
+
                     return React.createElement("foreignObject", { width: w, height: h, x: 0, y: 0 },
                       React.createElement("div", {
                         xmlns: "http://www.w3.org/1999/xhtml",
                         style: {
                           width: "100%", height: "100%", display: "flex", flexDirection: "column",
                           justifyContent: "center", padding: "2px 6px", boxSizing: "border-box",
-                          overflow: "hidden", cursor: "pointer", pointerEvents: "auto",
+                          overflow: "hidden", cursor: isRefFiles ? "pointer" : "pointer", pointerEvents: "auto",
                         },
+                        // Single-click: open modal
                         onClick: (e) => { e.stopPropagation(); if (gn) setSelectedNode(gn); },
+                        // Double-click: expand/collapse sessions (ref_files only)
+                        onDoubleClick: (e) => {
+                          e.stopPropagation();
+                          if (gn?.type === "ref_files") handleRefFilesDoubleClick(gn);
+                        },
                       },
                         React.createElement("div", {
-                          style: { fontSize: 8, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: "ui-monospace, monospace", lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+                          style: {
+                            fontSize: isRefFiles ? 9 : 8,
+                            color: isRefFiles ? "#86efac" : "#9ca3af",
+                            textTransform: "uppercase", letterSpacing: "0.05em",
+                            fontFamily: "ui-monospace, monospace", lineHeight: 1.2,
+                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                            fontWeight: isRefFiles ? 600 : 400,
+                          }
                         }, line1),
-                        React.createElement("div", {
-                          style: { fontSize: 10, color: "#e5e7eb", fontFamily: "ui-monospace, monospace", lineHeight: 1.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+                        line2 && React.createElement("div", {
+                          style: {
+                            fontSize: gn?.type === "session" ? 9 : 10,
+                            color: gn?.type === "session" ? "#93c5fd" : "#e5e7eb",
+                            fontFamily: "ui-monospace, monospace", lineHeight: 1.3,
+                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                          }
                         }, line2),
+                        // For session nodes, also show the session key on line 1
+                        gn?.type === "session" && React.createElement("div", {
+                          style: {
+                            fontSize: 8, color: "#6b7280",
+                            fontFamily: "ui-monospace, monospace", lineHeight: 1.2,
+                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                          }
+                        }, truncate(gn.session_key?.replace(/^agent:[^:]+:/, "") ?? "", 30)),
                       )
                     );
                   },
@@ -559,34 +661,42 @@
               }),
 
             // Legend
-            !loading && graph &&
+            !loading && activeGraph &&
               React.createElement("div", { className: "legend" },
-                ["session", "message (user)", "message (asst)", "tool_call", "tool_result", "summary"].map((label, i) => {
-                  const colors = ["#1e3a8a", "#1d4ed8", "#065f46", "#78350f", "#7c2d12", "#4a044e"];
-                  return React.createElement("div", { key: i },
-                    React.createElement("span", { className: "swatch", style: { background: colors[i] } }),
-                    label,
-                  );
-                }),
-                React.createElement("hr", { style: { border: "none", borderTop: "1px solid #1f2937", margin: "6px 0" } }),
-                Object.entries(EDGE_COLORS).map(([type, color]) =>
-                  React.createElement("div", { key: type },
-                    React.createElement("span", { style: { display: "inline-block", width: 20, height: 2, background: color, verticalAlign: "middle", marginRight: 6, borderRadius: 1 } }),
-                    type,
-                  )
-                ),
+                isHierarchy
+                  ? [
+                      ["root", "#111827"], ["agent", "#1e1b4b"],
+                      ["session_type", "#0f172a"], ["ref_files (expand: dbl-click)", "#14532d"],
+                      ["session", "#1e3a8a"],
+                    ].map(([label, color]) =>
+                      React.createElement("div", { key: label },
+                        React.createElement("span", { className: "swatch", style: { background: color } }),
+                        label,
+                      )
+                    )
+                  : ["session", "message (user)", "message (asst)", "tool_call", "tool_result", "summary"].map((label, i) => {
+                      const colors = ["#1e3a8a", "#1d4ed8", "#065f46", "#78350f", "#7c2d12", "#4a044e"];
+                      return React.createElement("div", { key: i },
+                        React.createElement("span", { className: "swatch", style: { background: colors[i] } }),
+                        label,
+                      );
+                    }),
               ),
 
             // Stats bar
-            !loading && graph &&
+            !loading && activeGraph &&
               React.createElement("div", { className: "stats-bar" },
-                React.createElement("span", { className: "stat-chip" }, `${graph.nodes.length} nodes`),
-                React.createElement("span", { className: "stat-chip" }, `${graph.edges.length} edges`),
+                React.createElement("span", { className: "stat-chip" }, `${activeGraph.nodes.length} nodes`),
+                React.createElement("span", { className: "stat-chip" }, `${activeGraph.edges.length} edges`),
+                isHierarchy && expandedRefFiles &&
+                  React.createElement("span", { className: "stat-chip", style: { color: "#86efac" } },
+                    `${expandedSessions?.nodes?.length ?? 0} sessions expanded`
+                  ),
               ),
           ),
         ),
 
-        // Node detail modal (rendered outside .main so it overlays everything)
+        // Node detail modal
         selectedNode &&
           React.createElement(NodeModal, {
             node: selectedNode,

@@ -30,6 +30,7 @@ import {
   addDependency,
   removeDependency,
   readyIssues,
+  ensureFreshExport,
   setIssueMetadata,
   referencesFromLabels,
   type BdIssue,
@@ -453,6 +454,18 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
     const results = await Promise.all(
       actionableRepos.map(async (repo) => {
         try {
+          // Reader-side self-heal (bighat-p5j): re-export the JSONL from the
+          // live Dolt DB before trusting the fast path for status truth. bd
+          // 1.0.3 does NOT auto-export after shell-initiated mutations
+          // (`bd close`/`bd update` run in a shell as HEARTBEAT.md
+          // instructs), so without this the heartbeat can present an
+          // already-closed issue as ready. `bd export` is cheap (<1s per
+          // repo) and the whole block is TTL-cached anyway.
+          await ensureFreshExport({
+            cwd: repo.path,
+            bdBinary: config.bdBinary,
+            timeoutMs: 5_000,
+          });
           const ready = await readyIssues(Math.max(10, limit * 4), {
             cwd: repo.path,
             bdBinary: config.bdBinary,
