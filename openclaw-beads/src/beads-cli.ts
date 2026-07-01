@@ -108,8 +108,18 @@ async function runBd(args: string[], opts: BdRunOptions): Promise<string> {
  * the full graph including past work).
  */
 export async function listIssues(opts: BdRunOptions): Promise<BdIssue[]> {
-  // Fast path: Beads auto-exports a JSONL cache after writes. It contains
-  // the same issue records plus dependency arrays, and avoids spawning bd.
+  // Fast path: read the exported `.beads/issues.jsonl` snapshot instead of
+  // spawning bd. It carries the same issue records plus dependency arrays.
+  //
+  // CAVEAT: this snapshot is a DERIVED EXPORT of the live Dolt DB, not the
+  // store itself, and bd (v1.0.3, Dolt backend) does NOT auto-export after
+  // shell-initiated mutations (`bd close`/`bd update` run directly in a
+  // shell). It is only refreshed by an explicit `bd export` — either the
+  // plugin's own write path (see refreshExport) or ensureFreshExport() on
+  // the readiness build path. So this snapshot can lag the live DB whenever
+  // a mutation happened outside the plugin. Callers that need status truth
+  // (e.g. building the ready-issues heartbeat block) must ensureFreshExport
+  // first; see index.ts buildPlansAndTasksBlock.
   const exported = await readIssuesJsonl(opts.cwd).catch(() => null);
   if (exported) return exported;
 
@@ -129,9 +139,13 @@ export async function listIssues(opts: BdRunOptions): Promise<BdIssue[]> {
 /**
  * Read every issue record from `.beads/issues.jsonl`.
  *
- * This is the single source of truth for every read fast path in the
- * plugin (list/ready/show). Returns null when the cache file is missing
- * or unparseable so callers can fall back to spawning `bd`.
+ * This is the fast path for every plugin read (list/ready/show). It reads a
+ * DERIVED EXPORT of the live Dolt DB, so it is only as fresh as the last
+ * `bd export`. bd does NOT auto-export after shell-initiated mutations, so
+ * the snapshot can be stale relative to the live store; callers that need
+ * status truth must ensureFreshExport() first (see index.ts). Returns null
+ * when the cache file is missing or unparseable so callers can fall back to
+ * spawning `bd`.
  *
  * Exceptions to the fast path (still require a `bd` spawn):
  *   - All write paths (create/update/close/reopen/delete/dep add/dep
@@ -186,10 +200,11 @@ function stripWarnings(stdout: string): string {
  *
  * Fast path reads `.beads/issues.jsonl`. Pass `forceFresh: true` when the
  * caller has just mutated the issue and needs the post-write state
- * authoritatively (e.g. label reconciliation inside updateIssue). The
- * JSONL is refreshed via `refreshExport()` after every write but the bd
- * CLI is still the only authoritative source for sub-second post-write
- * reads.
+ * authoritatively (e.g. label reconciliation inside updateIssue), or when
+ * the JSONL may be stale because the mutation happened outside the plugin
+ * (a shell `bd close`/`bd update`). The plugin's own write path refreshes
+ * the JSONL after each write, but bd itself does not auto-export, so the
+ * bd CLI is the only authoritative source when the writer wasn't us.
  */
 export async function showIssue(
   id: string,
@@ -315,21 +330,49 @@ export async function updateIssue(
 }
 
 /**
- * Refresh `.beads/issues.jsonl` after a write.
+ * Refresh `.beads/issues.jsonl` from the live Dolt DB after a write.
  *
- * The dashboard's fast path reads from this file. bd's auto-export is
- * throttled (~60s) so without an explicit refresh, mutations made through
- * the API can read stale state on the very next poll.
+ * The dashboard/heartbeat fast path reads from this file. bd (v1.0.3, Dolt
+ * backend) does NOT auto-export after mutations — the JSONL is a derived
+ * export that only advances when `bd export` runs. So without this explicit
+ * refresh, mutations made through the plugin API would read stale state on
+ * the very next poll, and there is no background process that "catches up."
  *
  * Awaited so the HTTP response only returns after the cache is consistent.
- * Best-effort: failures are swallowed; bd's own auto-export will catch up.
+ * Best-effort: failures are swallowed (the next ensureFreshExport on the
+ * readiness path will retry), but there is no bd-side auto-export fallback.
  */
 export async function refreshExport(opts: BdRunOptions): Promise<void> {
   try {
     await runBd(["export", "-q", "-o", ".beads/issues.jsonl"], { ...opts, timeoutMs: 10_000 });
   } catch {
-    /* best-effort; bd auto-export will catch up within ~60s */
+    /* best-effort; retried on the next ensureFreshExport / write path */
   }
+}
+
+/**
+ * Reader-side self-heal: force `.beads/issues.jsonl` to reflect the live
+ * Dolt DB before a caller trusts the snapshot for status truth.
+ *
+ * This is the durable fix for the staleness gap (bighat-p5j). The JSONL is
+ * a derived export; bd does not auto-export after shell-initiated mutations
+ * (`bd close`/`bd update` run directly in a shell, as HEARTBEAT.md instructs
+ * everywhere). We proved the cheap "is it stale?" signals unreliable for
+ * shell closes: the per-repo export-state.json timestamp, `~/.beads/
+ * last-touched` mtime, and the JSONL mtime do NOT all move on a shell
+ * `bd close`. The only correct signal is re-exporting from the live store,
+ * which is also cheap (`bd export -q` of ~100 issues is well under a second)
+ * and is amortized by the caller's own TTL cache, so we run it
+ * unconditionally on the readiness build path rather than trying to guess
+ * freshness.
+ *
+ * Best-effort and identical in effect to refreshExport(); named separately
+ * so the READ path's intent (heal before trusting) is distinct from the
+ * WRITE path's (persist after mutating). Failures leave the possibly-stale
+ * snapshot in place — degraded, but no worse than before this fix.
+ */
+export async function ensureFreshExport(opts: BdRunOptions): Promise<void> {
+  await refreshExport(opts);
 }
 
 /** Close an issue. */

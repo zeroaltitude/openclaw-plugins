@@ -28,7 +28,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { BdIssue, BdRepo } from "./beads-cli.js";
-import { readIssuesJsonl } from "./beads-cli.js";
+import { ensureFreshExport, readIssuesJsonl } from "./beads-cli.js";
 
 /** Surfaces we consider "live human channels" for heuristic matching. */
 export const LIVE_CHANNEL_SURFACES = new Set<string>([
@@ -269,15 +269,26 @@ export async function buildSessionMap(
   const readSessionsMs = Date.now() - t1;
 
   // Read all repos' issues.jsonl in parallel — independent files.
-  // Fast path only: this runs on every gateway restart, so we never spawn
-  // `bd` here. Repos without a JSONL cache get an empty issue list and a
-  // log warning (likely never exported by the bd CLI — expected for repos
-  // not yet adopted into the workflow).
+  //
+  // Reader-side self-heal (bighat-p5j): `.beads/issues.jsonl` is a DERIVED
+  // export of the live Dolt DB and bd (v1.0.3, Dolt backend) does NOT
+  // auto-export after shell-initiated mutations (`bd close`/`bd update` run
+  // directly in a shell — the pattern HEARTBEAT.md instructs everywhere).
+  // Before trusting the JSONL for status truth in the session-map cache, we
+  // run `bd export` per repo so the file reflects the live store. Cheap
+  // (well under a second per repo for typical issue counts) and amortized
+  // by the caller's own cache TTL. If the export fails, we still read the
+  // (possibly stale) JSONL — degraded, but no worse than before this fix.
   const t2 = Date.now();
   const repoTimings: Array<{ name: string; ms: number; missingJsonl?: boolean }> = [];
   const repoIssues = await Promise.all(
     reposToScan.map(async (repo) => {
       const rt = Date.now();
+      await ensureFreshExport({
+        cwd: repo.path,
+        bdBinary: opts.bdBinary,
+        timeoutMs: 5_000,
+      });
       const exported = await readIssuesJsonl(repo.path).catch(() => null);
       const issues: BdIssue[] = exported ?? [];
       repoTimings.push({
