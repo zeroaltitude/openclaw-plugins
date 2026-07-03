@@ -214,12 +214,33 @@ const SYSTEM_SOURCE_PROVIDERS = new Set([
   "webchat",
 ]);
 
-const SYSTEM_SOURCE_SESSION_SUFFIXES = [
-  ":heartbeat",
-  ":cron",
-  ":cron-event",
-  ":exec-event",
-];
+// System-source markers as they appear inside a colon-delimited session key.
+// These are matched as path SEGMENTS, not just trailing suffixes: heartbeat
+// keys end in `:heartbeat`, but recurring-task keys carry a run id after the
+// marker, e.g. `agent:main:cron:<jobId>:run:<runId>`. A plain `endsWith(":cron")`
+// therefore never matched a real cron run — so cron sessions were silently
+// treated as ordinary user sessions, defeating the watermark-drain and
+// seal-skip protections below (openclaw-provenance-hce).
+const SYSTEM_SOURCE_SESSION_SEGMENTS = new Set([
+  "heartbeat",
+  "cron",
+  "cron-event",
+  "exec-event",
+]);
+
+/**
+ * True when any colon-delimited segment of the session key is a system-source
+ * marker (heartbeat/cron/cron-event/exec-event). Segment matching (rather than
+ * a trailing-suffix check) is load-bearing: cron run keys append `:run:<id>`
+ * after the `:cron:` marker, so the marker is medial, not terminal.
+ */
+function sessionKeyIsSystemSource(sessionKey: string | undefined): boolean {
+  if (!sessionKey) return false;
+  for (const seg of sessionKey.split(":")) {
+    if (SYSTEM_SOURCE_SESSION_SEGMENTS.has(seg)) return true;
+  }
+  return false;
+}
 
 /**
  * True if a session is system-source (heartbeat/cron/exec-event/webchat),
@@ -247,10 +268,7 @@ function isSystemSourceSession(params: {
   if (effectiveProvider && SYSTEM_SOURCE_PROVIDERS.has(effectiveProvider)) {
     return true;
   }
-  if (
-    params.sessionKey &&
-    SYSTEM_SOURCE_SESSION_SUFFIXES.some((s) => params.sessionKey!.endsWith(s))
-  ) {
+  if (sessionKeyIsSystemSource(params.sessionKey)) {
     return true;
   }
   return false;
@@ -269,7 +287,7 @@ function classifyInitialTrust(params: {
   if (!effectiveProvider || SYSTEM_SOURCE_PROVIDERS.has(effectiveProvider)) {
     return "trusted";
   }
-  if (sessionKey && SYSTEM_SOURCE_SESSION_SUFFIXES.some((s) => sessionKey.endsWith(s))) {
+  if (sessionKeyIsSystemSource(sessionKey)) {
     return "trusted";
   }
 
@@ -2037,16 +2055,27 @@ export function registerSecurityHooks(
           });
         });
 
-      // Persist watermark with URI taint records
+      // Persist watermark with URI taint records.
+      //
+      // Skip for system-source sessions (heartbeat/cron/cron-event/exec-event).
+      // These are system-generated, never user-driven; each cron RUN gets a
+      // fresh session key (`...:cron:<jobId>:run:<runId>`), so a persisted
+      // non-trusted watermark can never legitimately be inherited by a later
+      // turn — the drain at turn start clears it anyway. Persisting it only
+      // pollutes watermarks.json with per-run `external` entries (exactly the
+      // artifact flagged in openclaw-provenance-hce). Their per-turn taint
+      // still governs tool gating within the run via the live graph.
       const wmReason = buildWatermarkReason(graph);
-      watermarkStore.escalate(
-        sessionKey,
-        summary.maxTaint,
-        wmReason,
-        wmReason,
-        uriTaintRecords.length > 0 ? uriTaintRecords : undefined,
-      );
-      watermarkStore.flush();
+      if (!sessionKeyIsSystemSource(sessionKey)) {
+        watermarkStore.escalate(
+          sessionKey,
+          summary.maxTaint,
+          wmReason,
+          wmReason,
+          uriTaintRecords.length > 0 ? uriTaintRecords : undefined,
+        );
+        watermarkStore.flush();
+      }
 
       const sk = shortKey(sessionKey);
       const wmBefore = currentWatermark?.level ?? "none";

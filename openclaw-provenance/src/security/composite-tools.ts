@@ -153,6 +153,35 @@ export const DEFAULT_COMPOSITE_TOOL_OVERRIDES: Record<string, ToolOverride> = {
     external: "allow",
     untrusted: "allow",
   },
+
+  // ── message: read/metadata actions are INPUT operations ──────────────────
+  // Reading a channel, searching, listing threads/pins/reactions, or fetching
+  // channel/member metadata pulls data INTO context — it cannot exfiltrate.
+  // Gating these at `external` (via the bare `message` policy) breaks any
+  // workflow that must read more than one non-allowlisted channel: the first
+  // read taints the session `external` (built-in `slack://** → external`),
+  // and every subsequent read is then blocked — e.g. the morning-briefing
+  // cron could never finish gathering (openclaw-provenance-hce).
+  //
+  // Mirror the web_fetch/web_search execution policy: allow up to `external`,
+  // restrict only at `untrusted` (guards against attacker-directed second-
+  // stage payload fetches). This is strictly consistent with message.send
+  // already being allowed at every level — the send path is the real exfil
+  // vector, and it is intentionally open, so gating pure reads adds no
+  // protection while blocking legitimate work.
+  "message.read":        { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.search":      { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.thread-list": { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.list-pins":   { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.reactions":   { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.event-list":  { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  // Channel/member metadata (no message content) — same input-only rationale.
+  "message.channel-list": { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.channel-info": { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.member-info":  { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.role-info":    { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.permissions":  { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
+  "message.emoji-list":   { trusted: "allow", shared: "allow", external: "allow", untrusted: "restrict" },
 };
 
 // ── Resolution functions ────────────────────────────────────────────────────

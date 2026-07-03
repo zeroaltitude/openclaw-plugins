@@ -481,21 +481,22 @@ describe("Owner DM exception narrowing", () => {
     // by the real-time policy re-evaluation if the composite key doesn't match.
     // Since message.send IS explicitly allowed via DEFAULT_COMPOSITE_TOOL_OVERRIDES,
     // the before_tool_call composite key check lets it through.
-    // This is correct: message.send is safe (output-only), message.read is not.
-    // Let's verify message.read (data-incorporating action) IS blocked instead:
-    const readResult = api.fire("before_tool_call", {
-      toolName: "message",
-      params: { action: "read" },
+    // This is correct: message.send is safe (output-only). message reads are
+    // now input operations allowed up to external (they cannot exfiltrate),
+    // so probe with a genuinely gated action instead — exec is restricted at
+    // external. A subagent that inherited the parent's external taint must NOT
+    // bypass that gate just because it was spawned by an owner session.
+    const execResult = api.fire("before_tool_call", {
+      toolName: "exec",
+      params: { command: "echo hi" },
     }, {
       agentId: "main",
       sessionKey: childSession,
       spawnedBy: parentSession,
     });
 
-    // message (bare tool) at external taint with confirm policy → blocked
-    // The composite key "message.read" has no explicit "allow" override,
-    // so it falls through to the bare tool policy evaluation.
-    expect(readResult?.block).toBe(true);
+    // exec at external taint → blocked (no owner-DM bypass for subagents)
+    expect(execResult?.block).toBe(true);
   });
 
   it("actual owner DM still gets exception", () => {
