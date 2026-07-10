@@ -14,8 +14,9 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { initSchema, openDb, graphStats, recentSessions, neighbourhood, hierarchyGraph, refFilesSessionNodes, resolveDbPath, classifyHeartbeats, markDuplicateNodes, migrateVirtualHierarchy } from "./db.js";
+import { initSchema, openDb, graphStats, recentSessions, neighbourhood, hierarchyGraph, refFilesSessionNodes, resolveDbPath, classifyHeartbeats, markDuplicateNodes, migrateVirtualHierarchy, type GraphNode } from "./db.js";
 import { ingestAll, buildVirtualHierarchy } from "./ingest.js";
+import { registerLiveIngestHooks, liveSessionIds } from "./live-ingest.js";
 import type Database from "better-sqlite3";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,8 +32,7 @@ interface PluginApi {
   }): void;
   pluginConfig?: Record<string, unknown>;
   logger: { info(...a: unknown[]): void; warn(...a: unknown[]): void; error(...a: unknown[]): void };
-  on?: (hookName: string, handler: (event: unknown, ctx: unknown) => unknown, opts?: { priority?: number }) => void;
-  registerHook?: (events: string | string[], handler: (event: unknown) => unknown, opts?: { name?: string; description?: string }) => void;
+  on?: (hookName: string, handler: (event: unknown, ctx: unknown) => unknown, opts?: { priority?: number; timeoutMs?: number }) => void;
 }
 
 interface GraphContextConfig {
@@ -78,6 +78,13 @@ function pathFromUrl(url: string | undefined): string {
   }
 }
 
+/** Annotates session nodes with `live: true` for sessions with a turn currently in flight
+ * (see live-ingest.ts). Nothing server-side populated this field before; the UI already
+ * expected it (pulsing dot / tooltip). */
+function withLiveFlag<T extends GraphNode>(node: T): T & { live?: boolean } {
+  return node.type === "session" ? { ...node, live: liveSessionIds.has(node.session_id) } : node;
+}
+
 // --- UI shell loader ---
 
 const FALLBACK_UI = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Graph Context — UI shell missing</title></head>
@@ -119,6 +126,8 @@ export function activate(api: PluginApi): void {
     return;
   }
 
+  registerLiveIngestHooks(db, api, log);
+
   // --- UI shell routes ---
   const serveUiShell = async (_req: IncomingMessage, res: ServerResponse) => {
     const html = await loadUiShell();
@@ -145,7 +154,7 @@ export function activate(api: PluginApi): void {
       const agentId = q.agent;
       const includeHeartbeats = q.heartbeats !== "false";
       try {
-        return sendJson(res, 200, recentSessions(db, limit, agentId, includeHeartbeats));
+        return sendJson(res, 200, recentSessions(db, limit, agentId, includeHeartbeats).map(withLiveFlag));
       } catch (err) {
         return sendJson(res, 500, { error: String(err) });
       }
@@ -223,7 +232,8 @@ export function activate(api: PluginApi): void {
       const sessionId = q.sessionId;
       if (!sessionId) return sendJson(res, 400, { error: "sessionId required" });
       try {
-        return sendJson(res, 200, neighbourhood(db, sessionId, parseInt(q.maxNodes ?? "200", 10) || 200));
+        const graph = neighbourhood(db, sessionId, parseInt(q.maxNodes ?? "200", 10) || 200);
+        return sendJson(res, 200, { ...graph, nodes: graph.nodes.map(withLiveFlag) });
       } catch (err) {
         return sendJson(res, 500, { error: String(err) });
       }
