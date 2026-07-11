@@ -87,6 +87,7 @@ function makeArgs(overrides: {
   attemptRegistry: AttemptRegistry;
   modelOverride?: string;
   fastMode?: boolean;
+  oneShot?: boolean;
 }): RunTurnInput {
   return {
     meta: overrides.meta,
@@ -94,6 +95,7 @@ function makeArgs(overrides: {
     input: [{ type: "text", text: "hello" }],
     effort: null,
     fastMode: overrides.fastMode ?? null,
+    oneShot: overrides.oneShot,
     modelOverride: overrides.modelOverride,
     sessionStore: {} as RunTurnInput["sessionStore"],
     threadStore: {
@@ -186,5 +188,40 @@ describe("runTurn persistent attempts", () => {
 
     await runTurn(makeArgs({ meta, turn: makeTurn(meta.id), attemptRegistry }));
     expect(queryMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards a one-shot turn's attempt immediately, even with a fingerprint that would otherwise allow reuse", async () => {
+    const meta = makeMeta();
+    const attemptRegistry = new AttemptRegistry();
+
+    const turn1 = makeTurn(meta.id);
+    const { finalTurn } = await runTurn(
+      makeArgs({ meta, turn: turn1, attemptRegistry, oneShot: true }),
+    );
+    expect(finalTurn.status).toBe("completed");
+    // Unlike an interactive turn, nothing is left around to reuse: a
+    // heartbeat/cron/subagent thread never sends a follow-up turn, so
+    // holding the subprocess open until the idle sweep would only cost
+    // memory for no benefit.
+    expect(attemptRegistry.size()).toBe(0);
+
+    // A later turn on the same thread (which shouldn't happen for a real
+    // one-shot session, but must still be safe) gets a fresh subprocess
+    // rather than something silently returning a discarded entry.
+    const turn2 = makeTurn(meta.id);
+    await runTurn(makeArgs({ meta, turn: turn2, attemptRegistry }));
+    expect(queryMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an interactive (non-one-shot) attempt alive for reuse exactly as before", async () => {
+    const meta = makeMeta();
+    const attemptRegistry = new AttemptRegistry();
+
+    await runTurn(makeArgs({ meta, turn: makeTurn(meta.id), attemptRegistry, oneShot: false }));
+    expect(attemptRegistry.size()).toBe(1);
+
+    await runTurn(makeArgs({ meta, turn: makeTurn(meta.id), attemptRegistry }));
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(attemptRegistry.size()).toBe(1);
   });
 });

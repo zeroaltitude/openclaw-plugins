@@ -119,12 +119,15 @@ export async function main(argv: string[]): Promise<void> {
   // Bound how long a persistent attempt (and its live `claude` subprocess)
   // survives with no turns feeding it. Without this, a bridge process that
   // serves many threads over a long lifetime would accumulate one live
-  // subprocess per thread ever touched, forever.
-  const ATTEMPT_IDLE_TIMEOUT_MS = Number(
-    process.env.OPENCLAW_CLAUDE_BRIDGE_ATTEMPT_IDLE_TIMEOUT_MS ?? 30 * 60_000,
+  // subprocess per thread ever touched, forever. First-class consumer config
+  // key: appServer.queryThreadTimeoutMs (extensions/claude/src/app-server/
+  // config.ts), threaded here as an env var since this bounds the bridge
+  // PROCESS's own internal registry, not any single turn/request.
+  const QUERY_THREAD_TIMEOUT_MS = Number(
+    process.env.OPENCLAW_CLAUDE_BRIDGE_QUERY_THREAD_TIMEOUT_MS ?? 30 * 60_000,
   );
   const attemptSweepTimer = setInterval(() => {
-    attemptRegistry.sweepIdle(ATTEMPT_IDLE_TIMEOUT_MS);
+    attemptRegistry.sweepIdle(QUERY_THREAD_TIMEOUT_MS);
   }, 5 * 60_000);
   attemptSweepTimer.unref?.();
 

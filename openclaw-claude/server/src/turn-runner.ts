@@ -71,6 +71,15 @@ export type RunTurnInput = {
    * model capability — the bridge does not re-check `supportsFastMode`.
    */
   fastMode?: boolean | null;
+  /**
+   * Set when the caller knows this thread is one-shot (heartbeat, cron, or a
+   * subagent dispatch — never reused for a follow-up turn), as opposed to an
+   * interactive chat that may send another turn on the same thread at any
+   * time. When true, the attempt is discarded (its subprocess closed)
+   * immediately once this turn completes, instead of sitting idle until the
+   * query-thread-timeout sweep reaps it for no benefit.
+   */
+  oneShot?: boolean;
   collaborationMode?: TurnCollaborationMode | null;
   modelOverride?: string;
   sessionStore: OpenClawSessionStore;
@@ -473,6 +482,11 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       // in depth against any other path that aborts a turn without going
       // through that handler. Idempotent — discard() no-ops if already gone.
       attemptRegistry.discard(meta.id, "turn aborted");
+    } else if (args.oneShot) {
+      // One-shot threads (heartbeat/cron/subagent) never return to reuse
+      // their attempt — holding the subprocess alive until the idle sweep
+      // would only cost memory for no benefit. Close it now.
+      attemptRegistry.discard(meta.id, "one-shot turn completed");
     }
     const finalTurn: Turn = {
       id: turn.turnId,

@@ -324,6 +324,18 @@ export type TurnStartParams = JsonObject & {
    */
   fastMode?: boolean | null;
   collaborationMode?: TurnCollaborationMode | null;
+  /**
+   * Set by the caller when this turn's thread is known to be one-shot —
+   * heartbeat, cron, or subagent-dispatched runs that never return to reuse
+   * their thread (as opposed to an interactive chat, which may send another
+   * turn on the same thread at any time). When true, the bridge discards the
+   * attempt (closes the underlying subprocess) immediately after this turn
+   * completes, regardless of whether a later turn with matching settings
+   * could otherwise have reused it — there's no reuse to wait for, so
+   * holding the subprocess idle until the query-thread-timeout sweep would
+   * just waste memory. Omit (or false) for anything that might come back.
+   */
+  oneShot?: boolean;
 };
 
 export type TurnStartResponse = {
