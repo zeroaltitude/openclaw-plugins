@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { ActiveTurnRegistry } from "../active-turns.js";
+import type { AttemptRegistry } from "../attempt-registry.js";
 import {
   isJsonObject,
   RPC_INVALID_PARAMS,
@@ -34,6 +35,7 @@ export type TurnStartHandlerDeps = {
   threadStore: ThreadStore;
   sessionStore: OpenClawSessionStore;
   activeTurns: ActiveTurnRegistry;
+  attemptRegistry: AttemptRegistry;
   notify: (method: string, params: unknown) => void;
   requestClient: (
     method: string,
@@ -88,6 +90,7 @@ export function createTurnStartHandler(deps: TurnStartHandlerDeps) {
           collaborationMode: params.collaborationMode ?? null,
           sessionStore: deps.sessionStore,
           threadStore: deps.threadStore,
+          attemptRegistry: deps.attemptRegistry,
           notify: deps.notify,
           requestClient: deps.requestClient,
           logger: deps.logger,

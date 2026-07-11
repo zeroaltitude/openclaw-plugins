@@ -98,9 +98,12 @@ export function makeSDKUserMessage(content: AnthropicContentBlock[]): Record<str
  * blocking when the queue is empty until either a new message is pushed
  * or the queue is closed.
  *
- * The runner holds a reference to this and uses `push()` from the
- * turn/steer handler. `close()` is called when the turn terminates so the
- * SDK's iteration ends cleanly.
+ * One of these backs an entire attempt (attempt-registry.ts), not a single
+ * turn: the runner pushes each turn's message in without closing the queue,
+ * which is what keeps the SDK's underlying subprocess alive across turns —
+ * `close()` ends its iteration and is only called when the attempt itself is
+ * discarded (fingerprint change, interrupt, idle sweep, shutdown), not when
+ * an individual turn completes. `turn/steer` pushes onto the same queue.
  */
 export class ControllableUserInputQueue {
   private readonly buffer: unknown[] = [];

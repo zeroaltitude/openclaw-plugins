@@ -23,6 +23,11 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { ActiveTurn } from "./active-turns.js";
 import { buildCanUseTool } from "./approval-bridge.js";
 import {
+  computeAttemptFingerprint,
+  type AttemptEntry,
+  type AttemptRegistry,
+} from "./attempt-registry.js";
+import {
   buildDynamicToolsMcpServer,
   type DynamicToolCallResponse,
   type ToolCallBridge,
@@ -70,6 +75,13 @@ export type RunTurnInput = {
   modelOverride?: string;
   sessionStore: OpenClawSessionStore;
   threadStore: ThreadStore;
+  /**
+   * Registry of live per-thread `Query` subprocesses. When the attempt
+   * fingerprint (model/thinking/tool-policy/etc.) for this turn matches the
+   * thread's currently-live attempt, the turn is fed into that already-running
+   * subprocess instead of spawning a new one — see attempt-registry.ts.
+   */
+  attemptRegistry: AttemptRegistry;
   /** Emit a JSON-RPC notification to the client. */
   notify: (method: string, params: unknown) => void;
   /**
@@ -89,21 +101,12 @@ export type RunTurnResult = {
 };
 
 export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
-  const { meta, turn, input, effort, sessionStore, notify, logger } = args;
+  const { meta, turn, input, effort, sessionStore, notify, logger, attemptRegistry } = args;
   const model = args.modelOverride ?? meta.model;
   const fastMode = args.fastMode === true;
-  // Build the initial user message and seed a controllable queue. The queue
-  // is closed immediately after the initial push so the SDK's iterator
-  // exhausts cleanly — the SDK consumes input eagerly and blocks the whole
-  // generation pipeline if the iterable doesn't terminate. turn/steer
-  // therefore arrives at an already-closed queue and is rejected with a
-  // helpful "no open input queue" error. True mid-turn steering would need
-  // SDK-level support for partial-input streaming we don't have yet.
+  // Built regardless of reuse-vs-create: every turn needs its message pushed
+  // into whichever input queue ends up feeding the attempt.
   const initialContent = await buildContentBlocks(input);
-  const inputQueue = new ControllableUserInputQueue();
-  turn.inputQueue = inputQueue;
-  inputQueue.push(makeSDKUserMessage(initialContent));
-  inputQueue.close();
 
   // Map codex effort → SDK thinking config.
   //
@@ -136,11 +139,6 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     : resolvedBudget !== null
     ? ({ type: "enabled", budgetTokens: resolvedBudget } as const)
     : undefined;
-
-  // `resume` is only safe when there's actual history to load — passing it
-  // for a brand-new thread makes the SDK silently no-op the turn. We probe
-  // the on-disk transcript and set `resume` only when it has content.
-  const hasHistory = await transcriptHasEntries(args.threadStore.messagesPath(meta.id));
 
   // includePartialMessages must be enabled to get `stream_event` partials
   // (token-level deltas). Without it the SDK emits only coalesced `assistant`
@@ -189,66 +187,6 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     }
   }
 
-  const sdkOptions: Record<string, unknown> = {
-    model,
-    sessionStore: sessionStore as unknown,
-    abortController: turn.abortController,
-    // Omitted entirely (not sent as thinking: undefined) when unresolved —
-    // see the comment above `thinking`'s computation for why that matters.
-    ...(thinking ? { thinking } : {}),
-    includePartialMessages: true,
-    // Pin the SDK's working directory to the thread's cwd so the claude_code
-    // preset's native Read/Edit/Bash tools operate inside the OpenClaw
-    // effective workspace, not the server process cwd. Without this, native
-    // tool calls effectively escape sandboxing for filesystem access.
-    ...(typeof meta.cwd === "string" && meta.cwd.length > 0 ? { cwd: meta.cwd } : {}),
-    ...(mergedDisallowedNative.length > 0
-      ? { disallowedTools: mergedDisallowedNative }
-      : {}),
-    ...(Object.keys(subagentAliases).length > 0 ? { toolAliases: subagentAliases } : {}),
-    // Fast mode: when the caller has flagged this turn as Fast-eligible
-    // (caller is responsible for checking model capability and harness
-    // identity), thread it into the SDK's flag-settings layer. Settings.fastMode
-    // is the highest-priority user-controlled toggle, so it overrides any
-    // per-user persisted preference. We don't set fastModePerSessionOptIn —
-    // the bridge is stateless per-turn from the SDK's POV, and we want the
-    // caller's intent to be authoritative.
-    ...(fastMode ? { settings: { fastMode: true } } : {}),
-  };
-  if (hasHistory) {
-    // On resume, sessionId is implied by `resume` — passing both can make
-    // the SDK treat the call as a fork-with-id and reject the load.
-    sdkOptions.resume = meta.id;
-  } else {
-    sdkOptions.sessionId = meta.id;
-  }
-  // System prompt strategy (Option 2 in the design discussion):
-  //  - Use Claude Code's `claude_code` preset so the model inherits its
-  //    built-in tool-use guidance for Read/Bash/Edit/Grep/Glob/etc.
-  //  - Append OpenClaw's per-thread context (SOUL.md, workspace files,
-  //    openclaw guidance) so it joins the cacheable static prefix.
-  //  - excludeDynamicSections=true moves the preset's per-user dynamic
-  //    sections (working dir, git status, auto-memory) out of the cached
-  //    prefix and into the first user message, so the cache key stays
-  //    stable across sessions of the same agent and cross-agent for the
-  //    preset portion.
-  // The result: a long-lived agent thread cold-writes once and hits cache
-  // for every subsequent turn on a large, well-structured prefix.
-  if (typeof meta.developerInstructions === "string" && meta.developerInstructions.trim()) {
-    sdkOptions.systemPrompt = {
-      type: "preset",
-      preset: "claude_code",
-      append: meta.developerInstructions,
-      excludeDynamicSections: true,
-    };
-  } else {
-    sdkOptions.systemPrompt = {
-      type: "preset",
-      preset: "claude_code",
-      excludeDynamicSections: true,
-    };
-  }
-
   // Approval flow. Two bypass paths:
   //   1. Operator override via OPENCLAW_CLAUDE_BRIDGE_ALLOW_ALL=1 — affects
   //      every turn on every thread regardless of codex-protocol settings.
@@ -261,106 +199,71 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     process.env.OPENCLAW_CLAUDE_BRIDGE_ALLOW_ALL === "1" ||
     meta.approvalPolicy === "never";
 
-  if (allowAll) {
-    sdkOptions.permissionMode = "bypassPermissions";
-  } else {
-    sdkOptions.permissionMode = "default";
-    sdkOptions.canUseTool = buildCanUseTool({
-      ctx: { threadId: meta.id, turnId: turn.turnId },
-      requestClient: args.requestClient,
-      allowAll: false,
-      logger,
-    });
-  }
-
-  // Caller-supplied MCP servers (codex's `config.mcp_servers` patch). We
-  // forward them verbatim to the SDK; the SDK manages connection lifecycle.
-  const mcpServers: Record<string, unknown> = {};
-  if (meta.mcpServersConfig) {
-    for (const [name, cfg] of Object.entries(meta.mcpServersConfig)) {
-      mcpServers[name] = cfg;
-    }
-  }
-
-  // Build the dynamic-tools MCP bridge if the thread carries any. The bridge
-  // forwards each tools/call up through JSON-RPC to the openclaw plugin and
-  // emits codex-shaped item/started + item/completed notifications around it.
+  // Dynamic tools (codex's per-thread tool set) and caller-supplied MCP
+  // servers both bake into the SDK options at attempt-creation time, so both
+  // feed the attempt fingerprint below.
   const dynamicTools = meta.dynamicTools ?? [];
-  if (dynamicTools.length > 0) {
-    const bridge: ToolCallBridge = async ({ ctx, callId, tool, args: toolArgs }) => {
-      const response = await args.requestClient(
-        "item/tool/call",
-        {
-          threadId: ctx.threadId,
-          turnId: ctx.turnId,
-          callId,
-          tool,
-          arguments: (toolArgs ?? null) as JsonValue,
-        },
-        {
-          signal: turn.abortController.signal,
-          timeoutMs: DYNAMIC_TOOL_CALL_TIMEOUT_MS,
-        },
-      );
-      return coerceToolResponse(response);
-    };
+  const systemPromptAppend =
+    typeof meta.developerInstructions === "string" && meta.developerInstructions.trim()
+      ? meta.developerInstructions
+      : undefined;
+  const cwd = typeof meta.cwd === "string" && meta.cwd.length > 0 ? meta.cwd : undefined;
 
-    const itemByCallId = new Map<string, ThreadItem>();
-    const handle = buildDynamicToolsMcpServer({
-      serverName: "openclaw",
-      tools: dynamicTools,
-      bridge,
-      onCallStart: ({ tool, callId, args: toolArgs, ctx }) => {
-        const item = makeDynamicToolCallItem({
-          callId,
-          tool,
-          args: toolArgs,
-          status: "running",
-          contentItems: null,
-          success: null,
-          durationMs: null,
-        });
-        itemByCallId.set(callId, item);
-        turn.items.push(item);
-        args.notify("item/started", {
-          threadId: ctx.threadId,
-          turnId: ctx.turnId,
-          item,
-        });
-      },
-      onCallEnd: ({ tool, callId, ctx, response, durationMs }) => {
-        const finalized = makeDynamicToolCallItem({
-          callId,
-          tool,
-          args: itemByCallId.get(callId)?.arguments ?? null,
-          status: response.success ? "completed" : "failed",
-          contentItems: response.contentItems,
-          success: response.success,
-          durationMs,
-        });
-        // Replace the in-progress item in the turn's items list.
-        const idx = turn.items.findIndex((i) => i.id === finalized.id);
-        if (idx >= 0) turn.items[idx] = finalized;
-        else turn.items.push(finalized);
-        itemByCallId.set(callId, finalized);
-        args.notify("item/completed", {
-          threadId: ctx.threadId,
-          turnId: ctx.turnId,
-          item: finalized,
-        });
-      },
+  // Fingerprint the attempt-defining settings (run/attempt/turn hierarchy:
+  // model, thinking, tool policy, permission mode, and dynamic tools are
+  // fixed for an attempt's whole duration, never mid-attempt — see the
+  // design note in attempt-registry.ts). If a live attempt already exists
+  // for this thread with a matching fingerprint, this turn is a continuation
+  // and gets fed into that already-running subprocess instead of spawning a
+  // new one.
+  const fingerprint = computeAttemptFingerprint({
+    model,
+    thinking,
+    cwd,
+    disallowedTools: mergedDisallowedNative,
+    toolAliases: subagentAliases,
+    fastMode,
+    allowAll,
+    systemPromptAppend,
+    mcpServersConfig: meta.mcpServersConfig,
+    dynamicTools,
+  });
+
+  const existingAttempt = attemptRegistry.get(meta.id);
+  const canReuse =
+    !!existingAttempt && !existingAttempt.closed && existingAttempt.fingerprint === fingerprint;
+
+  let entry: AttemptEntry;
+  if (canReuse && existingAttempt) {
+    entry = existingAttempt;
+    entry.liveTurnRef.turn = turn;
+    entry.lastUsedAtMs = Date.now();
+    entry.inputQueue.push(makeSDKUserMessage(initialContent));
+  } else {
+    if (existingAttempt) {
+      attemptRegistry.discard(meta.id, "attempt fingerprint changed");
+    }
+    entry = await createAttempt({
+      args,
+      meta,
+      turn,
+      model,
+      thinking,
+      fastMode,
+      allowAll,
+      dynamicTools,
+      mergedDisallowedNative,
+      subagentAliases,
+      systemPromptAppend,
+      cwd,
+      sessionStore,
+      fingerprint,
+      initialContent,
       logger,
     });
-    handle.ctxRef.current = { threadId: meta.id, turnId: turn.turnId };
-    mcpServers.openclaw = {
-      type: "sdk",
-      name: "openclaw",
-      instance: handle.instance,
-    };
+    attemptRegistry.set(meta.id, entry);
   }
-  if (Object.keys(mcpServers).length > 0) {
-    sdkOptions.mcpServers = mcpServers;
-  }
+  turn.inputQueue = entry.inputQueue;
 
   notify("turn/started", { threadId: meta.id, turnId: turn.turnId });
 
@@ -441,11 +344,14 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   const agentMessageTracker: AgentMessageTracker = {};
 
   try {
-    // Cast — SDK options surface is rich and the runtime accepts our subset.
-    const stream = query({ prompt: inputQueue.iterate() as never, options: sdkOptions as never });
-
-    for await (const msg of stream as AsyncIterable<unknown>) {
-      const m = msg as Record<string, unknown>;
+    // Consumes the attempt's shared message stream until this turn's
+    // `result` message arrives, then returns WITHOUT closing anything —
+    // unlike the old per-turn `for await`, the underlying subprocess (and
+    // the pump loop feeding it) stays alive for the next turn. See
+    // waitForTurnResult / pumpAttempt below and the design note atop
+    // attempt-registry.ts for why a per-message handler replaces the loop.
+    await waitForTurnResult(entry, async (msg) => {
+      const m = msg;
       // Any real SDK message means the silent post-tool_use window is over —
       // disarm the subagent-activity emitter. handleStreamEvent re-arms it when
       // a fresh native subagent tool_use block opens. Disarm BEFORE dispatch so
@@ -556,14 +462,18 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
           break;
         }
       }
-      if (turn.abortController.signal.aborted) break;
-    }
+    });
 
     const completedAtMs = Date.now();
     const aborted = turn.abortController.signal.aborted;
     const status = aborted ? "interrupted" : "completed";
     turn.status = status;
-    inputQueue.close();
+    if (aborted) {
+      // turn/interrupt already discards the attempt itself; this is defense
+      // in depth against any other path that aborts a turn without going
+      // through that handler. Idempotent — discard() no-ops if already gone.
+      attemptRegistry.discard(meta.id, "turn aborted");
+    }
     const finalTurn: Turn = {
       id: turn.turnId,
       threadId: meta.id,
@@ -580,7 +490,11 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     const aborted = turn.abortController.signal.aborted || /abort/i.test(baseMessage);
     const status = aborted ? "interrupted" : "failed";
     turn.status = status;
-    inputQueue.close();
+    // Whatever went wrong — subprocess crash, interrupt, or a bug in our own
+    // message handling above — don't let a later turn silently inherit a
+    // suspect attempt. Idempotent: the pump's own cleanup or turn/interrupt
+    // may have already discarded it.
+    attemptRegistry.discard(meta.id, aborted ? "turn aborted" : "turn failed");
     // Enrich Anthropic 429 / rate-limit errors with parsed bucket and
     // retry-after context so the user-visible final error explains WHY
     // and WHEN to retry instead of just surfacing the raw SDK message.
@@ -607,6 +521,361 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   } finally {
     clearInterval(heartbeatTimer);
     subagentActivity.disarm();
+  }
+}
+
+/**
+ * Creates a brand-new attempt: builds the SDK options (model, thinking, tool
+ * policy, approval bridge, dynamic tools, MCP servers — everything fixed for
+ * the attempt's lifetime), spawns the `Query`/subprocess, and starts the
+ * background pump that will keep demuxing its message stream to whichever
+ * turn is currently live until the attempt is discarded.
+ *
+ * `canUseTool` and the dynamic-tools MCP bridge are built exactly once here
+ * and never rebuilt on later reused turns (the SDK only reads them at
+ * `query()` construction) — they read the current turn through
+ * `liveTurnRef`, which `runTurn` repoints before feeding each subsequent
+ * turn's input.
+ */
+async function createAttempt(params: {
+  args: RunTurnInput;
+  meta: ThreadMeta;
+  turn: ActiveTurn;
+  model: string;
+  thinking: { type: string; budgetTokens?: number; display?: unknown } | undefined;
+  fastMode: boolean;
+  allowAll: boolean;
+  dynamicTools: NonNullable<ThreadMeta["dynamicTools"]>;
+  mergedDisallowedNative: string[];
+  subagentAliases: Record<string, string>;
+  systemPromptAppend: string | undefined;
+  cwd: string | undefined;
+  sessionStore: OpenClawSessionStore;
+  fingerprint: string;
+  initialContent: Awaited<ReturnType<typeof buildContentBlocks>>;
+  logger: Logger;
+}): Promise<AttemptEntry> {
+  const {
+    args,
+    meta,
+    turn,
+    model,
+    thinking,
+    fastMode,
+    allowAll,
+    dynamicTools,
+    mergedDisallowedNative,
+    subagentAliases,
+    systemPromptAppend,
+    cwd,
+    sessionStore,
+    fingerprint,
+    initialContent,
+    logger,
+  } = params;
+
+  const liveTurnRef: { turn: ActiveTurn } = { turn };
+
+  // `resume` is only safe when there's actual history to load — passing it
+  // for a brand-new thread makes the SDK silently no-op the turn. We probe
+  // the on-disk transcript and set `resume` only when it has content. Only
+  // read here, at creation: a reused attempt never re-issues this option
+  // since the SDK reads it once, at process-spawn time.
+  const hasHistory = await transcriptHasEntries(args.threadStore.messagesPath(meta.id));
+
+  // Attempt-scoped controller — separate from any single turn's
+  // abortController. Aborting this kills the subprocess; a turn's own
+  // abortController continues to scope just that turn's approval/dynamic-tool
+  // request round-trips (see liveTurnRef usages below).
+  const abortController = new AbortController();
+
+  const sdkOptions: Record<string, unknown> = {
+    model,
+    sessionStore: sessionStore as unknown,
+    abortController,
+    // Omitted entirely (not sent as thinking: undefined) when unresolved —
+    // see the comment above `thinking`'s computation in runTurn for why that
+    // matters.
+    ...(thinking ? { thinking } : {}),
+    includePartialMessages: true,
+    // Pin the SDK's working directory to the thread's cwd so the claude_code
+    // preset's native Read/Edit/Bash tools operate inside the OpenClaw
+    // effective workspace, not the server process cwd. Without this, native
+    // tool calls effectively escape sandboxing for filesystem access.
+    ...(cwd ? { cwd } : {}),
+    ...(mergedDisallowedNative.length > 0 ? { disallowedTools: mergedDisallowedNative } : {}),
+    ...(Object.keys(subagentAliases).length > 0 ? { toolAliases: subagentAliases } : {}),
+    // Fast mode: when the caller has flagged this turn as Fast-eligible
+    // (caller is responsible for checking model capability and harness
+    // identity), thread it into the SDK's flag-settings layer. Settings.fastMode
+    // is the highest-priority user-controlled toggle, so it overrides any
+    // per-user persisted preference. We don't set fastModePerSessionOptIn —
+    // the bridge is stateless per-attempt from the SDK's POV, and we want the
+    // caller's intent to be authoritative.
+    ...(fastMode ? { settings: { fastMode: true } } : {}),
+  };
+  if (hasHistory) {
+    // On resume, sessionId is implied by `resume` — passing both can make
+    // the SDK treat the call as a fork-with-id and reject the load.
+    sdkOptions.resume = meta.id;
+  } else {
+    sdkOptions.sessionId = meta.id;
+  }
+  // System prompt strategy (Option 2 in the design discussion):
+  //  - Use Claude Code's `claude_code` preset so the model inherits its
+  //    built-in tool-use guidance for Read/Bash/Edit/Grep/Glob/etc.
+  //  - Append OpenClaw's per-thread context (SOUL.md, workspace files,
+  //    openclaw guidance) so it joins the cacheable static prefix.
+  //  - excludeDynamicSections=true moves the preset's per-user dynamic
+  //    sections (working dir, git status, auto-memory) out of the cached
+  //    prefix and into the first user message, so the cache key stays
+  //    stable across sessions of the same agent and cross-agent for the
+  //    preset portion.
+  // The result: a long-lived agent thread cold-writes once and hits cache
+  // for every subsequent turn on a large, well-structured prefix.
+  sdkOptions.systemPrompt = systemPromptAppend
+    ? { type: "preset", preset: "claude_code", append: systemPromptAppend, excludeDynamicSections: true }
+    : { type: "preset", preset: "claude_code", excludeDynamicSections: true };
+
+  // Read fresh on every SDK callback for the attempt's whole lifetime, so
+  // `canUseTool` and the dynamic-tools bridge (both built once, below) always
+  // report the turn currently feeding this attempt without needing to be
+  // rebuilt per turn.
+  const ctx = {
+    get threadId(): string {
+      return liveTurnRef.turn.threadId;
+    },
+    get turnId(): string {
+      return liveTurnRef.turn.turnId;
+    },
+  };
+
+  if (allowAll) {
+    sdkOptions.permissionMode = "bypassPermissions";
+  } else {
+    sdkOptions.permissionMode = "default";
+    sdkOptions.canUseTool = buildCanUseTool({
+      ctx,
+      requestClient: args.requestClient,
+      allowAll: false,
+      logger,
+    });
+  }
+
+  // Caller-supplied MCP servers (codex's `config.mcp_servers` patch). We
+  // forward them verbatim to the SDK; the SDK manages connection lifecycle.
+  const mcpServers: Record<string, unknown> = {};
+  if (meta.mcpServersConfig) {
+    for (const [name, cfg] of Object.entries(meta.mcpServersConfig)) {
+      mcpServers[name] = cfg;
+    }
+  }
+
+  // Build the dynamic-tools MCP bridge if the thread carries any. The bridge
+  // forwards each tools/call up through JSON-RPC to the openclaw plugin and
+  // emits codex-shaped item/started + item/completed notifications around it.
+  if (dynamicTools.length > 0) {
+    const bridge: ToolCallBridge = async ({ ctx: callCtx, callId, tool, args: toolArgs }) => {
+      const response = await args.requestClient(
+        "item/tool/call",
+        {
+          threadId: callCtx.threadId,
+          turnId: callCtx.turnId,
+          callId,
+          tool,
+          arguments: (toolArgs ?? null) as JsonValue,
+        },
+        {
+          signal: liveTurnRef.turn.abortController.signal,
+          timeoutMs: DYNAMIC_TOOL_CALL_TIMEOUT_MS,
+        },
+      );
+      return coerceToolResponse(response);
+    };
+
+    const itemByCallId = new Map<string, ThreadItem>();
+    const handle = buildDynamicToolsMcpServer({
+      serverName: "openclaw",
+      tools: dynamicTools,
+      bridge,
+      onCallStart: ({ tool, callId, args: toolArgs, ctx: callCtx }) => {
+        const item = makeDynamicToolCallItem({
+          callId,
+          tool,
+          args: toolArgs,
+          status: "running",
+          contentItems: null,
+          success: null,
+          durationMs: null,
+        });
+        itemByCallId.set(callId, item);
+        liveTurnRef.turn.items.push(item);
+        args.notify("item/started", {
+          threadId: callCtx.threadId,
+          turnId: callCtx.turnId,
+          item,
+        });
+      },
+      onCallEnd: ({ tool, callId, ctx: callCtx, response, durationMs }) => {
+        const finalized = makeDynamicToolCallItem({
+          callId,
+          tool,
+          args: itemByCallId.get(callId)?.arguments ?? null,
+          status: response.success ? "completed" : "failed",
+          contentItems: response.contentItems,
+          success: response.success,
+          durationMs,
+        });
+        // Replace the in-progress item in the CURRENT turn's items list —
+        // liveTurnRef.turn, not the turn that was live when this closure was
+        // built, since a reused attempt swaps in a new ActiveTurn per turn.
+        const items = liveTurnRef.turn.items;
+        const idx = items.findIndex((i) => i.id === finalized.id);
+        if (idx >= 0) items[idx] = finalized;
+        else items.push(finalized);
+        itemByCallId.set(callId, finalized);
+        args.notify("item/completed", {
+          threadId: callCtx.threadId,
+          turnId: callCtx.turnId,
+          item: finalized,
+        });
+      },
+      logger,
+    });
+    handle.ctxRef.current = ctx;
+    mcpServers.openclaw = {
+      type: "sdk",
+      name: "openclaw",
+      instance: handle.instance,
+    };
+  }
+  if (Object.keys(mcpServers).length > 0) {
+    sdkOptions.mcpServers = mcpServers;
+  }
+
+  const inputQueue = new ControllableUserInputQueue();
+  inputQueue.push(makeSDKUserMessage(initialContent));
+  // Deliberately NOT closed. `Query.streamInput()` only closes the
+  // subprocess's stdin once this iterable is exhausted — keeping it open is
+  // what keeps the subprocess alive across turns. It's closed only when the
+  // attempt is discarded (fingerprint change, interrupt, idle sweep, crash,
+  // or process shutdown) — see attempt-registry.ts.
+
+  // Cast — SDK options surface is rich and the runtime accepts our subset.
+  const stream = query({ prompt: inputQueue.iterate() as never, options: sdkOptions as never });
+
+  const nowMs = Date.now();
+  const entry: AttemptEntry = {
+    threadId: meta.id,
+    fingerprint,
+    inputQueue,
+    abortController,
+    liveTurnRef,
+    currentHandler: null,
+    currentReject: null,
+    closed: false,
+    createdAtMs: nowMs,
+    lastUsedAtMs: nowMs,
+  };
+  pumpAttempt(entry, stream as AsyncIterable<unknown>, args.attemptRegistry, logger);
+  return entry;
+}
+
+/**
+ * Awaits the current turn's `result` message from an attempt's shared
+ * message stream. Registers `onMessage` as the attempt's `currentHandler`
+ * (see pumpAttempt) so every message the pump reads until then is forwarded
+ * here in order; resolves once `onMessage` has finished processing a
+ * `result` message, or rejects if the attempt itself ends first (abort,
+ * crash, discard) or if `onMessage` throws.
+ *
+ * Never lets an exception escape as an unhandled rejection from inside the
+ * pump: `entry.currentHandler` always settles this promise instead of
+ * throwing, so the pump loop can safely `await` it unconditionally.
+ */
+function waitForTurnResult(
+  entry: AttemptEntry,
+  onMessage: (msg: Record<string, unknown>) => void | Promise<void>,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      entry.currentHandler = null;
+      entry.currentReject = null;
+      fn();
+    };
+    entry.currentReject = (err: unknown) => settle(() => reject(err));
+    entry.currentHandler = (msg: Record<string, unknown>) => {
+      try {
+        const result = onMessage(msg);
+        if (result instanceof Promise) {
+          return result.then(
+            () => {
+              if (msg.type === "result") settle(resolve);
+            },
+            (err: unknown) => settle(() => reject(err)),
+          );
+        }
+        if (msg.type === "result") settle(resolve);
+      } catch (err) {
+        settle(() => reject(err));
+      }
+      return undefined;
+    };
+  });
+}
+
+/**
+ * Runs for an attempt's entire lifetime: reads the SDK's message stream and
+ * dispatches each message to whichever turn is currently awaiting it
+ * (`entry.currentHandler`, set by `waitForTurnResult`). Messages that arrive
+ * with no turn awaiting them are dropped — this shouldn't happen since only
+ * one turn is ever in flight per thread, but the pump degrades safely rather
+ * than throwing if it does.
+ *
+ * When the stream ends (subprocess exited — normal after a deliberate
+ * discard, unexpected otherwise) the entry is removed from the registry and
+ * any still-waiting turn is rejected, so a genuine crash surfaces as a
+ * failed turn instead of a silent hang.
+ */
+function pumpAttempt(
+  entry: AttemptEntry,
+  stream: AsyncIterable<unknown>,
+  registry: AttemptRegistry,
+  logger: Logger,
+): void {
+  void (async () => {
+    try {
+      for await (const msg of stream) {
+        await entry.currentHandler?.(msg as Record<string, unknown>);
+      }
+      finishPump(entry, registry, null, logger);
+    } catch (err) {
+      finishPump(entry, registry, err, logger);
+    }
+  })();
+}
+
+function finishPump(
+  entry: AttemptEntry,
+  registry: AttemptRegistry,
+  err: unknown,
+  logger: Logger,
+): void {
+  entry.closed = true;
+  registry.removeIfCurrent(entry);
+  const reject = entry.currentReject;
+  entry.currentHandler = null;
+  entry.currentReject = null;
+  if (reject) {
+    reject(err ?? new Error("attempt subprocess ended unexpectedly"));
+  } else if (err) {
+    logger.warn("[attempt-pump] stream ended with error and no waiting turn", {
+      threadId: entry.threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

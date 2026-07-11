@@ -4,6 +4,7 @@
  */
 
 import { ActiveTurnRegistry } from "./active-turns.js";
+import { AttemptRegistry } from "./attempt-registry.js";
 import { createInitializeHandler, type InitializeState } from "./handlers/initialize.js";
 import { createModelListHandler } from "./handlers/model-list.js";
 import { createThreadForkHandler } from "./handlers/thread-fork.js";
@@ -113,6 +114,19 @@ export async function main(argv: string[]): Promise<void> {
   const threadStore = new ThreadStore(stateRoot, STDERR_LOGGER);
   const sessionStore = new OpenClawSessionStore(threadStore, STDERR_LOGGER);
   const activeTurns = new ActiveTurnRegistry();
+  const attemptRegistry = new AttemptRegistry();
+
+  // Bound how long a persistent attempt (and its live `claude` subprocess)
+  // survives with no turns feeding it. Without this, a bridge process that
+  // serves many threads over a long lifetime would accumulate one live
+  // subprocess per thread ever touched, forever.
+  const ATTEMPT_IDLE_TIMEOUT_MS = Number(
+    process.env.OPENCLAW_CLAUDE_BRIDGE_ATTEMPT_IDLE_TIMEOUT_MS ?? 30 * 60_000,
+  );
+  const attemptSweepTimer = setInterval(() => {
+    attemptRegistry.sweepIdle(ATTEMPT_IDLE_TIMEOUT_MS);
+  }, 5 * 60_000);
+  attemptSweepTimer.unref?.();
 
   const notify = (method: string, params: unknown) => server.notify(method, params);
 
@@ -131,12 +145,16 @@ export async function main(argv: string[]): Promise<void> {
       threadStore,
       sessionStore,
       activeTurns,
+      attemptRegistry,
       notify,
       requestClient,
       logger: STDERR_LOGGER,
     }),
   );
-  server.onMethod("turn/interrupt", createTurnInterruptHandler(activeTurns, STDERR_LOGGER));
+  server.onMethod(
+    "turn/interrupt",
+    createTurnInterruptHandler(activeTurns, attemptRegistry, STDERR_LOGGER),
+  );
   server.onMethod("turn/steer", createTurnSteerHandler(activeTurns, STDERR_LOGGER));
   server.onMethod("thread/fork", createThreadForkHandler(threadStore, STDERR_LOGGER));
   server.onMethod("thread/inject_items", createThreadInjectItemsHandler(threadStore, STDERR_LOGGER));
@@ -144,23 +162,24 @@ export async function main(argv: string[]): Promise<void> {
 
   // Hold the process open until stdin closes.
   await new Promise<void>((resolve) => {
-    process.stdin.on("end", () => {
-      STDERR_LOGGER.info("stdin closed; shutting down");
+    const shutdown = (reason: string) => {
+      clearInterval(attemptSweepTimer);
+      attemptRegistry.discardAll(reason);
       server?.close();
       transport.close();
       resolve();
+    };
+    process.stdin.on("end", () => {
+      STDERR_LOGGER.info("stdin closed; shutting down");
+      shutdown("stdin closed");
     });
     process.on("SIGINT", () => {
       STDERR_LOGGER.info("SIGINT received; shutting down");
-      server?.close();
-      transport.close();
-      resolve();
+      shutdown("SIGINT");
     });
     process.on("SIGTERM", () => {
       STDERR_LOGGER.info("SIGTERM received; shutting down");
-      server?.close();
-      transport.close();
-      resolve();
+      shutdown("SIGTERM");
     });
   });
 }

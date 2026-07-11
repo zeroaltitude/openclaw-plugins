@@ -33,14 +33,13 @@ export function createTurnSteerHandler(activeTurns: ActiveTurnRegistry, logger: 
       );
     }
     if (!turn.inputQueue || turn.inputQueue.isClosed()) {
-      // Today the runner closes the queue immediately after the initial push
-      // (the SDK's AsyncIterable consumer blocks the pipeline if the iterable
-      // stays open). Until we wire SDK-level partial-input streaming, steer
-      // messages can't reach the running query — surface that explicitly so
-      // callers know the message was not delivered.
+      // The runner keeps this queue open for the attempt's whole lifetime
+      // (see attempt-registry.ts) — reaching here means the turn's attempt
+      // has already been torn down (completed, interrupted, or crashed)
+      // before this steer arrived.
       throw new RpcError(
         TURN_NOT_FOUND_CODE,
-        `Active turn ${turn.turnId} has no open input queue (turn/steer requires partial-input streaming, not yet wired)`,
+        `Active turn ${turn.turnId} has no open input queue (its attempt is no longer live)`,
       );
     }
     const userMessage = makeSDKUserMessage([{ type: "text", text: params.content }]);
