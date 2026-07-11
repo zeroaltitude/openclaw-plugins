@@ -24,7 +24,6 @@
  */
 
 import Database from "better-sqlite3";
-import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -32,6 +31,15 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EdgeType, GraphEdge, GraphNode, NodeType } from "./db.js";
 import { insertEdge, upsertNode, isHeartbeatFirstMessage, markDuplicateNodes, migrateVirtualHierarchy } from "./db.js";
+import {
+  shortHash,
+  extractText,
+  extractToolCalls,
+  estimateTokens,
+  ingestMessage,
+  type MessageIngestState,
+  type RawMessageLike,
+} from "./message-ingest.js";
 
 export interface IngestOptions {
   agentsDir?: string;
@@ -54,10 +62,6 @@ export interface IngestResult {
   nodesAdded: number;
   edgesAdded: number;
   errors: string[];
-}
-
-function shortHash(...parts: string[]): string {
-  return createHash("sha1").update(parts.join("|")).digest("hex").slice(0, 16);
 }
 
 function parseSessionKey(key: string): {
@@ -101,61 +105,6 @@ function parseSessionKey(key: string): {
   if (chanGrp) return { agentId, channel: chanGrp[1], peerKind: "group", groupId: chanGrp[2] };
 
   return { agentId };
-}
-
-function extractText(content: unknown, maxChars: number): string {
-  if (typeof content === "string") return content.slice(0, maxChars);
-  if (Array.isArray(content)) {
-    return content
-      .map((c: unknown) => {
-        if (typeof c === "string") return c;
-        if (!c || typeof c !== "object") return "";
-        const block = c as Record<string, unknown>;
-        if (typeof block.text === "string") return block.text;
-        // Skip toolCall blocks — they are now separate nodes, not embedded text
-        if (block.type === "toolCall") return "";
-        // toolResult block — content may be string or array
-        if (block.type === "toolResult") {
-          return extractText(block.content, maxChars);
-        }
-        if (block.type === "thinking" && typeof block.thinking === "string") {
-          return `<thinking:${block.thinking.slice(0, 100)}>`;
-        }
-        return "";
-      })
-      .join(" ")
-      .trim()
-      .slice(0, maxChars);
-  }
-  return "";
-}
-
-/** Extract tool calls from an assistant message's content blocks. */
-interface ToolCallBlock {
-  toolCallId: string;
-  name: string;
-  args: string;    // JSON-stringified, truncated
-}
-
-function extractToolCalls(content: unknown, maxArgChars = 500): ToolCallBlock[] {
-  if (!Array.isArray(content)) return [];
-  const calls: ToolCallBlock[] = [];
-  for (const c of content) {
-    if (!c || typeof c !== "object") continue;
-    const block = c as Record<string, unknown>;
-    if (block.type !== "toolCall" || typeof block.name !== "string") continue;
-    const id = typeof block.id === "string" ? block.id : "";
-    const args = block.arguments
-      ? JSON.stringify(block.arguments).slice(0, maxArgChars)
-      : "";
-    calls.push({ toolCallId: id, name: block.name, args });
-  }
-  return calls;
-}
-
-function estimateTokens(text: string): number {
-  // ~4 chars per token rough estimate
-  return Math.ceil(text.length / 4);
 }
 
 async function readJsonlLines(filePath: string): Promise<{ lines: string[]; totalBytes: number }> {
@@ -616,7 +565,7 @@ export async function ingestAgent(
       // We maintain two maps:
       //   prevNodeId — the last node in the sequence flow (for sequence edges)
       //   toolCallNodeById — toolCallId → tool_call node id (for returns edges)
-      let prevNodeId: string | null = null;
+      const prevNodeId: string | null = null;
       const toolCallNodeById = new Map<string, string>(); // toolCallId → nodeId
 
       // Build a merged, timestamp-ordered event list: user turns from the Claude
@@ -649,32 +598,23 @@ export async function ingestAgent(
         (a, b) => a.ts !== b.ts ? a.ts - b.ts : (a.kind === "user_turn" ? -1 : 1)
       );
 
+      const messageState: MessageIngestState = {
+        agentId, sessionId, sessionKey, sessionNodeId, prevNodeId, toolCallNodeById, maxContentChars: maxContent,
+      };
+
       for (const ev of allEvents) {
         if (ev.kind === "user_turn") {
-          const turnId = shortHash("user_turn", sessionId, String(ev.ts));
-          const nodeId = `msg:${sessionId}:${turnId}`;
-          upsertNode(db, {
-            id: nodeId,
-            type: "message" as NodeType,
-            agent_id: agentId,
-            session_id: sessionId,
-            session_key: sessionKey,
-            role: "user",
-            ts: ev.ts,
-            content_text: ev.text,
-            content_tokens: estimateTokens(ev.text),
-          });
-          result.nodesAdded++;
-          const seqSrc = prevNodeId ?? sessionNodeId;
-          insertEdge(db, { id: shortHash("seq", seqSrc, nodeId), src: seqSrc, dst: nodeId, type: "sequence", weight: 1 });
-          result.edgesAdded++;
-          prevNodeId = nodeId;
+          const entryId = shortHash("user_turn", sessionId, String(ev.ts));
+          const msg: RawMessageLike = { role: "user", content: ev.text, timestamp: ev.ts };
+          const r = ingestMessage(db, msg, entryId, ev.ts, messageState);
+          messageState.prevNodeId = r.prevNodeId;
+          result.nodesAdded += r.nodesAdded;
+          result.edgesAdded += r.edgesAdded;
           continue;
         }
 
         // jsonl event — parse and handle below
         const line = ev.line;
-        {
         let entry: Record<string, unknown>;
         try {
           entry = JSON.parse(line);
@@ -684,21 +624,7 @@ export async function ingestAgent(
 
         if (entry.type !== "message") continue;
 
-        const msg = entry.message as {
-          role?: string;
-          content?: unknown;
-          timestamp?: number;
-          usage?: unknown;
-          model?: string;
-          toolCallId?: string;  // legacy: some formats put it at top level
-          meta?: {              // current format: toolCallId/toolName live here
-            toolCallId?: string;
-            toolName?: string;
-            isError?: boolean;
-            exitCode?: number;
-            startedAt?: number;
-          };
-        } | undefined;
+        const msg = entry.message as RawMessageLike | undefined;
         if (!msg?.role) continue;
 
         const msgTs = typeof entry.timestamp === "string"
@@ -707,144 +633,10 @@ export async function ingestAgent(
 
         const entryId = typeof entry.id === "string" ? entry.id : shortHash("msg", sessionId, String(msgTs));
 
-        // --- toolResult entries → tool_result nodes ---
-        if (msg.role === "toolResult") {
-          // toolCallId and toolName live in msg.meta (current format) or msg directly (legacy)
-          const toolCallId = msg.meta?.toolCallId ?? msg.toolCallId ?? "";
-          const toolName = msg.meta?.toolName ?? "";
-
-          // content_text: prefer actual content, fall back to labeling by tool name
-          const rawText = extractText(msg.content, maxContent * 2);
-          const contentText = (rawText || toolName
-            ? (rawText || `[${toolName} result]`).slice(0, maxContent)
-            : "");
-          const tokens = estimateTokens(rawText);
-
-          // Collect exit code from meta or content blocks
-          const exitCode = msg.meta?.exitCode ?? (() => {
-            if (Array.isArray(msg.content)) {
-              for (const b of msg.content) {
-                if (b && typeof b === "object") {
-                  const details = (b as Record<string, unknown>).details;
-                  if (details && typeof details === "object") {
-                    const ec = (details as Record<string, unknown>).exitCode;
-                    if (ec !== undefined) return ec;
-                  }
-                }
-              }
-            }
-            return undefined;
-          })();
-
-          const trProps: Record<string, unknown> = { toolCallId };
-          if (toolName) trProps.name = toolName;
-          if (msg.meta?.isError) trProps.isError = true;
-          if (exitCode !== undefined) trProps.exitCode = exitCode;
-
-          const trNodeId = `tool_result:${sessionId}:${entryId}`;
-          upsertNode(db, {
-            id: trNodeId,
-            type: "tool_result" as NodeType,
-            agent_id: agentId,
-            session_id: sessionId,
-            session_key: sessionKey,
-            ts: msgTs,
-            content_text: contentText,
-            content_tokens: tokens,
-            properties: JSON.stringify(trProps),
-          });
-          result.nodesAdded++;
-
-          // sequence edge from prev node
-          const seqSrc = prevNodeId ?? sessionNodeId;
-          insertEdge(db, {
-            id: shortHash("seq", seqSrc, trNodeId),
-            src: seqSrc, dst: trNodeId, type: "sequence", weight: 1,
-          });
-          result.edgesAdded++;
-
-          // returns edge: tool_call → tool_result (if we have the tool_call node)
-          if (toolCallId && toolCallNodeById.has(toolCallId)) {
-            const tcNodeId = toolCallNodeById.get(toolCallId)!;
-            insertEdge(db, {
-              id: shortHash("returns", tcNodeId, trNodeId),
-              src: tcNodeId, dst: trNodeId, type: "returns", weight: 1,
-            });
-            result.edgesAdded++;
-          }
-
-          prevNodeId = trNodeId;
-          continue;
-        }
-
-        // --- user / assistant message nodes ---
-        if (msg.role !== "user" && msg.role !== "assistant") continue;
-
-        const rawText = extractText(msg.content, maxContent * 2);
-        const contentText = rawText.slice(0, maxContent);
-        const tokens = estimateTokens(rawText);
-
-        const props: Record<string, unknown> = {};
-        if (msg.model) props.model = msg.model;
-
-        const msgNodeId = `msg:${sessionId}:${entryId}`;
-        upsertNode(db, {
-          id: msgNodeId,
-          type: "message" as NodeType,
-          agent_id: agentId,
-          session_id: sessionId,
-          session_key: sessionKey,
-          role: msg.role as "user" | "assistant",
-          ts: msgTs,
-          content_text: contentText,
-          content_tokens: tokens,
-          properties: Object.keys(props).length > 0 ? JSON.stringify(props) : undefined,
-        });
-        result.nodesAdded++;
-
-        // sequence edge from prev node (or session node if first)
-        const seqSrc = prevNodeId ?? sessionNodeId;
-        insertEdge(db, {
-          id: shortHash("seq", seqSrc, msgNodeId),
-          src: seqSrc, dst: msgNodeId, type: "sequence", weight: 1,
-        });
-        result.edgesAdded++;
-
-        prevNodeId = msgNodeId;
-
-        // --- For assistant messages: expand toolCall blocks into tool_call nodes ---
-        if (msg.role === "assistant") {
-          const toolCalls = extractToolCalls(msg.content);
-          for (const tc of toolCalls) {
-            const tcNodeId = tc.toolCallId
-              ? `tool_call:${tc.toolCallId}`
-              : shortHash("tool_call", sessionId, entryId, tc.name);
-
-            upsertNode(db, {
-              id: tcNodeId,
-              type: "tool_call" as NodeType,
-              agent_id: agentId,
-              session_id: sessionId,
-              session_key: sessionKey,
-              ts: msgTs,
-              content_text: `${tc.name}(${tc.args})`.slice(0, maxContent),
-              content_tokens: estimateTokens(tc.args),
-              properties: JSON.stringify({ toolCallId: tc.toolCallId, name: tc.name }),
-            });
-            result.nodesAdded++;
-
-            // invokes edge: message → tool_call
-            insertEdge(db, {
-              id: shortHash("invokes", msgNodeId, tcNodeId),
-              src: msgNodeId, dst: tcNodeId, type: "invokes", weight: 1,
-            });
-            result.edgesAdded++;
-
-            // Register for returns edge correlation
-            if (tc.toolCallId) toolCallNodeById.set(tc.toolCallId, tcNodeId);
-          }
-        }
-        } // end jsonl event block
+        const r = ingestMessage(db, msg, entryId, msgTs, messageState);
+        messageState.prevNodeId = r.prevNodeId;
+        result.nodesAdded += r.nodesAdded;
+        result.edgesAdded += r.edgesAdded;
       } // end allEvents loop
 
       // Update ingest state (inside transaction)
