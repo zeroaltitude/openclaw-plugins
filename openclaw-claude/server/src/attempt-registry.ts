@@ -89,10 +89,25 @@ export class AttemptRegistry {
     for (const threadId of [...this.byThread.keys()]) this.discard(threadId, reason);
   }
 
-  /** Discard entries idle longer than `maxIdleMs`. Call periodically to bound subprocess growth. */
+  /**
+   * Discard entries idle longer than `maxIdleMs`. Call periodically to bound
+   * subprocess growth.
+   *
+   * `lastUsedAtMs` is only refreshed when a turn STARTS (attempt creation, or
+   * a reused attempt's next turn) — it is never touched again while that turn
+   * runs. Entries with a turn currently in flight (`currentHandler !== null`,
+   * set for the whole span `waitForTurnResult` is awaiting the turn's result
+   * message) are therefore skipped regardless of elapsed time: without this
+   * guard, any turn running longer than `maxIdleMs` — not an idle attempt,
+   * one that's actively executing — gets its subprocess yanked out from under
+   * it, surfacing as "attempt discarded: attempt idle timeout" and failing
+   * the turn outright. "Idle" means no turn has used this attempt for
+   * `maxIdleMs`, not "the current turn has taken a while."
+   */
   sweepIdle(maxIdleMs: number): void {
     const now = Date.now();
     for (const [threadId, entry] of [...this.byThread.entries()]) {
+      if (entry.currentHandler !== null) continue; // turn in flight — not idle, no matter how long it's running
       if (now - entry.lastUsedAtMs > maxIdleMs) this.discard(threadId, "attempt idle timeout");
     }
   }

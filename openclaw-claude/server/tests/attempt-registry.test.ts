@@ -175,4 +175,39 @@ describe("AttemptRegistry", () => {
     expect(registry.get("thread-fresh")).toBe(fresh);
     expect(fresh.closed).toBe(false);
   });
+
+  it("sweepIdle never discards an attempt with a turn currently in flight, no matter how long lastUsedAtMs is stale", () => {
+    // Regression: lastUsedAtMs is only refreshed when a turn STARTS (see
+    // turn-runner.ts), never while it runs. Before this guard, any turn
+    // running longer than maxIdleMs — not an idle attempt, one actively
+    // executing — got its subprocess killed out from under it, surfacing as
+    // "attempt discarded: attempt idle timeout" and failing the turn.
+    // Observed live: a cron turn running ~11.3 minutes was discarded by a
+    // 10-minute idle sweep despite being in flight the whole time.
+    const registry = new AttemptRegistry();
+    const longRunning = makeEntry("thread-long-running", {
+      lastUsedAtMs: Date.now() - 60 * 60_000, // "idle" a full hour by the clock alone
+      currentHandler: () => {}, // a turn is actively awaiting this attempt's result
+    });
+    registry.set(longRunning.threadId, longRunning);
+
+    registry.sweepIdle(30_000);
+
+    expect(registry.get("thread-long-running")).toBe(longRunning);
+    expect(longRunning.closed).toBe(false);
+  });
+
+  it("sweepIdle still discards a genuinely idle entry (no turn in flight) past the threshold", () => {
+    const registry = new AttemptRegistry();
+    const idleBetweenTurns = makeEntry("thread-idle", {
+      lastUsedAtMs: Date.now() - 60_000,
+      currentHandler: null, // no turn awaiting — genuinely idle between turns
+    });
+    registry.set(idleBetweenTurns.threadId, idleBetweenTurns);
+
+    registry.sweepIdle(30_000);
+
+    expect(registry.get("thread-idle")).toBeUndefined();
+    expect(idleBetweenTurns.closed).toBe(true);
+  });
 });
