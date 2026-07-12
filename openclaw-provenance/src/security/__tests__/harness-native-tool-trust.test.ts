@@ -51,6 +51,40 @@ describe("harness-native primitives — trusted output", () => {
   });
 });
 
+// Local project-analysis tools (understand_*). Read-only, agent-local — but
+// on the native Claude Code harness they arrive under BARE names (no
+// mcp__openclaw__ prefix), so an unmapped entry falls through getToolTrust()'s
+// prefix fallback to the "untrusted" secure-default. That silently re-taints
+// the session on every read-only call and overrides /reset-trust +
+// /approve-exec approvals on the next turn (the openclaw-provenance-nxf bug).
+// These guard that the whole family stays trusted whether called bare (native
+// harness) or MCP-prefixed (bridge). Same class as c69e13f "local tool taints".
+const UNDERSTAND_TRUSTED = [
+  "understand_status",
+  "understand_search",
+  "understand_analyze_project",
+  "understand_get_node",
+  "understand_list_projects",
+] as const;
+
+describe("understand_* local project-analysis tools — trusted output", () => {
+  for (const tool of UNDERSTAND_TRUSTED) {
+    it(`${tool} resolves trusted when called bare (native harness)`, () => {
+      // The failing behavior before the fix: a bare understand_* name missed
+      // every branch of getToolTrust() and returned the "untrusted" default.
+      expect(getToolTrust(tool, taints)).toBe("trusted");
+    });
+
+    it(`${tool} resolves trusted via the openclaw MCP bridge prefix`, () => {
+      expect(getToolTrust(`mcp__openclaw__${tool}`, taints)).toBe("trusted");
+    });
+
+    it(`${tool} has an explicit default entry (not relying on the prefix fallback)`, () => {
+      expect(DEFAULT_TOOL_OUTPUT_TAINTS[tool]).toBe("trusted");
+    });
+  }
+});
+
 const VESTIGE_TRUSTED_ALIASES = [
   "vestige_backup",
   "openclawvestige_dream",
