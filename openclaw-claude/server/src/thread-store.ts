@@ -144,6 +144,11 @@ export type ThreadMeta = {
   ephemeral: boolean;
   source: "appServer";
   forkedFromId?: string | null;
+  /** User-facing thread name, set via `thread/name/set`. Unset until then. */
+  name?: string | null;
+  /** Soft-deleted via `thread/archive`; hidden from `thread/list` by default. */
+  archived?: boolean;
+  archivedAt?: number | null;
 };
 
 export type CreateThreadInput = {
@@ -250,6 +255,30 @@ export class ThreadStore {
     };
     await this.writeMeta(next);
     return next;
+  }
+
+  /**
+   * Enumerate all threads with persisted metadata, newest-updated first.
+   * Tolerates the same failure modes as `readMeta` (missing/corrupt/stale
+   * meta.json) by skipping the offending entry rather than failing the whole
+   * list — one bad thread directory shouldn't take down thread/list.
+   */
+  async listThreads(): Promise<ThreadMeta[]> {
+    const threadsRoot = path.join(this.stateRoot, "threads");
+    let entries: string[];
+    try {
+      entries = await fs.readdir(threadsRoot);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw err;
+    }
+    const metas: ThreadMeta[] = [];
+    for (const threadId of entries) {
+      const meta = await this.readMeta(threadId);
+      if (meta) metas.push(meta);
+    }
+    metas.sort((a, b) => b.updatedAt - a.updatedAt);
+    return metas;
   }
 
   async deleteThread(threadId: string): Promise<void> {

@@ -119,6 +119,13 @@ export type Thread = {
   forkedFromId?: string | null;
   gitInfo?: JsonObject | null;
   path?: string | null;
+  /**
+   * Not part of codex's Thread shape (its list-context CodexThread has no
+   * archived field) — additive for our own thread/list + thread/archive
+   * pair so a caller can render archived state without a second round-trip.
+   * Safe: unknown fields don't break a codex-shaped consumer.
+   */
+  archived?: boolean;
 };
 
 // ─── Dynamic tools (codex's `dynamicTools` array shape) ──────────────────────
@@ -293,6 +300,54 @@ export type ThreadInjectItemsParams = JsonObject & {
 
 export type ThreadUnsubscribeParams = JsonObject & {
   threadId: string;
+};
+
+// ─── thread/list ─────────────────────────────────────────────────────────────
+
+export type ThreadListParams = JsonObject & {
+  cursor?: string | null;
+  limit?: number | null;
+  modelProviders?: string[] | null;
+  sortKey?: "created_at" | "updated_at" | "recency_at" | null;
+  sortDirection?: "asc" | "desc" | null;
+  archived?: boolean | null;
+  searchTerm?: string | null;
+};
+
+export type ThreadListResponse = {
+  data: Thread[];
+  nextCursor?: string | null;
+  backwardsCursor?: string | null;
+};
+
+// ─── thread/read ─────────────────────────────────────────────────────────────
+
+export type ThreadReadParams = JsonObject & {
+  threadId: string;
+  includeTurns?: boolean;
+};
+
+export type ThreadReadResponse = {
+  thread: Thread;
+};
+
+// ─── thread/name/set ─────────────────────────────────────────────────────────
+
+export type ThreadSetNameParams = JsonObject & {
+  threadId: string;
+  name: string;
+};
+
+// ─── thread/archive, thread/unarchive ────────────────────────────────────────
+// Codex parity note: thread/archive returns void; thread/unarchive returns
+// the restored thread. Intentionally asymmetric — mirrored here as-is.
+
+export type ThreadArchiveParams = JsonObject & {
+  threadId: string;
+};
+
+export type ThreadUnarchiveResponse = {
+  thread: Thread;
 };
 
 // ─── turn/start ──────────────────────────────────────────────────────────────

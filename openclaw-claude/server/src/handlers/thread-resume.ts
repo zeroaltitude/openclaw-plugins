@@ -4,8 +4,6 @@
  * replay into a new SDK session happens on the next `turn/start`.
  */
 
-import { promises as fs } from "node:fs";
-
 import {
   isJsonObject,
   RPC_INVALID_PARAMS,
@@ -16,6 +14,7 @@ import {
   type Turn,
 } from "../protocol.js";
 import { RpcError } from "../server.js";
+import { derivePreview, metaToThread } from "../thread-mapper.js";
 import type { ThreadStore } from "../thread-store.js";
 import type { Logger } from "../transport.js";
 import { validateOutbound } from "../validators.js";
@@ -40,20 +39,11 @@ export function createThreadResumeHandler(threadStore: ThreadStore, logger: Logg
     const patch = await applyResumeOverrides(threadStore, meta.id, params);
     const effective = patch ?? meta;
 
-    const thread: Thread = {
-      id: effective.id,
-      sessionId: effective.sessionId,
-      cliVersion: effective.cliVersion,
-      createdAt: effective.createdAt,
-      updatedAt: effective.updatedAt,
-      cwd: effective.cwd,
-      ephemeral: effective.ephemeral,
-      modelProvider: effective.modelProvider,
-      preview: await derivePreview(threadStore.messagesPath(effective.id)),
-      source: effective.source,
+    const thread: Thread = metaToThread(effective, {
       status: { type: "idle" },
       turns,
-    };
+      preview: await derivePreview(threadStore.messagesPath(effective.id)),
+    });
 
     const response: ThreadResumeResponse = {
       thread,
@@ -102,48 +92,4 @@ async function applyResumeOverrides(
   if (typeof params.cwd === "string" && params.cwd.length > 0) patch.cwd = params.cwd;
   if (Object.keys(patch).length === 0) return null;
   return threadStore.updateMeta(threadId, patch);
-}
-
-async function derivePreview(messagesPath: string): Promise<string> {
-  // Preview is "usually the first user message" per the codex schema.
-  // We scan the JSONL for the first entry with role=user and a text body.
-  let raw: string;
-  try {
-    raw = await fs.readFile(messagesPath, "utf8");
-  } catch {
-    return "";
-  }
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const entry = JSON.parse(trimmed) as Record<string, unknown>;
-      const text = extractUserText(entry);
-      if (text) return text.slice(0, 200);
-    } catch {
-      continue;
-    }
-  }
-  return "";
-}
-
-function extractUserText(entry: Record<string, unknown>): string | null {
-  // SDK entry shapes vary; defensively look at common locations.
-  if (entry.type === "user" || entry.role === "user") {
-    const message = (entry.message ?? entry.content) as unknown;
-    if (typeof message === "string") return message;
-    if (Array.isArray(message)) {
-      for (const block of message) {
-        if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
-          const text = (block as { text?: unknown }).text;
-          if (typeof text === "string") return text;
-        }
-      }
-    }
-    if (message && typeof message === "object") {
-      const content = (message as { content?: unknown }).content;
-      if (typeof content === "string") return content;
-    }
-  }
-  return null;
 }

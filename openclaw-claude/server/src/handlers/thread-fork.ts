@@ -130,6 +130,7 @@ export function createThreadForkHandler(threadStore: ThreadStore, logger: Logger
       status: { type: "idle" },
       turns: [],
       forkedFromId: parent.id,
+      name: null,
     };
 
     const response: ThreadStartResponse = {

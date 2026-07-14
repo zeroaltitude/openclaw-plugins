@@ -14,12 +14,12 @@ import {
   type DynamicToolSpec,
   type JsonValue,
   type SandboxPolicyResponse,
-  type Thread,
   type ThreadStartParams,
   type ThreadStartResponse,
 } from "../protocol.js";
 import { RpcError } from "../server.js";
 import { ANTHROPIC_PROVIDER_ID, defaultModelId, isKnownModel } from "../models.js";
+import { metaToThread } from "../thread-mapper.js";
 import type { ThreadStore } from "../thread-store.js";
 import type { Logger } from "../transport.js";
 import { validateOutbound } from "../validators.js";
@@ -60,20 +60,7 @@ export function createThreadStartHandler(threadStore: ThreadStore, logger: Logge
       cliVersion: OPENCLAW_CLAUDE_BRIDGE_VERSION,
     });
 
-    const thread: Thread = {
-      id: meta.id,
-      sessionId: meta.sessionId,
-      cliVersion: meta.cliVersion,
-      createdAt: meta.createdAt,
-      updatedAt: meta.updatedAt,
-      cwd: meta.cwd,
-      ephemeral: meta.ephemeral,
-      modelProvider: meta.modelProvider,
-      preview: "",
-      source: meta.source,
-      status: { type: "idle" },
-      turns: [],
-    };
+    const thread = metaToThread(meta, { status: { type: "idle" }, turns: [], preview: "" });
 
     const response: ThreadStartResponse = {
       thread,

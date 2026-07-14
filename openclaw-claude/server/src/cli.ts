@@ -7,9 +7,13 @@ import { ActiveTurnRegistry } from "./active-turns.js";
 import { AttemptRegistry } from "./attempt-registry.js";
 import { createInitializeHandler, type InitializeState } from "./handlers/initialize.js";
 import { createModelListHandler } from "./handlers/model-list.js";
+import { createThreadArchiveHandler, createThreadUnarchiveHandler } from "./handlers/thread-archive.js";
 import { createThreadForkHandler } from "./handlers/thread-fork.js";
 import { createThreadInjectItemsHandler } from "./handlers/thread-inject-items.js";
+import { createThreadListHandler } from "./handlers/thread-list.js";
+import { createThreadReadHandler } from "./handlers/thread-read.js";
 import { createThreadResumeHandler } from "./handlers/thread-resume.js";
+import { createThreadSetNameHandler } from "./handlers/thread-name-set.js";
 import { createThreadStartHandler } from "./handlers/thread-start.js";
 import { createThreadUnsubscribeHandler } from "./handlers/thread-unsubscribe.js";
 import { createTurnInterruptHandler } from "./handlers/turn-interrupt.js";
@@ -162,6 +166,11 @@ export async function main(argv: string[]): Promise<void> {
   server.onMethod("thread/fork", createThreadForkHandler(threadStore, STDERR_LOGGER));
   server.onMethod("thread/inject_items", createThreadInjectItemsHandler(threadStore, STDERR_LOGGER));
   server.onMethod("thread/unsubscribe", createThreadUnsubscribeHandler(threadStore));
+  server.onMethod("thread/list", createThreadListHandler(threadStore, attemptRegistry, STDERR_LOGGER));
+  server.onMethod("thread/read", createThreadReadHandler(threadStore, STDERR_LOGGER));
+  server.onMethod("thread/name/set", createThreadSetNameHandler(threadStore, STDERR_LOGGER));
+  server.onMethod("thread/archive", createThreadArchiveHandler(threadStore, STDERR_LOGGER));
+  server.onMethod("thread/unarchive", createThreadUnarchiveHandler(threadStore, STDERR_LOGGER));
 
   // Hold the process open until stdin closes.
   await new Promise<void>((resolve) => {
