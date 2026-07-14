@@ -29,6 +29,34 @@ import type { Logger } from "./transport.js";
 
 const META_SCHEMA_VERSION = 1;
 
+// Bounds concurrent `fs.stat` calls in listThreadIdsByRecency — high enough
+// to amortize syscall latency across tens of thousands of entries, low
+// enough to stay well under typical open-file-descriptor limits (ulimit -n
+// is often 1024; this leaves ample headroom for whatever else the process
+// has open).
+const STAT_CONCURRENCY = 64;
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      const item = items[i];
+      if (item === undefined) continue;
+      results[i] = await fn(item);
+    }
+  }
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 const STATE_ROOT_BASE = path.join(process.env.HOME ?? os.homedir(), ".openclaw", "state");
 
 export const DEFAULT_STATE_ROOT = path.join(STATE_ROOT_BASE, "claude-bridge");
@@ -258,12 +286,26 @@ export class ThreadStore {
   }
 
   /**
-   * Enumerate all threads with persisted metadata, newest-updated first.
-   * Tolerates the same failure modes as `readMeta` (missing/corrupt/stale
-   * meta.json) by skipping the offending entry rather than failing the whole
-   * list — one bad thread directory shouldn't take down thread/list.
+   * Cheap, scalable ordering pass for thread/list: stats every thread's
+   * meta.json for mtimeMs (a fast syscall, no file content read or JSON
+   * parse) and sorts by it, WITHOUT loading any ThreadMeta into memory.
+   *
+   * A real install can accumulate tens of thousands of thread directories
+   * (heartbeats, cron, subagents, every chat session ever) — a version of
+   * this that called `readMeta` (full read + JSON.parse) on every entry just
+   * to sort-and-slice a small page was tried first and OOM-crashed the
+   * bridge process against ~36k threads on a long-lived real install. Stat
+   * is orders of magnitude cheaper: no file content ever touches the heap
+   * for entries outside the requested page. Callers (thread-list.ts) read
+   * full metadata lazily, in this order, only for entries they actually keep.
+   *
+   * `mtimeMs` on meta.json approximates `updatedAt` — `writeMeta` rewrites
+   * the file (via a tmp-file rename) on every `updateMeta`/`createThread`
+   * call, so the two move together. Good enough for list ordering; exact
+   * `updatedAt` is still read from the real meta.json once a thread makes it
+   * into a page.
    */
-  async listThreads(): Promise<ThreadMeta[]> {
+  async listThreadIdsByRecency(): Promise<string[]> {
     const threadsRoot = path.join(this.stateRoot, "threads");
     let entries: string[];
     try {
@@ -272,13 +314,18 @@ export class ThreadStore {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
     }
-    const metas: ThreadMeta[] = [];
-    for (const threadId of entries) {
-      const meta = await this.readMeta(threadId);
-      if (meta) metas.push(meta);
-    }
-    metas.sort((a, b) => b.updatedAt - a.updatedAt);
-    return metas;
+    const stamped = await mapWithConcurrency(entries, STAT_CONCURRENCY, async (threadId) => {
+      try {
+        const stat = await fs.stat(this.metaPath(threadId));
+        return { threadId, mtimeMs: stat.mtimeMs };
+      } catch {
+        return null; // gone/corrupt entry — same tolerance as readMeta, just cheaper to detect
+      }
+    });
+    return stamped
+      .filter((entry): entry is { threadId: string; mtimeMs: number } => entry !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .map((entry) => entry.threadId);
   }
 
   async deleteThread(threadId: string): Promise<void> {
