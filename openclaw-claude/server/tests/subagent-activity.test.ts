@@ -176,3 +176,92 @@ describe("createSubagentActivityEmitter — toolActivity generalization", () => 
     expect((calls[0]!.params as { kind: string }).kind).toBe("subagentActivity");
   });
 });
+
+describe("createSubagentActivityEmitter — evidence-gated vouching", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function scriptedSampler(script: Array<{ alive?: boolean; evidence: boolean }>) {
+    let i = 0;
+    return {
+      sample: () => {
+        const step = script[Math.min(i++, script.length - 1)]!;
+        return Promise.resolve({
+          childAlive: step.alive ?? true,
+          cpuMsDelta: step.evidence ? 25 : 0,
+          ioBytesDelta: 0,
+          descendantCount: 1,
+          descendantChurn: false,
+        });
+      },
+    };
+  }
+
+  it("keeps vouching while evidence flows, grace-emits briefly without it, then goes silent, and resumes", async () => {
+    const calls: unknown[] = [];
+    const emitter = createSubagentActivityEmitter({
+      notify: (_m, params) => calls.push(params),
+      threadId: "t",
+      turnId: "u",
+      intervalMs: 100,
+      maxIdleTicks: 3,
+      evidenceSampler: scriptedSampler([
+        { evidence: true },  // tick 1 → emit
+        { evidence: false }, // tick 2 → grace 1 → emit
+        { evidence: false }, // tick 3 → grace 2 → emit
+        { evidence: false }, // tick 4 → grace exhausted → SILENT
+        { evidence: false }, // tick 5 → SILENT
+        { evidence: true },  // tick 6 → evidence back → emit
+      ]),
+    });
+    emitter.arm("toolActivity", "Bash");
+    await vi.advanceTimersByTimeAsync(650);
+    emitter.disarm();
+    expect(calls.length).toBe(4); // ticks 1,2,3,6
+  });
+
+  it("disarms itself the moment the child tree is gone", async () => {
+    const calls: unknown[] = [];
+    const emitter = createSubagentActivityEmitter({
+      notify: (_m, params) => calls.push(params),
+      threadId: "t",
+      turnId: "u",
+      intervalMs: 100,
+      evidenceSampler: scriptedSampler([
+        { evidence: true },
+        { alive: false, evidence: false }, // tree dead → self-disarm
+        { evidence: true },                // would emit if still armed — must not
+      ]),
+    });
+    emitter.arm("toolActivity", "Bash");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls.length).toBe(1); // only the first tick
+    emitter.disarm(); // idempotent
+  });
+
+  it("re-arming resets the idle-grace budget", async () => {
+    const calls: unknown[] = [];
+    const emitter = createSubagentActivityEmitter({
+      notify: (_m, params) => calls.push(params),
+      threadId: "t",
+      turnId: "u",
+      intervalMs: 100,
+      maxIdleTicks: 2,
+      evidenceSampler: scriptedSampler([
+        { evidence: false }, // grace 1 → emit
+        { evidence: false }, // grace exhausted → silent
+        { evidence: false }, // (re-armed before this tick) grace 1 again → emit
+      ]),
+    });
+    emitter.arm("toolActivity", "Read");
+    await vi.advanceTimersByTimeAsync(250);
+    emitter.arm("toolActivity", "Write"); // new tool call in the same window
+    await vi.advanceTimersByTimeAsync(100);
+    emitter.disarm();
+    expect(calls.length).toBe(2);
+  });
+});

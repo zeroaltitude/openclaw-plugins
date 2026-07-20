@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { createEvidenceSampler, hasPositiveEvidence, type EvidenceSampler } from "./process-evidence.js";
 import { promises as fs } from "node:fs";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -342,6 +343,9 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     notify,
     threadId: meta.id,
     turnId: turn.turnId,
+    // Vouch honestly: every tick verifies the claude subprocess tree is doing
+    // observable work (CPU/IO/process churn) before asserting liveness.
+    evidenceSampler: createEvidenceSampler(),
     onError: (activityErr) => {
       logger.debug("[turn-runner] subagentActivity notify threw", {
         error: activityErr instanceof Error ? activityErr.message : String(activityErr),
@@ -1001,32 +1005,80 @@ export const SUBAGENT_ACTIVITY_INTERVAL_MS = 20_000;
  * arm/disarm/emit semantics can be unit-tested with fake timers, independent of
  * the SDK stream. See the call site in runTurn for the full rationale.
  */
+export const SUBAGENT_ACTIVITY_MAX_IDLE_TICKS = 3;
+
 export function createSubagentActivityEmitter(opts: {
   notify: (method: string, params: unknown) => void;
   threadId: string;
   turnId: string;
   onError?: (err: unknown) => void;
   intervalMs?: number;
+  /** Positive-evidence sampler (process-evidence.ts). Absent = legacy blind vouching (tests). */
+  evidenceSampler?: EvidenceSampler;
+  /** Consecutive zero-evidence ticks to grace-emit before going silent (default 3). */
+  maxIdleTicks?: number;
 }): SubagentActivityController {
   const intervalMs = opts.intervalMs ?? SUBAGENT_ACTIVITY_INTERVAL_MS;
+  const maxIdleTicks = opts.maxIdleTicks ?? SUBAGENT_ACTIVITY_MAX_IDLE_TICKS;
   let timer: ReturnType<typeof setInterval> | undefined;
   let armedKind: NativeActivityKind = "subagentActivity";
   let armedTool: string | undefined;
+  let idleTicks = 0;
+  const emit = () => {
+    try {
+      opts.notify("turn/progress", {
+        threadId: opts.threadId,
+        turnId: opts.turnId,
+        kind: armedKind,
+        ...(armedTool ? { tool: armedTool } : {}),
+      });
+    } catch (activityErr) {
+      opts.onError?.(activityErr);
+    }
+  };
   const arm = (kind: NativeActivityKind = "subagentActivity", tool?: string) => {
     armedKind = kind;
     armedTool = tool;
+    idleTicks = 0;
     if (timer) return;
     timer = setInterval(() => {
-      try {
-        opts.notify("turn/progress", {
-          threadId: opts.threadId,
-          turnId: opts.turnId,
-          kind: armedKind,
-          ...(armedTool ? { tool: armedTool } : {}),
-        });
-      } catch (activityErr) {
-        opts.onError?.(activityErr);
+      const sampler = opts.evidenceSampler;
+      if (!sampler) {
+        emit();
+        return;
       }
+      // Evidence-gated vouching: the consumer translates these notifications
+      // into watchdog progress touches, so each one is an assertion that the
+      // tool is genuinely alive — verify it instead of vouching on a timer.
+      void sampler
+        .sample()
+        .then((evidence) => {
+          if (!timer) return; // disarmed while sampling
+          if (!evidence.childAlive) {
+            // The claude subprocess tree is gone — stop vouching immediately.
+            // The turn itself will fail through the stream/exit path.
+            disarm();
+            return;
+          }
+          if (hasPositiveEvidence(evidence)) {
+            idleTicks = 0;
+            emit();
+            return;
+          }
+          // Alive but zero observable work (no CPU, no IO, no tree churn).
+          // Grace-emit for a few ticks — kernel-blocked-but-healthy waits
+          // (network reads) look like this briefly — then go SILENT rather
+          // than keep asserting liveness we cannot demonstrate. Upstream's
+          // watchdogs and the SDK's per-tool timeouts take over; vouching
+          // resumes automatically the moment evidence returns.
+          idleTicks += 1;
+          if (idleTicks < maxIdleTicks) {
+            emit();
+          }
+        })
+        .catch((sampleErr) => {
+          opts.onError?.(sampleErr);
+        });
     }, intervalMs);
     timer.unref?.();
   };
