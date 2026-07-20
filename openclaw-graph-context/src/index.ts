@@ -278,4 +278,6 @@ export function activate(api: PluginApi): void {
   log.info("[graph-context] routes registered: /graph-context");
 }
 
-export default { activate };
+// Upstream loader contract (July 2026): a `register` function is resolved from
+// the default export; named `activate` alone fails validation. Alias it.
+export default { id: "graph-context", register: activate, activate };

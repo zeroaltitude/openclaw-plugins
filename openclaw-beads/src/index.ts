@@ -1000,4 +1000,6 @@ export function activate(api: PluginApi): void {
 }
 
 // CommonJS-style default export for OpenClaw plugin loader compat.
-export default { activate };
+// Upstream loader contract (July 2026): a `register` function is resolved from
+// the default export; named `activate` alone fails validation. Alias it.
+export default { id: "beads", register: activate, activate };
