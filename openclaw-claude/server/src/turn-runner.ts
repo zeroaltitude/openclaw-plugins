@@ -365,11 +365,17 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     // attempt-registry.ts for why a per-message handler replaces the loop.
     await waitForTurnResult(entry, async (msg) => {
       const m = msg;
-      // Any real SDK message means the silent post-tool_use window is over —
-      // disarm the subagent-activity emitter. handleStreamEvent re-arms it when
-      // a fresh native subagent tool_use block opens. Disarm BEFORE dispatch so
-      // re-arming inside this same event survives.
-      subagentActivity.disarm();
+      // The activity emitter is armed at a tool_use block's content_block_stop
+      // and must survive the message_delta/message_stop envelope events (and
+      // the coalesced `assistant` message) that immediately CLOSE that same
+      // tool-calling assistant message — those all arrive BEFORE the tool's
+      // silent execution even begins, so disarming on them (as an earlier
+      // blanket top-of-handler disarm did) killed the emitter within
+      // milliseconds and left the whole execution unvouched (found live
+      // 2026-07-20: a 150s Bash call logged lastProgress frozen at
+      // tool:Bash:ended for its full duration). Disarm is now precise: only
+      // genuinely-resumed content (content_block_start / _delta of the NEXT
+      // output) or turn end ends the silent window — see handleStreamEvent.
       switch (m.type) {
         case "stream_event":
           handleStreamEvent(m, blocks, turn, meta, notify, agentMessageTracker, subagentActivity);
@@ -1090,7 +1096,8 @@ export function createSubagentActivityEmitter(opts: {
   return { arm, disarm };
 }
 
-function handleStreamEvent(
+/** Exported for the activity-emitter arm/disarm lifecycle regression test. */
+export function handleStreamEvent(
   msg: Record<string, unknown>,
   blocks: Map<number, StreamItemRef>,
   turn: ActiveTurn,
@@ -1104,6 +1111,11 @@ function handleStreamEvent(
 
   switch (evt.type) {
     case "content_block_start": {
+      // A new content block beginning means the post-tool_use silent window
+      // (if any) is over — real output resumed, or a fresh tool_use block is
+      // starting (whose own content_block_stop re-arms). Harmless no-op when
+      // not armed (e.g. the tool_use block that is about to arm).
+      subagentActivity.disarm();
       const idx = numField(evt, "index");
       const block = evt.content_block as Record<string, unknown> | undefined;
       if (idx === undefined || !block) return;
@@ -1156,6 +1168,10 @@ function handleStreamEvent(
       break;
     }
     case "content_block_delta": {
+      // Streaming content = the model is actively producing output, not
+      // silently waiting on a tool. (The tool_use block's own input-json
+      // deltas arrive before its arming stop, so this is a no-op there.)
+      subagentActivity.disarm();
       const idx = numField(evt, "index");
       if (idx === undefined) return;
       const ref = blocks.get(idx);
