@@ -65,18 +65,14 @@ export type RunTurnInput = {
   effort: ReasoningEffort | null;
   /**
    * Set by the `thread/compact/start` handler: the turn's input is the SDK's
-   * `/compact` slash command rather than a user message. Two behavioral
-   * differences from a normal turn:
-   *
-   *   1. The turn is also considered terminal when a `system`/`status`
-   *      message carrying `compact_result` arrives — the SDK reports
-   *      compaction success/failure through that message, and a slash-command
-   *      turn is not guaranteed to emit a `result` message afterwards.
-   *   2. The attempt is discarded once the turn settles. Compaction rewrites
-   *      the session transcript; forcing the next turn through a fresh
-   *      resume guarantees it loads the compacted history instead of trusting
-   *      a subprocess whose in-memory state we can no longer account for
-   *      (and makes any stray late messages from the old subprocess harmless).
+   * `/compact` slash command rather than a user message. The turn still
+   * terminates on the SDK's `result` message — proven live to follow the
+   * compact_boundary and the persisted summary records (see
+   * scripts/diag-sdk-compact.ts) — so by the time the turn settles the
+   * compacted transcript is durable. The one behavioral difference: the
+   * attempt is discarded once the turn settles, forcing the next turn
+   * through a fresh resume of the compacted history rather than trusting
+   * the old subprocess's in-memory state.
    */
   compactMode?: boolean;
   /**
@@ -400,17 +396,14 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     // waitForTurnResult / pumpAttempt below and the design note atop
     // attempt-registry.ts for why a per-message handler replaces the loop.
     //
-    // compactMode turns additionally treat the `status` message carrying
-    // `compact_result` as terminal: the SDK reports compaction completion
-    // through that message and a slash-command turn is not guaranteed to
-    // emit a `result` afterwards (see RunTurnInput.compactMode).
-    const isTerminal = args.compactMode
-      ? (msg: Record<string, unknown>) =>
-          msg.type === "result" ||
-          (msg.type === "system" &&
-            msg.subtype === "status" &&
-            (msg.compact_result === "success" || msg.compact_result === "failed"))
-      : undefined;
+    // compactMode turns terminate on `result` like any other turn. Proven
+    // live against SDK 0.3.145 (scripts/diag-sdk-compact.ts): a manual
+    // /compact emits status(compacting) → status(compact_result) → init →
+    // compact_boundary → summary user records → result. Settling any
+    // earlier (e.g. on the compact_result status message) and discarding
+    // the attempt kills the subprocess BEFORE the boundary arrives and
+    // before the compacted transcript is persisted through the session
+    // store — which silently reverts the compaction on the next resume.
     await waitForTurnResult(entry, async (msg) => {
       const m = msg;
       // The activity emitter is armed at a tool_use block's content_block_stop
@@ -560,7 +553,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
           break;
         }
       }
-    }, isTerminal);
+    });
 
     const completedAtMs = Date.now();
     const aborted = turn.abortController.signal.aborted;
@@ -905,7 +898,6 @@ async function createAttempt(params: {
 function waitForTurnResult(
   entry: AttemptEntry,
   onMessage: (msg: Record<string, unknown>) => void | Promise<void>,
-  isTerminal: (msg: Record<string, unknown>) => boolean = (msg) => msg.type === "result",
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -923,12 +915,12 @@ function waitForTurnResult(
         if (result instanceof Promise) {
           return result.then(
             () => {
-              if (isTerminal(msg)) settle(resolve);
+              if (msg.type === "result") settle(resolve);
             },
             (err: unknown) => settle(() => reject(err)),
           );
         }
-        if (isTerminal(msg)) settle(resolve);
+        if (msg.type === "result") settle(resolve);
       } catch (err) {
         settle(() => reject(err));
       }

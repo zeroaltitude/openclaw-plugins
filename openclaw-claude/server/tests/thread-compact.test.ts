@@ -172,10 +172,21 @@ describe("runTurn compactMode", () => {
     expect((boundaryNotif?.params as Record<string, unknown>).preTokens).toBe(180_000);
   });
 
-  it("terminates on the compact_result status message when no result follows", async () => {
-    // Slash-command turns aren't guaranteed a trailing `result` message —
-    // the status message carrying compact_result must settle the turn.
-    script = [COMPACT_BOUNDARY, STATUS_SUCCESS];
+  it("waits for the trailing result — boundary/summary arrive AFTER compact_result", async () => {
+    // Real SDK order (proven live, scripts/diag-sdk-compact.ts): the
+    // compact_result status message arrives BEFORE the compact_boundary and
+    // the persisted summary records. Settling the turn on the status message
+    // (an earlier design) discarded the attempt before persistence finished,
+    // silently reverting the compaction on the next resume. The turn must
+    // consume through to `result` so the boundary telemetry is captured.
+    script = [
+      { type: "system", subtype: "status", status: "compacting" },
+      STATUS_SUCCESS,
+      { type: "system", subtype: "init" },
+      COMPACT_BOUNDARY,
+      { type: "user", message: { role: "user", content: [] } },
+      RESULT,
+    ];
     const meta = makeMeta();
     const attemptRegistry = new AttemptRegistry();
     const turn = makeTurn(meta.id);
@@ -186,6 +197,8 @@ describe("runTurn compactMode", () => {
 
     expect(finalTurn.status).toBe("completed");
     expect(compaction?.result).toBe("success");
+    // The boundary (which arrives after compact_result) must be captured.
+    expect(compaction?.boundary?.preTokens).toBe(180_000);
     expect(attemptRegistry.size()).toBe(0);
   });
 
@@ -309,7 +322,7 @@ describe("thread/compact/start handler", () => {
   });
 
   it("reports compacted:false with the SDK's error on a failed compaction", async () => {
-    script = [STATUS_FAILED];
+    script = [STATUS_FAILED, RESULT];
     const meta = makeMeta();
     const { deps, notifications } = makeHandlerDeps(meta);
     const handler = createThreadCompactStartHandler(deps);
