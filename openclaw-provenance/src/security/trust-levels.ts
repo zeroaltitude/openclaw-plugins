@@ -250,6 +250,26 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   memory_search: "trusted",
   memory_get: "trusted",
 
+  // ── Local project-analysis (understand_*) — read-only, agent-local ──
+  // These tools analyze on-machine project state (status, code search, node
+  // graph, project registry). Their output is agent-local, not inbound
+  // external content — same category as memory_search / wiki_search above.
+  // They MUST be enumerated here because on the native Claude Code harness
+  // they arrive under BARE names (understand_status, not
+  // mcp__openclaw__understand_status), so they miss the mcp__openclaw__
+  // prefix fallback and hit the "untrusted" secure-default in getToolTrust().
+  // Left unmapped, a single read-only understand_status call re-taints the
+  // session every turn (escalatedBy="tool output: understand_status"),
+  // silently overriding /reset-trust and /approve-exec approvals on the next
+  // turn. Same bug class as commit c69e13f ("local tool taints") — a
+  // read-only local tool family classified untrusted only because it reaches
+  // the trust layer bare on the native harness.
+  understand_status: "trusted",
+  understand_search: "trusted",
+  understand_analyze_project: "trusted",
+  understand_get_node: "trusted",
+  understand_list_projects: "trusted",
+
   // ── Additional OpenClaw native tools — owner-controlled output ──
   // pdf: classified trusted on the basis that the owner only parses PDFs
   // they have intentionally opened. If you ever ingest PDFs from external
