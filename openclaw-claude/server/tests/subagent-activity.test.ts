@@ -119,3 +119,60 @@ describe("createSubagentActivityEmitter", () => {
     emitter.disarm();
   });
 });
+
+describe("createSubagentActivityEmitter — toolActivity generalization", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("emits kind:toolActivity with the tool name when armed for a plain native tool", () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const emitter = createSubagentActivityEmitter({
+      notify: (method, params) => calls.push({ method, params }),
+      threadId: "thread-1",
+      turnId: "turn-1",
+      intervalMs: 100,
+    });
+    emitter.arm("toolActivity", "Bash");
+    vi.advanceTimersByTime(250);
+    emitter.disarm();
+    expect(calls.length).toBe(2);
+    expect(calls[0]).toEqual({
+      method: "turn/progress",
+      params: { threadId: "thread-1", turnId: "turn-1", kind: "toolActivity", tool: "Bash" },
+    });
+  });
+
+  it("defaults to subagentActivity when armed with no kind (back-compat)", () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const emitter = createSubagentActivityEmitter({
+      notify: (method, params) => calls.push({ method, params }),
+      threadId: "t",
+      turnId: "u",
+      intervalMs: 100,
+    });
+    emitter.arm();
+    vi.advanceTimersByTime(150);
+    emitter.disarm();
+    expect((calls[0]!.params as { kind: string }).kind).toBe("subagentActivity");
+  });
+
+  it("re-arming with a different kind switches the emitted kind without stacking timers", () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const emitter = createSubagentActivityEmitter({
+      notify: (method, params) => calls.push({ method, params }),
+      threadId: "t",
+      turnId: "u",
+      intervalMs: 100,
+    });
+    emitter.arm("toolActivity", "Read");
+    emitter.arm("subagentActivity", "Agent"); // same armed window, kind upgraded
+    vi.advanceTimersByTime(250);
+    emitter.disarm();
+    expect(calls.length).toBe(2); // one timer, not two
+    expect((calls[0]!.params as { kind: string }).kind).toBe("subagentActivity");
+  });
+});

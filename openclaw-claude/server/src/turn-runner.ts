@@ -974,8 +974,10 @@ type AgentMessageTracker = {
 // long comment at the controller's construction site in runTurn for why this
 // exists and how it keeps native-subagent turns alive through the consumer's
 // idle watchdog.
+type NativeActivityKind = "subagentActivity" | "toolActivity";
+
 type SubagentActivityController = {
-  arm: () => void;
+  arm: (kind?: NativeActivityKind, tool?: string) => void;
   disarm: () => void;
 };
 
@@ -1008,14 +1010,19 @@ export function createSubagentActivityEmitter(opts: {
 }): SubagentActivityController {
   const intervalMs = opts.intervalMs ?? SUBAGENT_ACTIVITY_INTERVAL_MS;
   let timer: ReturnType<typeof setInterval> | undefined;
-  const arm = () => {
+  let armedKind: NativeActivityKind = "subagentActivity";
+  let armedTool: string | undefined;
+  const arm = (kind: NativeActivityKind = "subagentActivity", tool?: string) => {
+    armedKind = kind;
+    armedTool = tool;
     if (timer) return;
     timer = setInterval(() => {
       try {
         opts.notify("turn/progress", {
           threadId: opts.threadId,
           turnId: opts.turnId,
-          kind: "subagentActivity",
+          kind: armedKind,
+          ...(armedTool ? { tool: armedTool } : {}),
         });
       } catch (activityErr) {
         opts.onError?.(activityErr);
@@ -1197,14 +1204,23 @@ function handleStreamEvent(
             // assistant text block downstream.
             status: "completed",
           });
-          // If this was a native subagent (`Agent`/`Task`) invocation, the SDK
-          // is about to run it in a child process that emits nothing to this
-          // iterator until it finishes. Arm the activity emitter NOW — on block
-          // *stop*, not start, because the silent window begins only after the
-          // model finishes describing the call. The main loop disarms it the
-          // instant the next real stream event arrives.
+          // The SDK is about to EXECUTE this tool, and on the installed SDK
+          // version that execution emits nothing to this iterator until it
+          // finishes — the block events only bracket the model *describing*
+          // the call. Arm the activity emitter NOW — on block *stop*, not
+          // start, because the silent window begins only after the model
+          // finishes describing the call. The main loop disarms it the
+          // instant the next real stream event arrives. Subagents
+          // (`Agent`/`Task`) keep their dedicated kind (the consumer's task
+          // mirror + wider idle budget key on it); every other native tool
+          // gets kind:"toolActivity" so consumers can prove tool-execution
+          // liveness to their own watchdogs during long single calls
+          // (a multi-minute Bash build was previously indistinguishable
+          // from a hang — see openclaw/openclaw#86655 CHANGELOG).
           if (ref.name && NATIVE_SUBAGENT_TOOL_NAMES.has(ref.name)) {
-            subagentActivity.arm();
+            subagentActivity.arm("subagentActivity", ref.name);
+          } else {
+            subagentActivity.arm("toolActivity", ref.name || undefined);
           }
           break;
         }
