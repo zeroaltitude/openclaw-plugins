@@ -409,6 +409,46 @@ export type TurnSteerParams = JsonObject & {
   content: string;
 };
 
+// ─── thread/compact/start ────────────────────────────────────────────────────
+
+/**
+ * Starts native compaction on a thread. Mirrors codex's `thread/compact/start`
+ * capability: the response is the same initial-Turn shape as `turn/start`
+ * (status "inProgress"), and completion is signalled by notifications:
+ *
+ *   - `thread/compact/boundary`  — emitted when the SDK's `compact_boundary`
+ *     system message arrives, carrying pre/post token counts.
+ *   - `thread/compact/completed` — terminal compaction outcome (always
+ *     emitted, before the turn's own `turn/completed`).
+ *
+ * Internally the bridge drives the SDK's own `/compact` slash command through
+ * the thread's live attempt (or a fresh resume when none is live), so the
+ * compaction happens in the REAL model context — the Claude CLI rewrites its
+ * session transcript with the summary, and the attempt is then discarded so
+ * the next turn resumes from the compacted history.
+ */
+export type ThreadCompactStartParams = JsonObject & {
+  threadId: string;
+};
+
+export type ThreadCompactStartResponse = {
+  turn: Turn;
+};
+
+/** Payload of the `thread/compact/completed` notification. */
+export type ThreadCompactCompletedNotification = {
+  threadId: string;
+  turnId: string;
+  /** True when the SDK reported a successful compaction. */
+  compacted: boolean;
+  /** "manual" | "auto" — from the SDK's compact_boundary metadata. */
+  trigger?: string;
+  preTokens?: number;
+  postTokens?: number;
+  durationMs?: number;
+  error?: { message: string } | null;
+};
+
 // ─── Turn + items ────────────────────────────────────────────────────────────
 
 export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";

@@ -64,6 +64,22 @@ export type RunTurnInput = {
   input: UserInput[];
   effort: ReasoningEffort | null;
   /**
+   * Set by the `thread/compact/start` handler: the turn's input is the SDK's
+   * `/compact` slash command rather than a user message. Two behavioral
+   * differences from a normal turn:
+   *
+   *   1. The turn is also considered terminal when a `system`/`status`
+   *      message carrying `compact_result` arrives — the SDK reports
+   *      compaction success/failure through that message, and a slash-command
+   *      turn is not guaranteed to emit a `result` message afterwards.
+   *   2. The attempt is discarded once the turn settles. Compaction rewrites
+   *      the session transcript; forcing the next turn through a fresh
+   *      resume guarantees it loads the compacted history instead of trusting
+   *      a subprocess whose in-memory state we can no longer account for
+   *      (and makes any stray late messages from the old subprocess harmless).
+   */
+  compactMode?: boolean;
+  /**
    * Per-turn Fast mode opt-in. When true, the SDK is invoked with
    * `settings: { fastMode: true }` so the model runs in the Claude Code Fast
    * tier when the model supports it. Anthropic gates Fast mode per-model;
@@ -108,6 +124,25 @@ export type RunTurnInput = {
 
 export type RunTurnResult = {
   finalTurn: Turn;
+  /** Compaction outcome observed during the turn (compactMode runs). */
+  compaction?: TurnCompactionOutcome;
+};
+
+/**
+ * What the SDK told us about a compaction during a turn. `boundary` is
+ * populated from the `compact_boundary` system message (the authoritative
+ * "a compaction happened here" marker, with token accounting); `result` from
+ * the `status` system message's `compact_result` field.
+ */
+export type TurnCompactionOutcome = {
+  boundary?: {
+    trigger?: string;
+    preTokens?: number;
+    postTokens?: number;
+    durationMs?: number;
+  };
+  result?: "success" | "failed";
+  error?: string;
 };
 
 export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
@@ -355,6 +390,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
 
   const blocks = new Map<number, StreamItemRef>();
   const agentMessageTracker: AgentMessageTracker = {};
+  const compaction: TurnCompactionOutcome = {};
 
   try {
     // Consumes the attempt's shared message stream until this turn's
@@ -363,6 +399,18 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     // the pump loop feeding it) stays alive for the next turn. See
     // waitForTurnResult / pumpAttempt below and the design note atop
     // attempt-registry.ts for why a per-message handler replaces the loop.
+    //
+    // compactMode turns additionally treat the `status` message carrying
+    // `compact_result` as terminal: the SDK reports compaction completion
+    // through that message and a slash-command turn is not guaranteed to
+    // emit a `result` afterwards (see RunTurnInput.compactMode).
+    const isTerminal = args.compactMode
+      ? (msg: Record<string, unknown>) =>
+          msg.type === "result" ||
+          (msg.type === "system" &&
+            msg.subtype === "status" &&
+            (msg.compact_result === "success" || msg.compact_result === "failed"))
+      : undefined;
     await waitForTurnResult(entry, async (msg) => {
       const m = msg;
       // The activity emitter is armed at a tool_use block's content_block_stop
@@ -450,6 +498,37 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
           break;
         }
         case "system": {
+          // Compaction telemetry. The SDK marks a completed compaction with a
+          // `compact_boundary` system message (token accounting) and reports
+          // success/failure through a `status` message's `compact_result`.
+          // Captured for every turn — an auto-compaction can fire mid-turn
+          // when the SDK's context threshold trips — but primarily consumed
+          // by compactMode turns (thread/compact/start).
+          if (m.subtype === "compact_boundary") {
+            const md = m.compact_metadata as Record<string, unknown> | undefined;
+            compaction.boundary = {
+              ...(typeof md?.trigger === "string" ? { trigger: md.trigger } : {}),
+              ...(typeof md?.pre_tokens === "number" ? { preTokens: md.pre_tokens } : {}),
+              ...(typeof md?.post_tokens === "number" ? { postTokens: md.post_tokens } : {}),
+              ...(typeof md?.duration_ms === "number" ? { durationMs: md.duration_ms } : {}),
+            };
+            notify("thread/compact/boundary", {
+              threadId: meta.id,
+              turnId: turn.turnId,
+              ...compaction.boundary,
+            });
+            break;
+          }
+          if (m.subtype === "status") {
+            const compactResult = m.compact_result;
+            if (compactResult === "success" || compactResult === "failed") {
+              compaction.result = compactResult;
+              if (typeof m.compact_error === "string" && m.compact_error.trim()) {
+                compaction.error = m.compact_error;
+              }
+            }
+            break;
+          }
           // Permission denials and other system events will be wired in phase 7.
           // Until then, leave a debug breadcrumb for visibility.
           logger.debug("[turn-runner] system event", { subtype: m.subtype });
@@ -481,7 +560,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
           break;
         }
       }
-    });
+    }, isTerminal);
 
     const completedAtMs = Date.now();
     const aborted = turn.abortController.signal.aborted;
@@ -497,6 +576,12 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       // their attempt — holding the subprocess alive until the idle sweep
       // would only cost memory for no benefit. Close it now.
       attemptRegistry.discard(meta.id, "one-shot turn completed");
+    } else if (args.compactMode) {
+      // Compaction rewrote the session transcript. Force the next turn
+      // through a fresh resume of the compacted history — and neutralize any
+      // stray late messages (e.g. a trailing `result` after the terminal
+      // status message) from this subprocess. See RunTurnInput.compactMode.
+      attemptRegistry.discard(meta.id, "compaction completed");
     }
     const finalTurn: Turn = {
       id: turn.turnId,
@@ -507,7 +592,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       durationMs: completedAtMs - turn.startedAtMs,
       items: turn.items,
     };
-    return { finalTurn };
+    return { finalTurn, compaction };
   } catch (err) {
     const completedAtMs = Date.now();
     const baseMessage = err instanceof Error ? err.message : String(err);
@@ -541,7 +626,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
         rateLimit: rateLimit ?? undefined,
       });
     }
-    return { finalTurn };
+    return { finalTurn, compaction };
   } finally {
     clearInterval(heartbeatTimer);
     subagentActivity.disarm();
@@ -820,6 +905,7 @@ async function createAttempt(params: {
 function waitForTurnResult(
   entry: AttemptEntry,
   onMessage: (msg: Record<string, unknown>) => void | Promise<void>,
+  isTerminal: (msg: Record<string, unknown>) => boolean = (msg) => msg.type === "result",
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -837,12 +923,12 @@ function waitForTurnResult(
         if (result instanceof Promise) {
           return result.then(
             () => {
-              if (msg.type === "result") settle(resolve);
+              if (isTerminal(msg)) settle(resolve);
             },
             (err: unknown) => settle(() => reject(err)),
           );
         }
-        if (msg.type === "result") settle(resolve);
+        if (isTerminal(msg)) settle(resolve);
       } catch (err) {
         settle(() => reject(err));
       }

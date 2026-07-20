@@ -8,6 +8,7 @@ import { AttemptRegistry } from "./attempt-registry.js";
 import { createInitializeHandler, type InitializeState } from "./handlers/initialize.js";
 import { createModelListHandler } from "./handlers/model-list.js";
 import { createThreadArchiveHandler, createThreadUnarchiveHandler } from "./handlers/thread-archive.js";
+import { createThreadCompactStartHandler } from "./handlers/thread-compact.js";
 import { createThreadForkHandler } from "./handlers/thread-fork.js";
 import { createThreadInjectItemsHandler } from "./handlers/thread-inject-items.js";
 import { createThreadListHandler } from "./handlers/thread-list.js";
@@ -149,6 +150,18 @@ export async function main(argv: string[]): Promise<void> {
   server.onMethod(
     "turn/start",
     createTurnStartHandler({
+      threadStore,
+      sessionStore,
+      activeTurns,
+      attemptRegistry,
+      notify,
+      requestClient,
+      logger: STDERR_LOGGER,
+    }),
+  );
+  server.onMethod(
+    "thread/compact/start",
+    createThreadCompactStartHandler({
       threadStore,
       sessionStore,
       activeTurns,
