@@ -229,11 +229,15 @@ describe("Browser snapshot taint deferral", () => {
     }, ownerCtx);
 
     const graph = store.getActive(ownerCtx.sessionKey);
-    // Universal evaluation applies browser.snapshot's default output taint ("external")
-    expect(graph!.maxTaint).toBe("external");
+    // Universal evaluation applies browser.snapshot's default output taint.
+    // Default is "trusted" (owner decision, 2026-07-21): navigation into a page
+    // is already gated by browser.open/navigate URL classification, so an
+    // unresolvable-URL snapshot no longer escalates. When the URL IS resolvable,
+    // URI trust still overrides (see the evil-site test above).
+    expect(graph!.maxTaint).toBe("trusted");
 
     const escalationLine = logger.logs.find(l => l.includes("TOOL_TAINT_ESCALATION"));
-    expect(escalationLine).toBeDefined();
+    expect(escalationLine).toBeUndefined();
   });
 
   it("browser.tabs does NOT defer (remains trusted)", () => {

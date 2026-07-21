@@ -94,7 +94,12 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // ── browser: reads external page content ──
   // URI trust config can override these per-domain (e.g., docs.openclaw.ai → trusted)
   "browser.navigate": "external",
-  "browser.snapshot": "external",
+  // snapshot default is trusted (owner decision, 2026-07-21): navigation into a
+  // page is already gated by browser.open/navigate URL classification, so the
+  // snapshot of an already-permitted tab doesn't add a new external source.
+  // When the tab URL IS resolvable, URI trust still overrides this default in
+  // both directions — an untrusted-domain snapshot still classifies untrusted.
+  "browser.snapshot": "trusted",
   "browser.screenshot": "trusted",
   "browser.console": "external",
   "browser.pdf": "external",
