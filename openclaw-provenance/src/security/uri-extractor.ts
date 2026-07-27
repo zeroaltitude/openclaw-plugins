@@ -11,6 +11,8 @@
  *   4. No match → []
  */
 
+import { TabUrlStore, getSharedTabUrlStore, type TabLike } from "./tab-url-store.js";
+
 // ── Extractor config ────────────────────────────────────────────────────────
 
 export interface UriExtractorConfig {
@@ -60,36 +62,45 @@ export const DEFAULT_COMPOSITE_URI_EXTRACTORS: Record<
   // extractToolSourceUris (targetId → URL via recordTabUrls).
   // Also accept url/targetUrl as fallback — some MCP browser servers
   // include the URL directly alongside targetId in params.
-  "browser.snapshot": { params: ["targetId", "url", "targetUrl"] },
-  "browser.screenshot": { params: ["targetId", "url", "targetUrl"] },
-  "browser.console": { params: ["targetId", "url", "targetUrl"] },
-  "browser.pdf": { params: ["targetId", "url", "targetUrl"] },
+  // "tabId" is listed alongside targetId because the tool schema's own
+  // description tells agents to *prefer* passing a tabId-style handle
+  // (e.g. "t1") as the targetId value — see browser-tool.schema.ts's
+  // TAB_REFERENCE_DESCRIPTION. No current client puts that value under a
+  // literal `tabId` param, but accepting it here is cheap and future-proofs
+  // against clients/MCP bridges that do.
+  "browser.snapshot": { params: ["targetId", "tabId", "url", "targetUrl"] },
+  "browser.screenshot": { params: ["targetId", "tabId", "url", "targetUrl"] },
+  "browser.console": { params: ["targetId", "tabId", "url", "targetUrl"] },
+  "browser.pdf": { params: ["targetId", "tabId", "url", "targetUrl"] },
 };
 
 // ── Browser tab URL tracking ────────────────────────────────────────────────
 
 /**
- * Track browser tab URLs from browser.tabs responses so that subsequent
- * calls using targetId (without targetUrl) can still resolve to a URI
- * for trust classification.
+ * Track browser tab URLs so that subsequent calls referencing a tab by
+ * targetId (or by a tabId/label alias — see DEFAULT_COMPOSITE_URI_EXTRACTORS
+ * comment above) can still resolve to a URI for trust classification.
  *
- * This is session-scoped and populated by after_llm_call when it sees
- * browser.tabs tool calls with tab data in responses.
+ * Backed by TabUrlStore, which persists to <workspaceDir>/.provenance/
+ * tab-urls.json so aliases survive gateway restarts. Call
+ * initTabUrlPersistence(workspaceDir) once at plugin registration to point
+ * this at a workspace; until then it operates purely in-memory.
  */
-const tabUrlMap = new Map<string, string>(); // targetId → URL
+let activeTabUrlStore: TabUrlStore = new TabUrlStore();
 
-/** Record tab URLs from a browser.tabs response */
-export function recordTabUrls(tabs: Array<{ targetId?: string; url?: string }>): void {
-  for (const tab of tabs) {
-    if (tab.targetId && tab.url) {
-      tabUrlMap.set(tab.targetId, tab.url);
-    }
-  }
+/** Point tab URL tracking at a workspace's on-disk store (survives restarts). */
+export function initTabUrlPersistence(workspaceDir: string): void {
+  activeTabUrlStore = getSharedTabUrlStore(workspaceDir);
 }
 
-/** Resolve a targetId to a URL if known from prior browser.tabs calls */
+/** Record tab URLs from a browser.tabs/open/navigate response */
+export function recordTabUrls(tabs: TabLike[]): void {
+  activeTabUrlStore.recordTabs(tabs);
+}
+
+/** Resolve a targetId or tabId/label alias to a URL if known from prior browser calls */
 export function resolveTabUrl(targetId: string): string | undefined {
-  return tabUrlMap.get(targetId);
+  return activeTabUrlStore.resolveTabUrl(targetId);
 }
 
 // ── Custom composite extractors (message tool) ─────────────────────────────
@@ -248,10 +259,21 @@ export function extractToolSourceUris(
       }
       return resolved;
     }
-    // Fallback: if no URI extracted but targetId is present, try tab URL map directly
-    if (uris.length === 0 && typeof params.targetId === "string" && toolKey.startsWith("browser.")) {
-      const tabUrl = resolveTabUrl(params.targetId);
-      if (tabUrl) return [tabUrl];
+    // Fallback: if no URI extracted but a tab reference is present, try tab
+    // URL resolution directly. targetId is the field every client actually
+    // sends; tabId is checked too in case a client sends the alias under
+    // its own name instead of packing it into targetId.
+    if (uris.length === 0 && toolKey.startsWith("browser.")) {
+      const tabRef =
+        typeof params.targetId === "string"
+          ? params.targetId
+          : typeof params.tabId === "string"
+            ? params.tabId
+            : undefined;
+      if (tabRef) {
+        const tabUrl = resolveTabUrl(tabRef);
+        if (tabUrl) return [tabUrl];
+      }
     }
     return uris;
   }

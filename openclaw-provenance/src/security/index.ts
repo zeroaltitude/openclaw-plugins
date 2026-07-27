@@ -49,8 +49,10 @@ import {
   extractToolSourceUris,
   buildUriExtractorMap,
   recordTabUrls,
+  initTabUrlPersistence,
   type UriExtractorConfig,
 } from "./uri-extractor.js";
+import { getSharedTabUrlStore } from "./tab-url-store.js";
 import {
   buildExecCommandRules,
   type ExecCommandRule,
@@ -526,6 +528,16 @@ export function registerSecurityHooks(
   const watermarkStore = getSharedWatermarkStore(workspaceDir);
   logger.info(
     `[provenance] Watermark store: ${workspaceDir}/.provenance/watermarks.json`,
+  );
+
+  // Tab URL store: links browser tab aliases (tabId/label handles) to their
+  // raw targetId and current URL, so URI trust classification can resolve a
+  // tab even when the agent refers to it by alias. Persisted so this
+  // survives gateway restarts.
+  initTabUrlPersistence(workspaceDir);
+  const tabUrlStore = getSharedTabUrlStore(workspaceDir);
+  logger.info(
+    `[provenance] Tab URL store: ${workspaceDir}/.provenance/tab-urls.json`,
   );
 
   // Identity store: caches per-session sender/owner/group/spawn data so
@@ -1619,7 +1631,18 @@ export function registerSecurityHooks(
               // response, so the previous { details: { targetId, url } }
               // fallback branch is no longer needed.
               if (typeof parsed?.targetId === "string" && typeof parsed?.url === "string") {
-                recordTabUrls([{ targetId: parsed.targetId, url: parsed.url }]);
+                recordTabUrls([
+                  {
+                    targetId: parsed.targetId,
+                    url: parsed.url,
+                    tabId: typeof parsed.tabId === "string" ? parsed.tabId : undefined,
+                    suggestedTargetId:
+                      typeof parsed.suggestedTargetId === "string"
+                        ? parsed.suggestedTargetId
+                        : undefined,
+                    label: typeof parsed.label === "string" ? parsed.label : undefined,
+                  },
+                ]);
                 browserUrlsFound++;
                 break;
               }
@@ -1639,6 +1662,10 @@ export function registerSecurityHooks(
         const pruned = watermarkStore.pruneOlderThan(24 * 60 * 60 * 1000);
         if (pruned > 0) {
           logger.info(`[provenance] Pruned ${pruned} stale watermark(s) older than 24h`);
+        }
+        const prunedTabUrls = tabUrlStore.pruneOlderThan(24 * 60 * 60 * 1000);
+        if (prunedTabUrls > 0) {
+          logger.info(`[provenance] Pruned ${prunedTabUrls} stale tab URL entr(ies) older than 24h`);
         }
       }
 
@@ -2343,7 +2370,26 @@ export function registerSecurityHooks(
               const tid =
                 typeof parsed?.targetId === "string" ? parsed.targetId : params.targetId;
               if (typeof tid === "string") {
-                recordTabUrls([{ targetId: tid, url: parsed.url }]);
+                // browser.open's result carries tabId/suggestedTargetId/label
+                // aliases alongside the raw targetId (BrowserOpenResult =
+                // BrowserTab & {...}); browser.navigate's result never does
+                // (BrowserActionTabResult has no alias fields) — recording
+                // whichever are present here is what makes browser.open time
+                // (not just browser.tabs time) populate the alias→targetId
+                // link, while a later browser.navigate on the same tab only
+                // updates targetToUrl and the alias keeps resolving correctly.
+                recordTabUrls([
+                  {
+                    targetId: tid,
+                    url: parsed.url,
+                    tabId: typeof parsed.tabId === "string" ? parsed.tabId : undefined,
+                    suggestedTargetId:
+                      typeof parsed.suggestedTargetId === "string"
+                        ? parsed.suggestedTargetId
+                        : undefined,
+                    label: typeof parsed.label === "string" ? parsed.label : undefined,
+                  },
+                ]);
               }
               break outer;
             } catch {

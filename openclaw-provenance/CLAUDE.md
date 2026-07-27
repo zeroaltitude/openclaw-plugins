@@ -52,18 +52,50 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+npm install
+npm run build   # tsc
+npm test        # vitest run
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Security/taint-tracking plugin for OpenClaw. `src/security/index.ts` registers
+handlers on OpenClaw's hook surface (`before_prompt_build`, `before_tool_call`,
+`after_tool_call`, etc.) that build a per-turn provenance graph and classify
+tool calls by trust level using:
+
+- `composite-tools.ts` — resolves a tool+action pair to a composite key
+  (e.g. `browser.navigate`) and its default output taint.
+- `uri-extractor.ts` — extracts source URIs from tool call params so a URI
+  trust pattern can override the tool's default taint.
+- `uri-trust.ts` — glob-pattern URI → trust level classification.
+- `tab-url-store.ts` — links a browser tab's aliases (raw CDP `targetId`,
+  plus the friendly `tabId`/`suggestedTargetId`/`label` handles agents are
+  told to prefer) to its current URL, so `uri-extractor.ts` can resolve a
+  tab reference to a URI regardless of which handle the agent used.
+
+### Persisted state pattern (`*-store.ts`)
+
+Several stores (`watermark-store.ts`, `identity-store.ts`,
+`blocked-write-store.ts`, `tab-url-store.ts`) persist to
+`<workspaceDir>/.provenance/*.json` so state survives gateway restarts, and
+follow the same shape:
+
+- A class wrapping an in-memory `data` object, `load()`-ing from disk in the
+  constructor (falling back to a fresh empty state on missing/corrupt file).
+- Debounced writes via `scheduleSave()` (1s timer) + an explicit `flush()`.
+- A `getShared<X>Store(workspaceDir)` singleton registry keyed by
+  workspaceDir (`Symbol.for(...)` on `globalThis`), so every agent sharing a
+  workspace sees and safely flushes the same on-disk state instead of racing
+  independent in-memory copies.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Tests live under `src/**/__tests__/*.test.ts` (vitest). Persisted stores
+  are tested with `mkdtempSync`/`rmSync` per test (see
+  `identity-store.test.ts`, `tab-url-store.test.ts`) rather than mocking fs.
+- `src/security/__tests__/test-shim.ts` provides `makeApi()`/`seedIdentity()`
+  for driving `registerSecurityHooks()` through its real hook pipeline in
+  tests, including a legacy-hook-name translation shim (see the file's
+  header comment) for tests written before the mainline hook migration.
