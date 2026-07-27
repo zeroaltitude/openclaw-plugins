@@ -1,7 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { AttemptRegistry, computeAttemptFingerprint, type AttemptEntry } from "../src/attempt-registry.js";
+import {
+  AttemptRegistry,
+  computeAttemptFingerprint,
+  diffAttemptFingerprintInputs,
+  type AttemptEntry,
+  type AttemptFingerprintInput,
+} from "../src/attempt-registry.js";
+import type { Logger } from "../src/transport.js";
 import { ControllableUserInputQueue } from "../src/user-input.js";
+
+const BASE_FINGERPRINT_INPUT: AttemptFingerprintInput = {
+  model: "claude-x",
+  thinking: null,
+  cwd: undefined,
+  disallowedTools: [],
+  toolAliases: {},
+  fastMode: false,
+  allowAll: false,
+  systemPromptAppend: undefined,
+  mcpServersConfig: undefined,
+  dynamicTools: [],
+};
+
+function makeLogger(): Logger & { calls: Record<"debug" | "info" | "warn" | "error", unknown[][]> } {
+  const calls = { debug: [], info: [], warn: [], error: [] } as Record<
+    "debug" | "info" | "warn" | "error",
+    unknown[][]
+  >;
+  return {
+    calls,
+    debug: (...args: unknown[]) => void calls.debug.push(args),
+    info: (...args: unknown[]) => void calls.info.push(args),
+    warn: (...args: unknown[]) => void calls.warn.push(args),
+    error: (...args: unknown[]) => void calls.error.push(args),
+  };
+}
 
 /**
  * These pin the persistence primitive behind the run/attempt/turn
@@ -17,6 +51,7 @@ function makeEntry(threadId = "thread-1", overrides: Partial<AttemptEntry> = {})
   return {
     threadId,
     fingerprint: "fp-1",
+    fingerprintInput: BASE_FINGERPRINT_INPUT,
     inputQueue: new ControllableUserInputQueue(),
     abortController: new AbortController(),
     liveTurnRef: { turn: { threadId, turnId: "turn-1" } as never },
@@ -74,6 +109,60 @@ describe("computeAttemptFingerprint", () => {
   });
 });
 
+describe("diffAttemptFingerprintInputs", () => {
+  const base: AttemptFingerprintInput = {
+    model: "claude-x",
+    thinking: { type: "enabled", budgetTokens: 1024 },
+    cwd: "/work",
+    disallowedTools: ["Agent", "Task"],
+    toolAliases: { Agent: "mcp__openclaw__sessions_spawn" },
+    fastMode: false,
+    allowAll: false,
+    systemPromptAppend: "be nice",
+    mcpServersConfig: { foo: { command: "bar" } },
+    dynamicTools: [{ name: "toolA", description: "does a thing", inputSchema: { type: "object" } }],
+  };
+
+  it("returns no changes for identical input", () => {
+    expect(diffAttemptFingerprintInputs(base, { ...base })).toEqual([]);
+  });
+
+  it("is insensitive to array/object key ordering, like the fingerprint itself", () => {
+    const reordered = { ...base, disallowedTools: ["Task", "Agent"] };
+    expect(diffAttemptFingerprintInputs(base, reordered)).toEqual([]);
+  });
+
+  it.each([
+    ["model", { model: "claude-y" }, "model"],
+    ["thinking", { thinking: { type: "disabled" } }, "thinking"],
+    ["cwd", { cwd: "/other" }, "cwd"],
+    ["disallowedTools", { disallowedTools: ["Agent"] }, "disallowedTools"],
+    ["toolAliases", { toolAliases: {} }, "toolAliases"],
+    ["fastMode", { fastMode: true }, "fastMode"],
+    ["allowAll", { allowAll: true }, "allowAll"],
+    ["systemPromptAppend", { systemPromptAppend: "different" }, "systemPromptAppend"],
+    ["mcpServersConfig", { mcpServersConfig: undefined }, "mcpServersConfig"],
+  ])("reports %s alone when only that field changes", (_label, patch, expectedField) => {
+    expect(diffAttemptFingerprintInputs(base, { ...base, ...patch } as AttemptFingerprintInput)).toEqual([
+      expectedField,
+    ]);
+  });
+
+  it("reports dynamicTools with a before/after tool count, not just the field name", () => {
+    // This is the case behind openclaw-c6p: an MCP disconnect/reconnect cycle
+    // changes the dynamic-tools set mid-conversation, forcing a genuinely new
+    // attempt on the next turn even though nothing about the request changed.
+    // The count makes that story legible directly from the discard log line.
+    const disconnected = { ...base, dynamicTools: [] };
+    expect(diffAttemptFingerprintInputs(base, disconnected)).toEqual(["dynamicTools (1 -> 0 tools)"]);
+  });
+
+  it("reports multiple changed fields together", () => {
+    const changed = { ...base, model: "claude-y", fastMode: true };
+    expect(diffAttemptFingerprintInputs(base, changed)).toEqual(["model", "fastMode"]);
+  });
+});
+
 describe("AttemptRegistry", () => {
   it("get/set round-trips an entry", () => {
     const registry = new AttemptRegistry();
@@ -112,6 +201,56 @@ describe("AttemptRegistry", () => {
     expect((err as Error).message).toContain("turn interrupted");
     expect(entry.currentHandler).toBeNull();
     expect(entry.currentReject).toBeNull();
+  });
+
+  it("discard logs the threadId, reason, and any extra details at info level", () => {
+    const logger = makeLogger();
+    const registry = new AttemptRegistry(logger);
+    const entry = makeEntry();
+    registry.set(entry.threadId, entry);
+
+    registry.discard(entry.threadId, "attempt fingerprint changed", { changedFields: ["model"] });
+
+    expect(logger.calls.info).toHaveLength(1);
+    const [message, context] = logger.calls.info[0];
+    expect(message).toContain("discarding attempt");
+    expect(context).toMatchObject({
+      threadId: entry.threadId,
+      reason: "attempt fingerprint changed",
+      changedFields: ["model"],
+    });
+  });
+
+  it("warns when an attempt is discarded with no turn awaiting its result — the silent-kill case (openclaw-c6p)", () => {
+    // This is exactly the gap that made a backgrounded `run_in_background`
+    // shell job impossible to diagnose: the turn that started it had already
+    // returned (no currentReject to notify) by the time a later turn's
+    // fingerprint mismatch discarded the subprocess out from under it.
+    const logger = makeLogger();
+    const registry = new AttemptRegistry(logger);
+    const entry = makeEntry();
+    entry.currentReject = null; // no turn is watching this attempt right now
+    registry.set(entry.threadId, entry);
+
+    registry.discard(entry.threadId, "attempt fingerprint changed");
+
+    expect(logger.calls.warn).toHaveLength(1);
+    const [message, context] = logger.calls.warn[0];
+    expect(message).toContain("silently killed");
+    expect(context).toMatchObject({ threadId: entry.threadId, reason: "attempt fingerprint changed" });
+  });
+
+  it("does not warn when a currentReject was present to notify — only the silent case is a warning", () => {
+    const logger = makeLogger();
+    const registry = new AttemptRegistry(logger);
+    const entry = makeEntry();
+    entry.currentReject = vi.fn();
+    entry.currentHandler = () => {};
+    registry.set(entry.threadId, entry);
+
+    registry.discard(entry.threadId, "turn interrupted");
+
+    expect(logger.calls.warn).toHaveLength(0);
   });
 
   it("discard is idempotent (no double-abort, no double-reject)", () => {

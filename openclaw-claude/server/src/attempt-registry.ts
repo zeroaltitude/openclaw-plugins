@@ -26,7 +26,15 @@
  */
 
 import type { ActiveTurn } from "./active-turns.js";
+import type { Logger } from "./transport.js";
 import type { ControllableUserInputQueue } from "./user-input.js";
+
+const NOOP_LOGGER: Logger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
 
 /**
  * One entry per thread with a live, persistent `claude` subprocess.
@@ -42,6 +50,8 @@ import type { ControllableUserInputQueue } from "./user-input.js";
 export type AttemptEntry = {
   threadId: string;
   fingerprint: string;
+  /** The raw, unhashed input `fingerprint` was computed from — kept so a later mismatch can be diffed field-by-field for diagnostics (see `diffAttemptFingerprintInputs`). */
+  fingerprintInput: AttemptFingerprintInput;
   inputQueue: ControllableUserInputQueue;
   /** Passed as `sdkOptions.abortController` at creation; aborting kills the subprocess. */
   abortController: AbortController;
@@ -61,6 +71,11 @@ export type AttemptEntry = {
 
 export class AttemptRegistry {
   private readonly byThread = new Map<string, AttemptEntry>();
+  private readonly logger: Logger;
+
+  constructor(logger: Logger = NOOP_LOGGER) {
+    this.logger = logger;
+  }
 
   get(threadId: string): AttemptEntry | undefined {
     return this.byThread.get(threadId);
@@ -77,12 +92,20 @@ export class AttemptRegistry {
     }
   }
 
-  /** Tear down and remove any live entry for a thread — new attempt boundary, interrupt, or shutdown. */
-  discard(threadId: string, reason: string): void {
+  /**
+   * Tear down and remove any live entry for a thread — new attempt boundary,
+   * interrupt, idle sweep, or shutdown. `details` is optional structured
+   * context (e.g. which fingerprint fields changed) logged alongside the
+   * reason — this discard path is otherwise the only place a subprocess
+   * (and anything it backgrounded, like a `run_in_background` shell job)
+   * gets torn down, so it's worth making visible rather than silent.
+   */
+  discard(threadId: string, reason: string, details?: Record<string, unknown>): void {
     const entry = this.byThread.get(threadId);
     if (!entry) return;
     this.byThread.delete(threadId);
-    closeEntry(entry, reason);
+    this.logger.info("[attempt-registry] discarding attempt", { threadId, reason, ...details });
+    closeEntry(entry, reason, this.logger);
   }
 
   discardAll(reason: string): void {
@@ -117,7 +140,7 @@ export class AttemptRegistry {
   }
 }
 
-function closeEntry(entry: AttemptEntry, reason: string): void {
+function closeEntry(entry: AttemptEntry, reason: string, logger: Logger): void {
   if (entry.closed) return;
   entry.closed = true;
   entry.currentHandler = null;
@@ -125,6 +148,16 @@ function closeEntry(entry: AttemptEntry, reason: string): void {
     const reject = entry.currentReject;
     entry.currentReject = null;
     reject(new Error(`attempt discarded: ${reason}`));
+  } else {
+    // No turn was actively awaiting this attempt's result — e.g. the last
+    // turn already returned and something it backgrounded (a shell command
+    // started via `run_in_background`) is still running under this
+    // subprocess. There's no promise to reject, so this WARN is the only
+    // signal that the kill happened at all.
+    logger.warn(
+      "[attempt-registry] discarded an attempt with no turn awaiting its result — any work still running under this subprocess (e.g. a backgrounded shell command) was silently killed",
+      { threadId: entry.threadId, reason },
+    );
   }
   entry.inputQueue.close();
   if (!entry.abortController.signal.aborted) entry.abortController.abort(new Error(reason));
@@ -138,7 +171,7 @@ function closeEntry(entry: AttemptEntry, reason: string): void {
  * not a continuation, so the bridge must spawn a fresh subprocess rather
  * than reuse the live one.
  */
-export function computeAttemptFingerprint(input: {
+export type AttemptFingerprintInput = {
   model: string;
   thinking: unknown;
   cwd: string | undefined;
@@ -149,8 +182,10 @@ export function computeAttemptFingerprint(input: {
   systemPromptAppend: string | undefined;
   mcpServersConfig: Record<string, unknown> | undefined;
   dynamicTools: Array<{ name: string; description?: string; inputSchema?: unknown }>;
-}): string {
-  return JSON.stringify({
+};
+
+function normalizeAttemptFingerprintInput(input: AttemptFingerprintInput) {
+  return {
     model: input.model,
     thinking: input.thinking ?? null,
     cwd: input.cwd ?? null,
@@ -163,7 +198,39 @@ export function computeAttemptFingerprint(input: {
     dynamicTools: [...input.dynamicTools]
       .map((t) => ({ name: t.name, description: t.description ?? null, inputSchema: t.inputSchema ?? null }))
       .sort((a, b) => a.name.localeCompare(b.name)),
-  });
+  };
+}
+
+export function computeAttemptFingerprint(input: AttemptFingerprintInput): string {
+  return JSON.stringify(normalizeAttemptFingerprintInput(input));
+}
+
+/**
+ * Field-level diff between two fingerprint inputs, for diagnostic logging
+ * when a mismatch forces a new attempt (see the `discard(..., "attempt
+ * fingerprint changed")` call site in turn-runner.ts). `computeAttemptFingerprint`
+ * only exposes an opaque hash, which is enough to detect *that* something
+ * changed but not *what* — this walks the same normalized shape field-by-field
+ * so the discard log line can say e.g. `dynamicTools (73 -> 0 tools)` instead
+ * of leaving the cause to be inferred after the fact.
+ */
+export function diffAttemptFingerprintInputs(
+  prev: AttemptFingerprintInput,
+  next: AttemptFingerprintInput,
+): string[] {
+  const a = normalizeAttemptFingerprintInput(prev);
+  const b = normalizeAttemptFingerprintInput(next);
+  const changes: string[] = [];
+  for (const key of Object.keys(a) as Array<keyof typeof a>) {
+    if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) {
+      changes.push(
+        key === "dynamicTools"
+          ? `dynamicTools (${prev.dynamicTools.length} -> ${next.dynamicTools.length} tools)`
+          : key,
+      );
+    }
+  }
+  return changes;
 }
 
 function sortedEntries(obj: Record<string, string>): Array<[string, string]> {

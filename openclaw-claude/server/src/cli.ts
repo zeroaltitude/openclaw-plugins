@@ -119,7 +119,7 @@ export async function main(argv: string[]): Promise<void> {
   const threadStore = new ThreadStore(stateRoot, STDERR_LOGGER);
   const sessionStore = new OpenClawSessionStore(threadStore, STDERR_LOGGER);
   const activeTurns = new ActiveTurnRegistry();
-  const attemptRegistry = new AttemptRegistry();
+  const attemptRegistry = new AttemptRegistry(STDERR_LOGGER);
 
   // Bound how long a persistent attempt (and its live `claude` subprocess)
   // survives with no turns feeding it. Without this, a bridge process that

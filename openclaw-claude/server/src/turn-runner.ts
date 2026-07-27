@@ -25,7 +25,9 @@ import type { ActiveTurn } from "./active-turns.js";
 import { buildCanUseTool } from "./approval-bridge.js";
 import {
   computeAttemptFingerprint,
+  diffAttemptFingerprintInputs,
   type AttemptEntry,
+  type AttemptFingerprintInput,
   type AttemptRegistry,
 } from "./attempt-registry.js";
 import {
@@ -257,7 +259,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
   // for this thread with a matching fingerprint, this turn is a continuation
   // and gets fed into that already-running subprocess instead of spawning a
   // new one.
-  const fingerprint = computeAttemptFingerprint({
+  const fingerprintInput: AttemptFingerprintInput = {
     model,
     thinking,
     cwd,
@@ -268,7 +270,8 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     systemPromptAppend,
     mcpServersConfig: meta.mcpServersConfig,
     dynamicTools,
-  });
+  };
+  const fingerprint = computeAttemptFingerprint(fingerprintInput);
 
   const existingAttempt = attemptRegistry.get(meta.id);
   const canReuse =
@@ -282,7 +285,8 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
     entry.inputQueue.push(makeSDKUserMessage(initialContent));
   } else {
     if (existingAttempt) {
-      attemptRegistry.discard(meta.id, "attempt fingerprint changed");
+      const changedFields = diffAttemptFingerprintInputs(existingAttempt.fingerprintInput, fingerprintInput);
+      attemptRegistry.discard(meta.id, "attempt fingerprint changed", { changedFields });
     }
     entry = await createAttempt({
       args,
@@ -299,6 +303,7 @@ export async function runTurn(args: RunTurnInput): Promise<RunTurnResult> {
       cwd,
       sessionStore,
       fingerprint,
+      fingerprintInput,
       initialContent,
       logger,
     });
@@ -654,6 +659,7 @@ async function createAttempt(params: {
   cwd: string | undefined;
   sessionStore: OpenClawSessionStore;
   fingerprint: string;
+  fingerprintInput: AttemptFingerprintInput;
   initialContent: Awaited<ReturnType<typeof buildContentBlocks>>;
   logger: Logger;
 }): Promise<AttemptEntry> {
@@ -672,6 +678,7 @@ async function createAttempt(params: {
     cwd,
     sessionStore,
     fingerprint,
+    fingerprintInput,
     initialContent,
     logger,
   } = params;
@@ -870,6 +877,7 @@ async function createAttempt(params: {
   const entry: AttemptEntry = {
     threadId: meta.id,
     fingerprint,
+    fingerprintInput,
     inputQueue,
     abortController,
     liveTurnRef,
