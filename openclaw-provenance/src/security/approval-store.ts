@@ -5,15 +5,20 @@
  * Approvals are gated by verified owner identity (senderIsOwner), not by codes.
  *
  * Approvals can be:
- * - Turn-scoped (default): cleared when the turn ends
+ * - Session-scoped (default): cleared when the session is reset
+ * - Turn-scoped: cleared when the turn ends
  * - Time-scoped: expire after N minutes
  */
+
+export type ApprovalScope = "session" | "turn" | "time";
 
 export interface ApprovalEntry {
   toolName: string;
   sessionKey: string;
   approvedAt: number;
-  expiresAt: number | null; // null = turn-scoped (cleared at turn end)
+  /** null for session- and turn-scoped approvals. */
+  expiresAt: number | null;
+  scope: ApprovalScope;
 }
 
 export class ApprovalStore {
@@ -24,12 +29,14 @@ export class ApprovalStore {
    * Approve a tool for a session.
    * @param sessionKey - Session to approve for
    * @param toolName - Tool name (or "all" for wildcard)
-   * @param durationMinutes - Duration in minutes (null = turn-scoped)
+   * @param durationMinutes - Duration in minutes (null = session- or turn-scoped)
+   * @param scope - Lifetime when durationMinutes is null (default: session)
    */
   approve(
     sessionKey: string,
     toolName: string,
     durationMinutes: number | null = null,
+    scope: Exclude<ApprovalScope, "time"> = "session",
   ): void {
     if (!this.approvals.has(sessionKey)) {
       this.approvals.set(sessionKey, new Map());
@@ -44,6 +51,7 @@ export class ApprovalStore {
       sessionKey,
       approvedAt: now,
       expiresAt,
+      scope: durationMinutes != null ? "time" : scope,
     });
   }
 
@@ -51,15 +59,17 @@ export class ApprovalStore {
    * Approve multiple tools at once (e.g., from ".approve all").
    * @param sessionKey - Session to approve for
    * @param toolNames - Tool names to approve (or ["all"] for wildcard)
-   * @param durationMinutes - Duration in minutes (null = turn-scoped)
+   * @param durationMinutes - Duration in minutes (null = session- or turn-scoped)
+   * @param scope - Lifetime when durationMinutes is null (default: session)
    */
   approveMultiple(
     sessionKey: string,
     toolNames: string[],
     durationMinutes: number | null = null,
+    scope: Exclude<ApprovalScope, "time"> = "session",
   ): void {
     for (const tool of toolNames) {
-      this.approve(sessionKey, tool, durationMinutes);
+      this.approve(sessionKey, tool, durationMinutes, scope);
     }
   }
 
@@ -74,23 +84,25 @@ export class ApprovalStore {
     const now = Date.now();
     const toolLower = toolName.toLowerCase();
 
-    // Check specific tool approval
-    const specific = sessionApprovals.get(toolLower);
-    if (specific) {
-      if (specific.expiresAt === null || specific.expiresAt > now) {
-        return true;
-      }
-      // Expired — clean up
-      sessionApprovals.delete(toolLower);
+    // A bare-tool approval covers its composite actions. For example,
+    // `/approve-exec browser` unblocks `browser.snapshot`, while an
+    // action-specific approval never grants the bare tool or sibling actions.
+    const candidates = [toolLower];
+    let separator = toolLower.lastIndexOf(".");
+    while (separator > 0) {
+      candidates.push(toolLower.slice(0, separator));
+      separator = toolLower.lastIndexOf(".", separator - 1);
     }
+    candidates.push("all");
 
-    // Check wildcard "all" approval
-    const wildcard = sessionApprovals.get("all");
-    if (wildcard) {
-      if (wildcard.expiresAt === null || wildcard.expiresAt > now) {
+    for (const candidate of candidates) {
+      const approval = sessionApprovals.get(candidate);
+      if (!approval) continue;
+      if (approval.expiresAt === null || approval.expiresAt > now) {
         return true;
       }
-      sessionApprovals.delete("all");
+      // Expired — clean up before checking less-specific approvals.
+      sessionApprovals.delete(candidate);
     }
 
     return false;
@@ -102,7 +114,7 @@ export class ApprovalStore {
     if (!sessionApprovals) return;
 
     for (const [key, entry] of sessionApprovals) {
-      if (entry.expiresAt === null) {
+      if (entry.scope === "turn") {
         sessionApprovals.delete(key);
       }
     }

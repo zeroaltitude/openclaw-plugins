@@ -539,8 +539,15 @@ describe("ApprovalStore", () => {
     expect(store.isApproved("s1", "write")).toBe(false);
   });
 
-  it("clears turn-scoped approvals", () => {
-    store.approve("s1", "exec"); // null = turn-scoped
+  it("keeps default session approvals after a turn ends", () => {
+    store.approve("s1", "exec");
+    expect(store.isApproved("s1", "exec")).toBe(true);
+    store.clearTurnScoped("s1");
+    expect(store.isApproved("s1", "exec")).toBe(true);
+  });
+
+  it("clears explicit turn-scoped approvals", () => {
+    store.approve("s1", "exec", null, "turn");
     expect(store.isApproved("s1", "exec")).toBe(true);
     store.clearTurnScoped("s1");
     expect(store.isApproved("s1", "exec")).toBe(false);
@@ -551,6 +558,17 @@ describe("ApprovalStore", () => {
     expect(store.isApproved("s1", "exec")).toBe(true);
     store.clearTurnScoped("s1");
     expect(store.isApproved("s1", "exec")).toBe(true); // still approved
+  });
+
+  it("bare approvals cover composite tool actions without covering siblings", () => {
+    store.approve("s1", "browser");
+    expect(store.isApproved("s1", "browser.snapshot")).toBe(true);
+    expect(store.isApproved("s1", "browser.navigate")).toBe(true);
+
+    store.approve("s2", "browser.snapshot");
+    expect(store.isApproved("s2", "browser.snapshot")).toBe(true);
+    expect(store.isApproved("s2", "browser.navigate")).toBe(false);
+    expect(store.isApproved("s2", "browser")).toBe(false);
   });
 
   it("clearAll removes everything for a session", () => {

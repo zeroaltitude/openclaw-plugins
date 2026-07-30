@@ -1090,13 +1090,14 @@ export function registerSecurityHooks(
 
   // --- /approve-exec command (deterministic, pre-loop approval — replaces .approve in LLM context) ---
   // Grants tool approval for the current session. Runs before the agent loop.
-  // Usage: /approve-exec <tool|all> [session|<N>m|<N>h]
-  //   session (default) = turn-scoped, cleared at turn end
+  // Usage: /approve-exec <tool|all> [session|turn|<N>m|<N>h]
+  //   session (default) = scoped to the current conversation session
+  //   turn = cleared at turn end
   //   30m, 2h = time-bounded, persists until expiry
   api.registerCommand?.({
     name: "approve-exec",
     description:
-      "Approve blocked tool(s) for the current session. Usage: /approve-exec <tool|all> [session|<N>m|<N>h]",
+      "Approve blocked tool(s) for the current session. Usage: /approve-exec <tool|all> [session|turn|<N>m|<N>h]",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
@@ -1104,11 +1105,11 @@ export function registerSecurityHooks(
       if (!args) {
         return {
           text:
-            "Usage: `/approve-exec <tool|all> [session|<N>m|<N>h]`\n" +
+            "Usage: `/approve-exec <tool|all> [session|turn|<N>m|<N>h]`\n" +
             "Examples:\n" +
-            "  `/approve-exec exec` — approve exec for this turn\n" +
+            "  `/approve-exec exec` — approve exec for this session\n" +
             "  `/approve-exec all 30m` — approve all blocked tools for 30 minutes\n" +
-            "  `/approve-exec web_fetch session` — approve web_fetch for this turn",
+            "  `/approve-exec web_fetch turn` — approve web_fetch for this turn",
         };
       }
 
@@ -1116,9 +1117,11 @@ export function registerSecurityHooks(
       const target = parts[0].toLowerCase();
       const durationArg = parts[1]?.toLowerCase() ?? "session";
 
-      // Parse duration: "session" → null (turn-scoped), "30m" → 30, "2h" → 120, bare number → minutes
+      // Parse duration: session → session-scoped, turn → turn-scoped,
+      // 30m → 30, 2h → 120, bare number → minutes.
       let durationMinutes: number | null = null;
-      if (durationArg && durationArg !== "session") {
+      const scope = durationArg === "turn" ? "turn" : "session";
+      if (durationArg && durationArg !== "session" && durationArg !== "turn") {
         const mMatch = durationArg.match(/^(\d+)m$/);
         const hMatch = durationArg.match(/^(\d+)h$/);
         const numMatch = durationArg.match(/^(\d+)$/);
@@ -1126,7 +1129,7 @@ export function registerSecurityHooks(
         else if (hMatch) durationMinutes = parseInt(hMatch[1], 10) * 60;
         else if (numMatch) durationMinutes = parseInt(numMatch[1], 10); // backward compat
         else {
-          return { text: `❌ Invalid duration "${durationArg}". Use session, 30m, 2h, etc.` };
+          return { text: `❌ Invalid duration "${durationArg}". Use session, turn, 30m, 2h, etc.` };
         }
       }
 
@@ -1142,14 +1145,14 @@ export function registerSecurityHooks(
       }
 
       const sk = shortKey(callerSessionKey);
-      const durDesc = durationMinutes != null ? `${durationMinutes} minutes` : "this turn";
+      const durDesc = durationMinutes != null ? `${durationMinutes} minutes` : scope === "turn" ? "this turn" : "this session";
 
       if (target === "all") {
         const blocked = blockedToolsBySession.get(callerSessionKey);
         const blockedList = blocked && blocked.size > 0 ? Array.from(blocked) : [];
-        approvalStore.approve(callerSessionKey, "all", durationMinutes);
+        approvalStore.approve(callerSessionKey, "all", durationMinutes, scope);
         if (blockedList.length > 0) {
-          approvalStore.approveMultiple(callerSessionKey, blockedList, durationMinutes);
+          approvalStore.approveMultiple(callerSessionKey, blockedList, durationMinutes, scope);
           logger.info(
             `[provenance:${sk}] ✅ /approve-exec all: approved ${blockedList.join(", ")} (${durDesc})`,
           );
@@ -1163,7 +1166,7 @@ export function registerSecurityHooks(
           return { text: `✅ Wildcard approval set (${durDesc}). All tools approved going forward this session.` };
         }
       } else {
-        approvalStore.approve(callerSessionKey, target, durationMinutes);
+        approvalStore.approve(callerSessionKey, target, durationMinutes, scope);
         logger.info(`[provenance:${sk}] ✅ /approve-exec ${target} (${durDesc})`);
         return { text: `✅ Approved \`${target}\` for ${durDesc}.` };
       }
