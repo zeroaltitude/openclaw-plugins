@@ -76,6 +76,16 @@ export function createTurnStartHandler(deps: TurnStartHandlerDeps) {
     };
     deps.activeTurns.register(active);
 
+    // Receipt log BEFORE the async runner kicks off: when a client observes a
+    // lost/unacknowledged turn/start (seen 2026-07-31: four turns vanished
+    // between client send and turn creation), this line discriminates
+    // "request never arrived" from "arrived but the ack/response was lost".
+    deps.logger.info("[turn/start] received", {
+      threadId: meta.id,
+      turnId,
+      model: modelOverride ?? meta.model,
+      oneShot,
+    });
     // Kick off the runner; do NOT await it. The handler returns the initial
     // turn record synchronously so the JSON-RPC response goes out before the
     // streaming notifications.
