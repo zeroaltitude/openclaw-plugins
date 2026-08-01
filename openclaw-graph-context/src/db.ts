@@ -89,11 +89,31 @@ export function resolveDbPath(configured?: string): string {
   return raw.startsWith("~/") ? raw.replace("~", homedir()) : raw;
 }
 
+/**
+ * One shared connection per database path, reused across plugin activations.
+ * The host may re-materialize the plugin registry many times per gateway boot
+ * (observed: 9 activations in one boot); each used to open — and never close —
+ * its own connection to a multi-hundred-MB database.
+ */
+const openDatabases = new Map<string, Database.Database>();
+
 export function openDb(dbPath: string): Database.Database {
+  const existing = openDatabases.get(dbPath);
+  if (existing?.open) {
+    return existing;
+  }
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
+  // Writers back off instead of throwing when the gateway briefly contends.
+  db.pragma("busy_timeout = 5000");
+  // Reclaim any WAL a previous unchecked-pointed run left behind (observed:
+  // 108MB WAL = every reader paid WAL-merge amplification on each query),
+  // then keep it bounded going forward.
+  db.pragma("wal_checkpoint(TRUNCATE)");
+  db.pragma("journal_size_limit = 67108864");
+  openDatabases.set(dbPath, db);
   return db;
 }
 
@@ -117,6 +137,10 @@ export function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_nodes_session_key ON nodes(session_key);
     CREATE INDEX IF NOT EXISTS idx_nodes_type        ON nodes(type);
     CREATE INDEX IF NOT EXISTS idx_nodes_ts          ON nodes(ts);
+    -- live-ingest fetches the latest node per session (WHERE session_id = ?
+    -- ORDER BY ts DESC LIMIT 1) on every ingested message; without the
+    -- composite index that sorts the whole session's nodes each time.
+    CREATE INDEX IF NOT EXISTS idx_nodes_session_ts  ON nodes(session_id, ts);
 
     CREATE TABLE IF NOT EXISTS edges (
       id          TEXT PRIMARY KEY,
