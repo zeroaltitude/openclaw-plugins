@@ -1,0 +1,29 @@
+{
+  "id": "instrumentation",
+  "name": "Instrumentation",
+  "version": "0.1.0",
+  "description": "Per-turn end-to-end latency tracing: a turn id born at message_received threads through every lifecycle hook, and one summary line per turn names where the time went.",
+  "author": "Eddie's stack",
+  "main": "dist/index.js",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "summaryLine": {
+        "type": "boolean",
+        "description": "Emit one console summary line per completed turn (default true)."
+      },
+      "slowTurnWarnMs": {
+        "type": "number",
+        "description": "Also WARN when a turn's end-to-end time exceeds this (default 10000)."
+      },
+      "maxRetainedTurns": {
+        "type": "number",
+        "description": "Ring buffer size for /instrumentation JSON (default 200)."
+      }
+    }
+  }
+}

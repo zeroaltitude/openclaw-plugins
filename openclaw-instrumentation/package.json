@@ -1,0 +1,26 @@
+{
+  "name": "@openclaw/instrumentation",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenClaw plugin: per-turn end-to-end latency tracing — turn ids, loop ids, segment timings, /instrumentation dashboard",
+  "main": "dist/index.js",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.1",
+    "typescript": "^5.4.0"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ]
+}
