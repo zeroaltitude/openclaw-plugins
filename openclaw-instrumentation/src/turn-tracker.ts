@@ -46,6 +46,8 @@ const AGENT_END_LINGER_MS = 5_000;
 
 export class TurnTracker {
   private openBySession = new Map<string, TurnRecord>();
+  /** Ingress turns whose session is not yet known; claimed by the first run-side mark. */
+  private unclaimedIngress: TurnRecord[] = [];
   private lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly buffer: TurnRecord[] = [];
 
@@ -66,16 +68,44 @@ export class TurnTracker {
     return ctx.sessionKey ?? ctx.sessionId;
   }
 
-  beginTurn(origin: string, ctx: TurnContext): TurnRecord | undefined {
-    const key = this.turnKey(ctx);
-    if (!key) {
+  /** How stale an unclaimed ingress turn may be before run-side claiming skips it. */
+  private static readonly INGRESS_CLAIM_WINDOW_MS = 120_000;
+
+  private claimIngressTurn(key: string, ctx: TurnContext): TurnRecord | undefined {
+    const now = this.now();
+    // Drop expired ingress turns so a lost message cannot pollute a later run.
+    this.unclaimedIngress = this.unclaimedIngress.filter((turn) => {
+      if (now - turn.startedAtMs > TurnTracker.INGRESS_CLAIM_WINDOW_MS) {
+        this.finalizeRecord(turn, "unclaimed");
+        return false;
+      }
+      return !turn.finalized;
+    });
+    // Prefer a channel match, else oldest. Single-gateway traffic makes the
+    // heuristic safe enough; a mis-claim skews one turn, not the system.
+    const index = this.unclaimedIngress.findIndex(
+      (turn) => !ctx.channel || !turn.channel || turn.channel === ctx.channel,
+    );
+    if (index === -1) {
       return undefined;
     }
-    const existing = this.openBySession.get(key);
-    if (existing && !existing.finalized) {
-      // A new inbound message while a turn is open: finalize the old one as
-      // interrupted so its marks are not blended into the new turn.
-      this.finalize(key, "superseded");
+    const [turn] = this.unclaimedIngress.splice(index, 1);
+    turn.sessionKey ??= ctx.sessionKey;
+    turn.sessionId ??= ctx.sessionId;
+    turn.agentId ??= ctx.agentId;
+    this.openBySession.set(key, turn);
+    return turn;
+  }
+
+  beginTurn(origin: string, ctx: TurnContext): TurnRecord | undefined {
+    const key = this.turnKey(ctx);
+    if (key) {
+      const existing = this.openBySession.get(key);
+      if (existing && !existing.finalized) {
+        // A new inbound message while a turn is open: finalize the old one as
+        // interrupted so its marks are not blended into the new turn.
+        this.finalize(key, "superseded");
+      }
     }
     const startedAtMs = this.now();
     const turn: TurnRecord = {
@@ -93,7 +123,13 @@ export class TurnTracker {
       marks: [{ hook: origin, atMs: 0 }],
       finalized: false,
     };
-    this.openBySession.set(key, turn);
+    if (key) {
+      this.openBySession.set(key, turn);
+    } else {
+      // message_received fires before routing resolves a session; park the
+      // turn until the first run-side mark claims it by recency/channel.
+      this.unclaimedIngress.push(turn);
+    }
     return turn;
   }
 
@@ -103,6 +139,9 @@ export class TurnTracker {
       return undefined;
     }
     let turn = this.openBySession.get(key);
+    if (!turn || turn.finalized) {
+      turn = this.claimIngressTurn(key, ctx);
+    }
     if (!turn || turn.finalized) {
       // Background runs (heartbeat/cron/subagent) have no inbound message;
       // their first lifecycle hook opens the turn so they are traced too.
@@ -164,9 +203,16 @@ export class TurnTracker {
     if (!turn || turn.finalized) {
       return;
     }
+    this.openBySession.delete(key);
+    this.finalizeRecord(turn, reason);
+  }
+
+  private finalizeRecord(turn: TurnRecord, reason: string): void {
+    if (turn.finalized) {
+      return;
+    }
     turn.finalized = true;
     turn.endedAtMs = this.now();
-    this.openBySession.delete(key);
     this.buffer.push(turn);
     if (this.buffer.length > this.options.maxRetainedTurns) {
       this.buffer.splice(0, this.buffer.length - this.options.maxRetainedTurns);

@@ -49,7 +49,12 @@ const MARK_HOOKS = [
   "before_compaction",
   "after_compaction",
   "agent_end",
-  "message_sending",
+  // NOT message_sending: Discord/Telegram/Feishu/MSTeams disable draft
+  // streaming (previews, progress receipts, early presence) whenever ANY
+  // message_sending handler is registered, because such a handler may rewrite
+  // or cancel the payload (see discord message-handler.draft-preview.ts).
+  // message_sent alone closes the turn; the delivery segment is
+  // agent_end→message_sent.
   "message_sent",
 ] as const;
 
