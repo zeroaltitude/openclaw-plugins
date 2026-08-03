@@ -668,9 +668,23 @@ async function collectRepoReady(params: {
 
 async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise<string | null> {
   const config = cfg(api);
-  if (config.runLoop?.enabled === false) return null;
+  // Both of these return NO contribution at all, which is indistinguishable
+  // from an empty queue at the prompt. They are legitimate (the operator
+  // turned the run loop off / configured no repos) but they must never be
+  // silent — an absent block was the whole subject of openclaw-beads-7k3.
+  if (config.runLoop?.enabled === false) {
+    api.logger.warn(
+      `[beads] plans_and_tasks SUPPRESSED for ${agentId}: runLoop.enabled=false in plugins.entries.beads.config. No ready-work block will reach any turn.`,
+    );
+    return null;
+  }
   const repos = config.repos ?? [];
-  if (!repos.length) return null;
+  if (!repos.length) {
+    api.logger.warn(
+      `[beads] plans_and_tasks SUPPRESSED for ${agentId}: plugins.entries.beads.config.repos is empty, so there is nothing to read. No ready-work block will reach any turn.`,
+    );
+    return null;
+  }
   const limit = Math.max(1, config.runLoop?.readyLimitPerRepo ?? 3);
   const includeUnassigned = config.runLoop?.includeUnassigned ?? false;
   const actionableRepos = repos.filter((repo) => !/test/i.test(repo.name));
@@ -811,6 +825,74 @@ const FALLBACK_UI = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Beads — UI shell missing</title></head>
 <body><h1>UI shell not found</h1><p>Looked for ui/index.html alongside the plugin. Ship one or rebuild.</p></body></html>`;
 
+/** This plugin's id, as the host knows it (`plugins.entries.<id>`). */
+const PLUGIN_ID = "beads";
+
+/**
+ * Whether the host will let this plugin register CONVERSATION hooks —
+ * `before_prompt_build` among them.
+ *
+ * openclaw-beads-7k3: the host (openclaw
+ * `src/plugins/registry-registrars-tools-hooks.ts`, gate list in
+ * `src/plugins/hook-types.ts` `CONVERSATION_HOOK_NAMES`) refuses a
+ * conversation-hook registration from a NON-BUNDLED plugin unless
+ * `plugins.entries.<id>.hooks.allowConversationAccess === true`. The refusal is
+ * a `warn` diagnostic at gateway startup and nothing else: `api.on()` returns
+ * void either way, so from inside the plugin the hook looks registered while
+ * the handler is never invoked. Every `<plans_and_tasks>` guarantee added by
+ * openclaw-beads-7sz is inert in that state, because none of it runs.
+ *
+ * Returns `undefined` when the answer is not knowable from the config the
+ * plugin was handed (don't cry wolf in that case).
+ */
+export function resolveConversationAccess(config: unknown): boolean | undefined {
+  const entries = (config as any)?.plugins?.entries;
+  if (!entries || typeof entries !== "object") return undefined;
+  const value = (entries as any)[PLUGIN_ID]?.hooks?.allowConversationAccess;
+  return value === true;
+}
+
+/**
+ * The operator-facing remedy for a blocked `before_prompt_build`. Kept as a
+ * function so the message is identical wherever it is emitted.
+ */
+export function formatConversationAccessBlockedDiagnostic(): string {
+  return (
+    `[beads] before_prompt_build is BLOCKED by the host: plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess is not true, ` +
+    "so <plans_and_tasks> CANNOT reach ordinary (non-heartbeat) turns. Heartbeat turns are still covered by the " +
+    'heartbeat_prompt_contribution fallback. Fix: add "hooks": { "allowConversationAccess": true } to ' +
+    `plugins.entries.${PLUGIN_ID} in ~/.openclaw/openclaw.json, then reload/restart the gateway. ` +
+    'Confirm with: journalctl --user -u openclaw-gateway | grep \'plugin=beads\' — the "typed hook \\"before_prompt_build\\" blocked" line must be gone.'
+  );
+}
+
+/**
+ * Runs that already received the block from `heartbeat_prompt_contribution`.
+ *
+ * On a heartbeat turn with conversation access granted, BOTH hooks fire in the
+ * same prompt build (openclaw `attempt.prompt-helpers.ts`
+ * `resolvePromptBuildHookResult` joins heartbeat contributions ahead of
+ * `before_prompt_build`), which would emit the block twice. Dedup is keyed
+ * strictly on `ctx.runId`: when there is no runId we deliberately allow the
+ * duplicate, because a duplicated block costs tokens while a missing one costs
+ * the whole work queue.
+ */
+const HEARTBEAT_CONTRIBUTED_RUNS_MAX = 256;
+const heartbeatContributedRuns = new Set<string>();
+
+export function markHeartbeatContribution(runId: string | undefined): void {
+  if (!runId) return;
+  if (heartbeatContributedRuns.size >= HEARTBEAT_CONTRIBUTED_RUNS_MAX) {
+    const oldest = heartbeatContributedRuns.values().next().value;
+    if (oldest !== undefined) heartbeatContributedRuns.delete(oldest);
+  }
+  heartbeatContributedRuns.add(runId);
+}
+
+export function hasHeartbeatContribution(runId: string | undefined): boolean {
+  return !!runId && heartbeatContributedRuns.has(runId);
+}
+
 export function activate(api: PluginApi): void {
   const log = api.logger;
 
@@ -820,22 +902,71 @@ export function activate(api: PluginApi): void {
   const ROUTE_AUTH = "plugin" as const;
 
   if (api.on) {
+    /**
+     * One contribution path shared by both prompt hooks. `hookName` is only
+     * used for logging — the caller decides which hook it is registering.
+     */
+    const contribute = async (
+      hookName: "before_prompt_build" | "heartbeat_prompt_contribution",
+      event: any,
+      ctx: any,
+    ): Promise<{ prependContext: string } | undefined> => {
+      const agentId =
+        typeof ctx?.agentId === "string" && ctx.agentId.trim()
+          ? ctx.agentId.trim()
+          : typeof event?.agentId === "string" && event.agentId.trim()
+            ? event.agentId.trim()
+            : "agent";
+      const runId = typeof ctx?.runId === "string" && ctx.runId.trim() ? ctx.runId.trim() : undefined;
+      if (hookName === "before_prompt_build" && hasHeartbeatContribution(runId)) {
+        // Already contributed for this run via the heartbeat hook.
+        return undefined;
+      }
+      try {
+        const block = await buildPlansAndTasksBlock(api, agentId);
+        // One line per contribution attempt. The gateway journal is the only
+        // forensic surface for a missing block (openclaw-beads-7k3 spent four
+        // recurrences being unattributable), so record the resolved agent id,
+        // the hook that produced it, and the block size — a `chars=0` line
+        // says "the plugin ran and deliberately emitted nothing", which no
+        // amount of host-side log reading could establish before.
+        log.info(
+          `[beads] plans_and_tasks via ${hookName}: agent=${agentId} run=${runId ?? "-"} chars=${block?.length ?? 0}${
+            block ? (block.includes('degraded="true"') ? " degraded=true" : "") : " SUPPRESSED"
+          }`,
+        );
+        if (!block) return undefined;
+        if (hookName === "heartbeat_prompt_contribution") markHeartbeatContribution(runId);
+        return { prependContext: block };
+      } catch (err: any) {
+        // Belt and braces: a throw here is swallowed by the runtime's hook
+        // runner, which logs one line and drops the contribution — the turn
+        // then has no queue and no idea it lost one (openclaw-beads-7sz).
+        const reason = String(err?.message ?? err).slice(0, 400);
+        log.error(`[beads] ${hookName} failed for ${agentId}: ${reason}`);
+        if (hookName === "heartbeat_prompt_contribution") markHeartbeatContribution(runId);
+        return { prependContext: formatDegradedPlansAndTasksBlock({ agentId, reason }) };
+      }
+    };
+
+    /**
+     * `heartbeat_prompt_contribution` is a prompt-injection hook but NOT a
+     * conversation hook (openclaw `hook-types.ts`: it is absent from
+     * `CONVERSATION_HOOK_NAMES`), so the host registers it for a non-bundled
+     * plugin without `allowConversationAccess`. Registering the block here as
+     * well is what makes the heartbeat surface — the one that decides whether
+     * an agent works or idles — survive the gate that silently removed
+     * `before_prompt_build` from every turn since 2026-07-30 (openclaw-beads-7k3).
+     */
+    api.on(
+      "heartbeat_prompt_contribution",
+      async (event, ctx) => contribute("heartbeat_prompt_contribution", event, ctx),
+      { priority: -20 },
+    );
+
     api.on(
       "before_prompt_build",
-      async (_event, ctx) => {
-        const agentId = typeof ctx?.agentId === "string" && ctx.agentId.trim() ? ctx.agentId.trim() : "agent";
-        try {
-          const block = await buildPlansAndTasksBlock(api, agentId);
-          return block ? { prependContext: block } : undefined;
-        } catch (err: any) {
-          // Belt and braces: a throw here is swallowed by the runtime's hook
-          // runner, which logs one line and drops the contribution — the turn
-          // then has no queue and no idea it lost one (openclaw-beads-7sz).
-          const reason = String(err?.message ?? err).slice(0, 400);
-          log.error(`[beads] before_prompt_build failed for ${agentId}: ${reason}`);
-          return { prependContext: formatDegradedPlansAndTasksBlock({ agentId, reason }) };
-        }
-      },
+      async (event, ctx) => contribute("before_prompt_build", event, ctx),
       { priority: -20 },
     );
   }
@@ -1250,6 +1381,23 @@ export function activate(api: PluginApi): void {
       }
     },
   });
+
+  // Say out loud, once per activation, whether the block can actually reach a
+  // prompt. openclaw-beads-7k3: the host's refusal to register
+  // `before_prompt_build` is a single host-side warn line that nobody was
+  // reading, and the plugin looked perfectly healthy from its own logs.
+  const conversationAccess = resolveConversationAccess(api.config);
+  if (conversationAccess === true) {
+    log.info(
+      `[beads] prompt hooks registered: heartbeat_prompt_contribution + before_prompt_build (allowConversationAccess=true)`,
+    );
+  } else if (conversationAccess === false) {
+    log.error(formatConversationAccessBlockedDiagnostic());
+  } else {
+    log.warn(
+      `[beads] could not determine plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess from the config handed to this plugin; if <plans_and_tasks> is missing from non-heartbeat turns, check the gateway log for 'typed hook "before_prompt_build" blocked'.`,
+    );
+  }
 
   log.info(`[beads] plugin activated, ${cfg(api).repos?.length ?? 0} repos configured`);
 }

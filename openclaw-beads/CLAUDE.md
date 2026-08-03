@@ -105,6 +105,58 @@ missing or empty, a heartbeat concludes "nothing to do" and idles. So:
   a SIGTERM'd child has empty stderr, so exit code / signal / timeout / duration
   are the only evidence there is.
 
+### The host can refuse the hook, and `api.on()` will not tell you (openclaw-beads-7k3)
+
+`before_prompt_build` is a **conversation hook** (openclaw
+`src/plugins/hook-types.ts` → `CONVERSATION_HOOK_NAMES`). The plugin loader
+(`src/plugins/registry-registrars-tools-hooks.ts`) refuses a conversation-hook
+registration from a **non-bundled** plugin — which we always are, loaded from
+`plugins.load.paths` — unless the operator has set:
+
+```json
+"beads": { "hooks": { "allowConversationAccess": true }, "config": { … } }
+```
+
+The refusal is one `warn` diagnostic at gateway startup:
+
+```
+typed hook "before_prompt_build" blocked because non-bundled plugins must set
+plugins.entries.beads.hooks.allowConversationAccess=true (plugin=beads, …)
+```
+
+and nothing else. `api.on()` returns `void` whether or not the handler was
+accepted, so from inside the plugin everything looks healthy — while
+`<plans_and_tasks>` is absent from **every** turn and every openclaw-beads-7sz
+"never emit nothing" guarantee is inert, because none of that code runs. This
+is what actually caused the four absent-block recurrences of 2026-08-03, across
+three agents; it had been live since 2026-07-30 08:50.
+
+Consequences for this plugin:
+
+- **Contribute via `heartbeat_prompt_contribution` too.** It is a
+  prompt-injection hook but NOT a conversation hook, so the host accepts it from
+  a non-bundled plugin regardless of `allowConversationAccess`. It fires only on
+  heartbeat turns (`hookCtx.trigger === "heartbeat"`, both the embedded runner's
+  `attempt.prompt-helpers.ts` and the harness path's
+  `prompt-compaction-hook-helpers.ts`), which is exactly the surface that
+  decides whether an agent works or idles. The block reaches heartbeats even
+  when the gate is closed.
+- **Dedup on `ctx.runId`, and only on `ctx.runId`.** With access granted, both
+  hooks fire in one prompt build (heartbeat contributions are joined ahead of
+  `before_prompt_build`). Suppress the second one when the runId already
+  contributed; when there is no runId, emit the duplicate. A duplicated block
+  costs tokens, a missing one costs the whole work queue.
+- **State the gate's verdict at activation.** `resolveConversationAccess()` +
+  `formatConversationAccessBlockedDiagnostic()` log an ERROR naming the exact
+  config path and remedy when the gate is closed, an INFO when it is open, and a
+  WARN when the plugin cannot see `plugins.entries` at all. Never infer silence
+  means health.
+- **Log one accounting line per contribution** (`agent=`, `run=`, `chars=`,
+  `degraded=`). A `chars=0 SUPPRESSED` line proves the plugin ran and chose to
+  emit nothing — which no amount of host-side log reading could establish
+  before. The gateway journal (`journalctl --user -u openclaw-gateway`) is the
+  only forensic surface for a missing block.
+
 ### Retries
 
 Read-only commands retry transient failures (timeout kills, Dolt lock
