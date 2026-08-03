@@ -76,6 +76,21 @@ export interface BdRunOptions {
   bdBinary?: string;
   cwd: string;
   timeoutMs?: number;
+  /**
+   * Wall-clock epoch ms after which no new `bd` attempt may start. Lets a
+   * caller with an overall budget (the heartbeat block builder) stop a
+   * retry chain from overrunning it. Attempt timeouts are also clamped to
+   * the time remaining.
+   */
+  deadlineMs?: number;
+  /**
+   * Extra attempts for *transient* failures (timeout kills, Dolt lock
+   * contention). Only read-only commands set this; mutations stay
+   * single-shot so a partially-applied write is never replayed.
+   */
+  retries?: number;
+  /** Base backoff between retry attempts; doubles each attempt. Default 200ms. */
+  retryBackoffMs?: number;
 }
 
 export interface IssueDetail {
@@ -84,20 +99,199 @@ export interface IssueDetail {
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** Retry budget for read-only commands. See {@link BdRunOptions.retries}. */
+export const DEFAULT_READ_RETRIES = 2;
+const DEFAULT_RETRY_BACKOFF_MS = 200;
+
+/**
+ * Structured failure from a `bd` shell-out.
+ *
+ * Exists because the previous bare `new Error(stderr || message)` threw away
+ * every signal that distinguishes "bd is broken" from "we killed bd at our
+ * own 4s timeout" — and a SIGTERM'd child exits with EMPTY stderr, so the
+ * heartbeat block rendered a useless `Command failed: bd ...` with no detail
+ * (openclaw-beads-7sz, observed 2026-07-27). Keep every field: the message is
+ * what ends up in the injected `<error>` element, and it is often the only
+ * forensic record of a nondeterministic failure.
+ */
+export class BdCommandError extends Error {
+  readonly args: string[];
+  readonly cwd: string;
+  readonly stderr: string;
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly killed: boolean;
+  /** True when the child was killed by our own `timeout` option. */
+  readonly timedOut: boolean;
+  readonly durationMs: number;
+  readonly attempts: number;
+  /** libuv spawn failure code (ENOENT, EAGAIN, …) when the child never ran. */
+  readonly spawnCode: string;
+  /** True when a retry could plausibly succeed (timeout kill, lock contention). */
+  readonly transient: boolean;
+
+  constructor(params: {
+    args: string[];
+    cwd: string;
+    stderr: string;
+    exitCode: number | null;
+    signal: string | null;
+    killed: boolean;
+    timedOut: boolean;
+    durationMs: number;
+    timeoutMs: number;
+    attempts: number;
+    spawnCode: string;
+    transient: boolean;
+    rawMessage: string;
+  }) {
+    const cause = params.timedOut
+      ? `timed out after ${params.timeoutMs}ms, killed with ${params.signal ?? "SIGTERM"}`
+      : params.signal
+        ? `killed with ${params.signal}`
+        : params.spawnCode
+          ? `spawn failed: ${params.spawnCode}`
+          : `exit code ${params.exitCode ?? "unknown"}`;
+    const detail = params.stderr.trim()
+      ? params.stderr.trim().slice(0, 500)
+      : `(no stderr) ${params.rawMessage.split("\n")[0] ?? ""}`.trim();
+    super(
+      `bd ${params.args.join(" ")} failed in ${params.cwd} after ${params.durationMs}ms ` +
+        `[attempt ${params.attempts}] (${cause}): ${detail}`,
+    );
+    this.name = "BdCommandError";
+    this.args = params.args;
+    this.cwd = params.cwd;
+    this.stderr = params.stderr;
+    this.exitCode = params.exitCode;
+    this.signal = params.signal;
+    this.killed = params.killed;
+    this.timedOut = params.timedOut;
+    this.durationMs = params.durationMs;
+    this.attempts = params.attempts;
+    this.spawnCode = params.spawnCode;
+    this.transient = params.transient;
+  }
+}
+
+/** stderr fragments that indicate a retry has a real chance of succeeding. */
+const TRANSIENT_STDERR_RE =
+  /lock|locked|busy|deadlock|try again|temporarily unavailable|connection (?:refused|reset)|EAGAIN|ENOMEM|i\/o timeout|context deadline exceeded/i;
+
+function asString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value && typeof (value as any).toString === "function" && Buffer.isBuffer(value))
+    return (value as Buffer).toString("utf8");
+  return "";
+}
+
+function toBdCommandError(
+  err: any,
+  ctx: { args: string[]; cwd: string; durationMs: number; timeoutMs: number; attempts: number },
+): BdCommandError {
+  const stderr = asString(err?.stderr);
+  const rawMessage = String(err?.message ?? err ?? "");
+  const killed = err?.killed === true;
+  const signal = typeof err?.signal === "string" ? err.signal : null;
+  // execFile reports the timeout kill as killed=true + SIGTERM with a null
+  // exit code; there is no dedicated error code to key off.
+  const timedOut = killed && err?.code !== "ENOENT";
+  const exitCode = typeof err?.code === "number" ? err.code : null;
+  const spawnCode = typeof err?.code === "string" ? err.code : "";
+  const transient =
+    timedOut ||
+    spawnCode === "EAGAIN" ||
+    spawnCode === "ENOMEM" ||
+    TRANSIENT_STDERR_RE.test(stderr) ||
+    TRANSIENT_STDERR_RE.test(rawMessage);
+  return new BdCommandError({
+    args: ctx.args,
+    cwd: ctx.cwd,
+    stderr,
+    exitCode,
+    signal,
+    killed,
+    timedOut,
+    durationMs: ctx.durationMs,
+    timeoutMs: ctx.timeoutMs,
+    attempts: ctx.attempts,
+    spawnCode,
+    transient,
+    rawMessage: rawMessage,
+  });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Resolve this attempt's timeout, clamped to any remaining overall budget.
+ * Returns 0 when the caller's deadline has already passed.
+ */
+function attemptTimeoutMs(opts: BdRunOptions): number {
+  const base = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (opts.deadlineMs === undefined) return base;
+  return Math.min(base, opts.deadlineMs - Date.now());
+}
 
 async function runBd(args: string[], opts: BdRunOptions): Promise<string> {
   const bin = opts.bdBinary ?? "bd";
-  try {
-    const { stdout } = await execFileAsync(bin, args, {
-      cwd: opts.cwd,
-      timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    return stdout;
-  } catch (err: any) {
-    const msg = err?.stderr || err?.message || String(err);
-    throw new Error(`bd ${args.join(" ")} failed in ${opts.cwd}: ${msg}`);
+  const maxAttempts = Math.max(0, opts.retries ?? 0) + 1;
+  const backoffBase = Math.max(0, opts.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS);
+  let lastErr: BdCommandError | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const timeoutMs = attemptTimeoutMs(opts);
+    if (timeoutMs <= 0) {
+      throw (
+        lastErr ??
+        new BdCommandError({
+          args,
+          cwd: opts.cwd,
+          stderr: "",
+          exitCode: null,
+          signal: null,
+          killed: false,
+          timedOut: true,
+          durationMs: 0,
+          timeoutMs: 0,
+          attempts: attempt,
+          spawnCode: "",
+          transient: true,
+          rawMessage: "overall time budget exhausted before this command could start",
+        })
+      );
+    }
+    const startedAt = Date.now();
+    try {
+      const { stdout } = await execFileAsync(bin, args, {
+        cwd: opts.cwd,
+        timeout: timeoutMs,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      return stdout;
+    } catch (err: any) {
+      lastErr = toBdCommandError(err, {
+        args,
+        cwd: opts.cwd,
+        durationMs: Date.now() - startedAt,
+        timeoutMs,
+        attempts: attempt,
+      });
+      if (attempt >= maxAttempts || !lastErr.transient) throw lastErr;
+      const backoff = backoffBase * 2 ** (attempt - 1);
+      if (opts.deadlineMs !== undefined && Date.now() + backoff >= opts.deadlineMs) throw lastErr;
+      await delay(backoff);
+    }
   }
+  // Unreachable: the loop either returns or throws.
+  throw lastErr ?? new Error(`bd ${args.join(" ")} failed in ${opts.cwd}`);
+}
+
+/** Read-only variant: same as runBd but retries transient failures by default. */
+function runBdRead(args: string[], opts: BdRunOptions): Promise<string> {
+  return runBd(args, { ...opts, retries: opts.retries ?? DEFAULT_READ_RETRIES });
 }
 
 /**
@@ -123,7 +317,7 @@ export async function listIssues(opts: BdRunOptions): Promise<BdIssue[]> {
   const exported = await readIssuesJsonl(opts.cwd).catch(() => null);
   if (exported) return exported;
 
-  const out = await runBd(["list", "--all", "--json"], opts);
+  const out = await runBdRead(["list", "--all", "--json"], opts);
   const trimmed = stripWarnings(out);
   if (!trimmed) return [];
   try {
@@ -220,7 +414,7 @@ export async function showIssue(
       // before the next refresh. Fall through to bd.
     }
   }
-  const out = await runBd(["show", id, "--json"], opts);
+  const out = await runBdRead(["show", id, "--json"], opts);
   const trimmed = stripWarnings(out);
   return JSON.parse(trimmed);
 }
@@ -339,14 +533,33 @@ export async function updateIssue(
  * the very next poll, and there is no background process that "catches up."
  *
  * Awaited so the HTTP response only returns after the cache is consistent.
- * Best-effort: failures are swallowed (the next ensureFreshExport on the
- * readiness path will retry), but there is no bd-side auto-export fallback.
+ * Never throws: a failed export leaves the previous (possibly stale) snapshot
+ * in place, which is degraded but usable. It DOES report the failure in its
+ * return value — a swallowed export failure means every subsequent read is
+ * silently serving stale status, and the heartbeat block must be able to say
+ * so out loud (openclaw-beads-7sz).
  */
-export async function refreshExport(opts: BdRunOptions): Promise<void> {
+export interface ExportResult {
+  ok: boolean;
+  /** Populated when ok === false; already human-readable with stderr + cause. */
+  error?: string;
+  durationMs: number;
+}
+
+export async function refreshExport(opts: BdRunOptions): Promise<ExportResult> {
+  const startedAt = Date.now();
   try {
-    await runBd(["export", "-q", "-o", ".beads/issues.jsonl"], { ...opts, timeoutMs: 10_000 });
-  } catch {
-    /* best-effort; retried on the next ensureFreshExport / write path */
+    await runBdRead(["export", "-q", "-o", ".beads/issues.jsonl"], {
+      ...opts,
+      timeoutMs: opts.timeoutMs ?? 10_000,
+    });
+    return { ok: true, durationMs: Date.now() - startedAt };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: String(err?.message ?? err),
+      durationMs: Date.now() - startedAt,
+    };
   }
 }
 
@@ -369,10 +582,12 @@ export async function refreshExport(opts: BdRunOptions): Promise<void> {
  * Best-effort and identical in effect to refreshExport(); named separately
  * so the READ path's intent (heal before trusting) is distinct from the
  * WRITE path's (persist after mutating). Failures leave the possibly-stale
- * snapshot in place — degraded, but no worse than before this fix.
+ * snapshot in place — degraded, but no worse than before this fix. Callers
+ * that render a queue MUST surface a non-ok result rather than silently
+ * trusting the snapshot.
  */
-export async function ensureFreshExport(opts: BdRunOptions): Promise<void> {
-  await refreshExport(opts);
+export async function ensureFreshExport(opts: BdRunOptions): Promise<ExportResult> {
+  return refreshExport(opts);
 }
 
 /** Close an issue. */
@@ -454,7 +669,7 @@ export async function readyIssues(limit: number, opts: ReadyIssuesOptions): Prom
   );
   if (fast) return fast;
 
-  const out = await runBd(["ready", "--json", "--limit", String(safeLimit)], {
+  const out = await runBdRead(["ready", "--json", "--limit", String(safeLimit)], {
     ...opts,
     timeoutMs: opts.timeoutMs ?? 5_000,
   });
@@ -476,7 +691,7 @@ export async function readyIssues(limit: number, opts: ReadyIssuesOptions): Prom
   // designed for "what to claim next"). When the caller asked for active
   // work that includes in-flight items, supplement the bd-ready output
   // with a separate `bd list --status in_progress` pass and merge.
-  const ipOut = await runBd(["list", "--status", "in_progress", "--json"], {
+  const ipOut = await runBdRead(["list", "--status", "in_progress", "--json"], {
     ...opts,
     timeoutMs: opts.timeoutMs ?? 5_000,
   });
@@ -506,6 +721,18 @@ export async function readyIssues(limit: number, opts: ReadyIssuesOptions): Prom
 export type ReadyIssuesFromExportOptions = {
   /** See {@link ReadyIssuesOptions.includeInProgress}. */
   includeInProgress?: boolean;
+  /**
+   * Degraded-mode escape hatch: answer from the JSONL even when the export
+   * lacks the metadata needed to be certain (no `dependency_count` anywhere,
+   * a blocker id that isn't in the export, a `dependency_count > 0` record
+   * with no `dependencies` array). Those cases normally return null so the
+   * caller defers to bd's authoritative API; when bd itself is unavailable
+   * there is nothing to defer to, and a best-effort list beats an empty one.
+   *
+   * Callers MUST label lenient results as degraded — an unresolvable blocker
+   * is treated as non-blocking here, so the list can over-report readiness.
+   */
+  lenient?: boolean;
 };
 
 /** Compute ready issues from the JSONL export, mirroring `bd ready` semantics:
@@ -533,6 +760,7 @@ export async function readyIssuesFromExport(
   limit: number,
   opts: ReadyIssuesFromExportOptions = {},
 ): Promise<BdIssue[] | null> {
+  const lenient = opts.lenient === true;
   const issues = await readIssuesJsonl(cwd);
   if (!issues) return null;
 
@@ -549,7 +777,7 @@ export async function readyIssuesFromExport(
       break;
     }
   }
-  if (!sawDependencyCount) return null;
+  if (!sawDependencyCount && !lenient) return null;
 
   const includeInProgress = opts.includeInProgress === true;
   const now = Date.now();
@@ -578,8 +806,9 @@ export async function readyIssuesFromExport(
       const deps = collectDeps(issue);
       if (!deps.length) {
         // Export claims this issue has deps but didn't include the array.
-        // Can't confirm readiness locally — bail.
-        return null;
+        // Can't confirm readiness locally — bail (or, in lenient mode,
+        // include it and let the agent discover the blocker).
+        if (!lenient) return null;
       }
       let blocked = false;
       for (const dep of deps) {
@@ -587,7 +816,8 @@ export async function readyIssuesFromExport(
         if (!target) {
           // Unknown blocker (cross-repo? exported before target?). Be
           // conservative and let bd decide for this whole repo.
-          return null;
+          if (!lenient) return null;
+          continue;
         }
         if ((target as any).status !== "closed") {
           blocked = true;
@@ -660,7 +890,7 @@ export async function listEdges(issues: BdIssue[], opts: BdRunOptions): Promise<
   // we fall back to `bd show` parsing for that case.
   if (issueIds.length > 1) {
     try {
-      const out = await runBd(["dep", "list", ...issueIds, "--json"], opts);
+      const out = await runBdRead(["dep", "list", ...issueIds, "--json"], opts);
       const trimmed = stripWarnings(out);
       const parsed = trimmed ? JSON.parse(trimmed) : [];
       if (Array.isArray(parsed)) {
@@ -682,7 +912,7 @@ export async function listEdges(issues: BdIssue[], opts: BdRunOptions): Promise<
   // Sequential to avoid Dolt lockfile contention on the embedded store.
   for (const issue of issues) {
     try {
-      const out = await runBd(["show", issue.id, "--json"], opts);
+      const out = await runBdRead(["show", issue.id, "--json"], opts);
       const parsed = JSON.parse(stripWarnings(out));
       const deps = collectDeps(parsed);
       for (const dep of deps) {

@@ -30,6 +30,7 @@ import {
   addDependency,
   removeDependency,
   readyIssues,
+  readyIssuesFromExport,
   ensureFreshExport,
   setIssueMetadata,
   referencesFromLabels,
@@ -48,6 +49,16 @@ export { TtlCache } from "./ttl-cache.js";
 
 const DEFAULT_PROMPT_BLOCK_TTL_MS = 60_000;
 const DEFAULT_READY_API_TTL_MS = 20_000;
+/**
+ * Overall wall-clock budget for building the heartbeat block. Deliberately
+ * well under the runtime's 15s `before_prompt_build` modifying-hook timeout
+ * (openclaw src/plugins/hooks.ts): if WE overrun, the runtime discards the
+ * whole contribution and the turn silently loses its queue. Overrunning one
+ * repo must instead degrade to a marker inside a block we still emit.
+ */
+const DEFAULT_READY_BUDGET_MS = 10_000;
+/** How long a degraded block may be served from cache before we retry. */
+const DEGRADED_BLOCK_TTL_MS = 5_000;
 
 const promptBlockCache = new TtlCache<string>();
 const readyApiCache = new TtlCache<unknown>();
@@ -111,6 +122,13 @@ interface BeadsPluginConfig {
      * Set to 0 to disable caching (still dedupes concurrent calls).
      */
     readyApiCacheTtlMs?: number;
+    /**
+     * Overall wall-clock budget for building the `<plans_and_tasks>` block.
+     * Defaults to 10s. Must stay below the runtime's 15s
+     * `before_prompt_build` hook timeout — past that, the runtime drops the
+     * entire contribution and the turn gets no queue at all.
+     */
+    readyBudgetMs?: number;
     /**
      * On gateway:startup, build an issue↔session mapping (Phase 1) and
      * fire one broadcast heartbeat wake (Phase 2). The mapping is written
@@ -216,12 +234,69 @@ export function compareReadyIssuesForAgent(a: BdIssue, b: BdIssue, agentId: stri
   return String(a.id ?? "").localeCompare(String(b.id ?? ""));
 }
 
+/**
+ * Per-repo accounting for one readiness build. `counts` exists so an empty
+ * queue is *explainable*: `<ready_issues none="true"/>` alone cannot tell an
+ * agent whether the repo has no ready work or has twenty ready issues that
+ * were all filtered out by the assignee policy (openclaw-beads-7sz — the
+ * 2026-08-03 report of "no work shown while `bd ready` lists ~20").
+ */
+export interface ReadyRepoEntry {
+  repo: BdRepo;
+  /** Issues actually rendered (post-filter, post-cap). */
+  issues: BdIssue[];
+  /** Hard failure: nothing could be read for this repo. */
+  error?: string;
+  /** Soft failure: results are present but stale or best-effort. */
+  warning?: string;
+  counts?: {
+    /** Ready+in-progress issues bd/the export reported before owner filtering. */
+    readyTotal: number;
+    /** Rendered count (after owner filter and the per-repo cap). */
+    shown: number;
+    /** Dropped because they carry no assignee and includeUnassigned is false. */
+    filteredUnassigned: number;
+    /** Dropped because they are assigned to a different agent. */
+    filteredOtherOwner: number;
+    /** Dropped only by the per-repo render cap. */
+    truncated: number;
+  };
+}
+
+/**
+ * Block emitted when the readiness queue could not be built at all.
+ *
+ * The whole point of openclaw-beads-7sz: a heartbeat that sees no
+ * `<plans_and_tasks>` block cannot distinguish "no work" from "the plugin
+ * failed", and yields HEARTBEAT_OK either way. So the failure path emits a
+ * block too — a loud one.
+ */
+export function formatDegradedPlansAndTasksBlock(params: {
+  agentId: string;
+  reason: string;
+}): string {
+  return [
+    '<plans_and_tasks degraded="true">',
+    "The Beads ready-work queue could NOT be built for this turn. This is a plugin/tooling failure, not an empty queue.",
+    `Reason: ${escapeXml(params.reason)}`,
+    "",
+    "- Do NOT conclude that there is no ready work, and do NOT yield an idle/OK heartbeat on the strength of this block.",
+    "- If you are about to idle, run `bd ready --json` yourself in the configured repos first.",
+    "- Mention this degradation in your reply so the failure is visible instead of silent.",
+    '<ready_issues unavailable="true">',
+    `  <error>${escapeXml(params.reason)}</error>`,
+    "</ready_issues>",
+    "</plans_and_tasks>",
+  ].join("\n");
+}
+
 export function formatPlansAndTasksBlock(params: {
   agentId: string;
-  repos: Array<{ repo: BdRepo; issues: BdIssue[]; error?: string }>;
+  repos: ReadyRepoEntry[];
 }): string {
+  const degradedRepos = params.repos.filter((entry) => entry.error || entry.warning);
   const lines: string[] = [];
-  lines.push("<plans_and_tasks>");
+  lines.push(degradedRepos.length ? '<plans_and_tasks degraded="true">' : "<plans_and_tasks>");
   lines.push("These are active Beads issues that are ready for assessment. Treat them as background work opportunities, not as higher priority than the user's latest request.");
   lines.push("");
   lines.push("Run-loop discipline:");
@@ -234,16 +309,43 @@ export function formatPlansAndTasksBlock(params: {
   lines.push("- An `in_progress` issue listed below is active work you (or a previous turn) already claimed. Resume it; do NOT restart it as if it were a fresh `open` issue. If a single `in_progress` issue represents a long-running multi-turn loop (e.g. cyclical PR review), advance it as far as the current turn allows, leave it `in_progress`, and let the next heartbeat pick up where you left off.");
   lines.push("- If the user suggests future work, bugs, investigations, reminders, or other durable trackables, create/update Beads issues for them and include target_datetime metadata when timing is implied.");
   lines.push("- If this turn was not triggered by direct user input (for example heartbeat, gateway startup/resume, cron wake, or other autonomous wake) and you take action on Beads work, explicitly reply with a concise summary of the Beads issue(s) touched and actions taken. If no action was taken, stay quiet unless there is a meaningful blocker or decision for the user.");
+  if (degradedRepos.length) {
+    lines.push("");
+    lines.push(
+      `QUEUE HEALTH: DEGRADED — ${degradedRepos.length} repo(s) could not be read cleanly this turn (see <error>/<warning> below). ` +
+        "A short or empty list is NOT evidence that there is no ready work. Re-check the affected repos with `bd ready` before idling, and say so in your reply.",
+    );
+  }
   lines.push("");
 
-  const readyRepos = params.repos.filter((entry) => entry.issues.length > 0 || entry.error);
+  const hasHiddenWork = (entry: ReadyRepoEntry): boolean =>
+    !!entry.counts && entry.counts.readyTotal > entry.counts.shown;
+  const readyRepos = params.repos.filter(
+    (entry) => entry.issues.length > 0 || entry.error || entry.warning || hasHiddenWork(entry),
+  );
   if (!readyRepos.length) {
     lines.push("<ready_issues none=\"true\" />");
   } else {
-    lines.push("<ready_issues>");
+    lines.push(degradedRepos.length ? '<ready_issues degraded="true">' : "<ready_issues>");
     for (const entry of readyRepos) {
-      lines.push(`  <repo name=\"${escapeXml(entry.repo.name)}\">`);
+      const counts = entry.counts;
+      const attrs = [`name=\"${escapeXml(entry.repo.name)}\"`];
+      if (counts) {
+        attrs.push(`ready_total=\"${counts.readyTotal}\"`, `shown=\"${counts.shown}\"`);
+        if (counts.filteredUnassigned > 0)
+          attrs.push(`hidden_unassigned=\"${counts.filteredUnassigned}\"`);
+        if (counts.filteredOtherOwner > 0)
+          attrs.push(`hidden_other_owner=\"${counts.filteredOtherOwner}\"`);
+        if (counts.truncated > 0) attrs.push(`hidden_over_limit=\"${counts.truncated}\"`);
+      }
+      lines.push(`  <repo ${attrs.join(" ")}>`);
       if (entry.error) lines.push(`    <error>${escapeXml(entry.error)}</error>`);
+      if (entry.warning) lines.push(`    <warning>${escapeXml(entry.warning)}</warning>`);
+      if (counts && counts.filteredUnassigned > 0 && counts.shown === 0) {
+        lines.push(
+          `    <note>All ${counts.filteredUnassigned} ready issue(s) here are unassigned and hidden by the owner filter (includeUnassigned=false). They are real work — claim one explicitly if nothing else is pending.</note>`,
+        );
+      }
       for (const issue of entry.issues) {
         const owner = issueAssignee(issue) || "unassigned";
         const refs = referencesFromLabels(issue.labels as string[] | undefined);
@@ -434,6 +536,136 @@ async function maybeCreateCalendarEvent(params: {
   }
 }
 
+/**
+ * Resolve `promise` but never wait past `deadlineMs`; on expiry, resolve with
+ * `onTimeout()` instead. The abandoned work keeps running (we cannot cancel a
+ * spawned `bd`), but the caller's overall budget is honored.
+ *
+ * This is the structural half of the openclaw-beads-7sz fix: the runtime caps
+ * `before_prompt_build` at 15s (openclaw src/plugins/hooks.ts,
+ * DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK) and DISCARDS the contribution
+ * when the budget blows — the block vanishes from the turn with only a
+ * gateway-log line. Overrunning must therefore be impossible from our side:
+ * one slow repo degrades to a `<repo>` timeout marker instead of taking the
+ * whole block down.
+ */
+async function withDeadline<T>(
+  promise: Promise<T>,
+  deadlineMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const remaining = Math.max(0, deadlineMs - Date.now());
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(onTimeout()), remaining);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function collectRepoReady(params: {
+  repo: BdRepo;
+  agentId: string;
+  bdBinary?: string;
+  limit: number;
+  includeUnassigned: boolean;
+  deadlineMs: number;
+}): Promise<ReadyRepoEntry> {
+  const { repo, agentId, bdBinary, limit, includeUnassigned, deadlineMs } = params;
+  const runOpts = { cwd: repo.path, bdBinary, deadlineMs };
+  const warnings: string[] = [];
+
+  // Reader-side self-heal (bighat-p5j): re-export the JSONL from the live
+  // Dolt DB before trusting the fast path for status truth. bd 1.0.3 does
+  // NOT auto-export after shell-initiated mutations (`bd close`/`bd update`
+  // run in a shell as HEARTBEAT.md instructs), so without this the heartbeat
+  // can present an already-closed issue as ready. A FAILED export is not
+  // fatal — the previous snapshot is still usable — but it is reported,
+  // because silently serving stale status is how a closed issue keeps
+  // reappearing as ready.
+  const exported = await ensureFreshExport({ ...runOpts, timeoutMs: 5_000 });
+  if (!exported.ok) {
+    warnings.push(`export failed (data may be stale): ${exported.error ?? "unknown error"}`);
+  }
+
+  // Pull a generous slice: the owner filter below runs AFTER this cap, so a
+  // small pre-filter limit can hide this agent's own issues behind a wall of
+  // unassigned backlog (bighat-general routinely has ~20 ready issues). The
+  // read is a JSONL scan in the common case, so a wide slice is nearly free.
+  const fetchLimit = Math.max(200, limit * 4);
+  let ready: BdIssue[];
+  try {
+    ready = await readyIssues(fetchLimit, {
+      ...runOpts,
+      timeoutMs: 4_000,
+      // Include `in_progress` issues so the heartbeat surface shows active
+      // work the agent has already claimed (cyclical loops, multi-turn
+      // fixes). Without this, an `in_progress` issue disappears from
+      // `<ready_issues>` after it's claimed and any heartbeat that lands
+      // while no `open` work exists will idle even though the agent has
+      // work to resume.
+      includeInProgress: true,
+    });
+  } catch (err: any) {
+    // Last resort before giving up on this repo: answer from the JSONL
+    // export directly, in lenient mode. It can over-report (an unresolvable
+    // blocker is treated as non-blocking), so it is labeled degraded — but
+    // an over-reported queue is recoverable and an empty one is not.
+    const fallback = await readyIssuesFromExport(repo.path, fetchLimit, {
+      includeInProgress: true,
+      lenient: true,
+    }).catch(() => null);
+    if (!fallback) {
+      return {
+        repo,
+        issues: [],
+        error: `${String(err?.message ?? err).slice(0, 400)} | .beads/issues.jsonl fallback also unavailable`,
+      };
+    }
+    ready = fallback;
+    warnings.push(
+      `bd unavailable, served from .beads/issues.jsonl (may be stale or over-report readiness): ${String(
+        err?.message ?? err,
+      ).slice(0, 300)}`,
+    );
+  }
+
+  let filteredUnassigned = 0;
+  let filteredOtherOwner = 0;
+  const kept: BdIssue[] = [];
+  for (const issue of ready) {
+    if (shouldIncludeReadyIssue(issue, agentId, includeUnassigned)) {
+      kept.push(issue);
+      continue;
+    }
+    const owner = String((issue as any).assignee ?? "").trim();
+    if (owner) filteredOtherOwner++;
+    else filteredUnassigned++;
+  }
+  const issues = kept
+    .sort((a, b) => compareReadyIssuesForAgent(a, b, agentId))
+    .slice(0, limit);
+
+  return {
+    repo,
+    issues,
+    ...(warnings.length ? { warning: warnings.join(" | ") } : {}),
+    counts: {
+      readyTotal: ready.length,
+      shown: issues.length,
+      filteredUnassigned,
+      filteredOtherOwner,
+      truncated: Math.max(0, kept.length - issues.length),
+    },
+  };
+}
+
 async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise<string | null> {
   const config = cfg(api);
   if (config.runLoop?.enabled === false) return null;
@@ -443,6 +675,7 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
   const includeUnassigned = config.runLoop?.includeUnassigned ?? false;
   const actionableRepos = repos.filter((repo) => !/test/i.test(repo.name));
   const ttlMs = Math.max(0, config.runLoop?.readyCacheTtlMs ?? DEFAULT_PROMPT_BLOCK_TTL_MS);
+  const budgetMs = Math.max(1_000, config.runLoop?.readyBudgetMs ?? DEFAULT_READY_BUDGET_MS);
   const cacheKey = JSON.stringify({
     agentId,
     limit,
@@ -450,46 +683,59 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
     bdBinary: config.bdBinary ?? "",
     repos: actionableRepos.map((r) => [r.name, r.path]),
   });
-  return promptBlockCache.getOrLoad(cacheKey, ttlMs, async () => {
-    const results = await Promise.all(
-      actionableRepos.map(async (repo) => {
-        try {
-          // Reader-side self-heal (bighat-p5j): re-export the JSONL from the
-          // live Dolt DB before trusting the fast path for status truth. bd
-          // 1.0.3 does NOT auto-export after shell-initiated mutations
-          // (`bd close`/`bd update` run in a shell as HEARTBEAT.md
-          // instructs), so without this the heartbeat can present an
-          // already-closed issue as ready. `bd export` is cheap (<1s per
-          // repo) and the whole block is TTL-cached anyway.
-          await ensureFreshExport({
-            cwd: repo.path,
-            bdBinary: config.bdBinary,
-            timeoutMs: 5_000,
-          });
-          const ready = await readyIssues(Math.max(10, limit * 4), {
-            cwd: repo.path,
-            bdBinary: config.bdBinary,
-            timeoutMs: 4_000,
-            // Include `in_progress` issues so the heartbeat surface shows
-            // active work the agent has already claimed (cyclical loops,
-            // multi-turn fixes). Without this, an `in_progress` issue
-            // disappears from `<ready_issues>` after it's claimed and any
-            // heartbeat that lands while no `open` work exists will idle
-            // even though the agent has work to resume.
-            includeInProgress: true,
-          });
-          const issues = ready
-            .filter((issue) => shouldIncludeReadyIssue(issue, agentId, includeUnassigned))
-            .sort((a, b) => compareReadyIssuesForAgent(a, b, agentId))
-            .slice(0, limit);
-          return { repo, issues };
-        } catch (err: any) {
-          return { repo, issues: [] as BdIssue[], error: String(err?.message ?? err).slice(0, 300) };
+  try {
+    return await promptBlockCache.getOrLoad(
+      cacheKey,
+      ttlMs,
+      async () => {
+        const deadlineMs = Date.now() + budgetMs;
+        const results = await Promise.all(
+          actionableRepos.map((repo) =>
+            withDeadline(
+              collectRepoReady({
+                repo,
+                agentId,
+                bdBinary: config.bdBinary,
+                limit,
+                includeUnassigned,
+                deadlineMs,
+              }).catch(
+                (err: any): ReadyRepoEntry => ({
+                  repo,
+                  issues: [],
+                  error: String(err?.message ?? err).slice(0, 400),
+                }),
+              ),
+              deadlineMs,
+              (): ReadyRepoEntry => ({
+                repo,
+                issues: [],
+                error: `readiness read exceeded the ${budgetMs}ms block budget; this repo's queue is UNKNOWN, not empty`,
+              }),
+            ),
+          ),
+        );
+        for (const entry of results) {
+          if (entry.error) api.logger.warn(`[beads] ready block: ${entry.repo.name}: ${entry.error}`);
+          else if (entry.warning)
+            api.logger.warn(`[beads] ready block: ${entry.repo.name}: ${entry.warning}`);
         }
-      }),
+        return formatPlansAndTasksBlock({ agentId, repos: results });
+      },
+      {
+        // A degraded block must not be pinned for the full TTL — a transient
+        // bd failure should cost one turn, not a minute of turns.
+        resolveTtlMs: (block) => (block.includes('degraded="true"') ? DEGRADED_BLOCK_TTL_MS : ttlMs),
+      },
     );
-    return formatPlansAndTasksBlock({ agentId, repos: results });
-  });
+  } catch (err: any) {
+    // The block builder itself failed. Emitting nothing here is precisely the
+    // failure this issue is about: the heartbeat then sees no queue at all and
+    // yields OK. Emit a loud degraded block instead.
+    const reason = String(err?.message ?? err).slice(0, 400);
+    api.logger.error(`[beads] plans_and_tasks block build failed for ${agentId}: ${reason}`);
+    return formatDegradedPlansAndTasksBlock({ agentId, reason });
+  }
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): boolean {
@@ -578,8 +824,17 @@ export function activate(api: PluginApi): void {
       "before_prompt_build",
       async (_event, ctx) => {
         const agentId = typeof ctx?.agentId === "string" && ctx.agentId.trim() ? ctx.agentId.trim() : "agent";
-        const block = await buildPlansAndTasksBlock(api, agentId);
-        return block ? { prependContext: block } : undefined;
+        try {
+          const block = await buildPlansAndTasksBlock(api, agentId);
+          return block ? { prependContext: block } : undefined;
+        } catch (err: any) {
+          // Belt and braces: a throw here is swallowed by the runtime's hook
+          // runner, which logs one line and drops the contribution — the turn
+          // then has no queue and no idea it lost one (openclaw-beads-7sz).
+          const reason = String(err?.message ?? err).slice(0, 400);
+          log.error(`[beads] before_prompt_build failed for ${agentId}: ${reason}`);
+          return { prependContext: formatDegradedPlansAndTasksBlock({ agentId, reason }) };
+        }
       },
       { priority: -20 },
     );
