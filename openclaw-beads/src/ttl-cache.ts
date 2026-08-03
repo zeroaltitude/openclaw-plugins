@@ -27,8 +27,18 @@ export class TtlCache<T> {
    *
    * `ttlMs <= 0` bypasses the cache entirely, but inflight dedup still
    * applies — duplicate concurrent calls with the same key share one load.
+   *
+   * `options.resolveTtlMs` lets the caller shorten (or drop) caching for a
+   * particular value. The heartbeat block uses it so a DEGRADED block isn't
+   * pinned for the full TTL: a transient `bd` failure should cost one turn,
+   * not a minute of turns.
    */
-  async getOrLoad(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+  async getOrLoad(
+    key: string,
+    ttlMs: number,
+    loader: () => Promise<T>,
+    options: { resolveTtlMs?: (value: T) => number } = {},
+  ): Promise<T> {
     if (ttlMs > 0) {
       const hit = this.store.get(key);
       if (hit && hit.expiresAt > Date.now()) return hit.value;
@@ -38,8 +48,11 @@ export class TtlCache<T> {
     const p = (async () => {
       try {
         const value = await loader();
-        if (ttlMs > 0) {
-          this.store.set(key, { expiresAt: Date.now() + ttlMs, value });
+        const effectiveTtlMs = options.resolveTtlMs ? options.resolveTtlMs(value) : ttlMs;
+        if (effectiveTtlMs > 0) {
+          this.store.set(key, { expiresAt: Date.now() + effectiveTtlMs, value });
+        } else {
+          this.store.delete(key);
         }
         return value;
       } finally {
