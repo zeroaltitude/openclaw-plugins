@@ -28,8 +28,14 @@ docker build -t $ECR_BRIDGE:latest -f docker/Dockerfile.bridge .
 docker push $ECR_BRIDGE:latest
 ```
 
-> **Note**: The Vestige Dockerfile verifies a SHA256 checksum of the downloaded binary.
-> Before production use, update the `VESTIGE_SHA256` build arg with the actual checksum.
+> **Note**: The Vestige Dockerfile verifies a SHA256 checksum of the downloaded binary and
+> **fails the build** on any mismatch. `VESTIGE_SHA256` is pinned to the `v1.1.2` release
+> tarball. If you bump `VESTIGE_VERSION`, the build refuses to proceed until you re-pin —
+> pass both `--build-arg VESTIGE_PINNED_VERSION=<tag>` and `--build-arg VESTIGE_SHA256=<sha256>`:
+>
+> ```bash
+> curl -fsSL "https://github.com/samvallad33/vestige/releases/download/<tag>/vestige-mcp-x86_64-unknown-linux-gnu.tar.gz" | sha256sum
+> ```
 
 ## 2. Authentication Setup
 

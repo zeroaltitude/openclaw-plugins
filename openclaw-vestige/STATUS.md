@@ -83,7 +83,7 @@
 |------|--------|-------|
 | Create ECR repositories (×2) | ⬜ Not Started | Eddie / Infra |
 | Build & push Docker images (×2) | ⬜ Not Started | CI/CD or manual |
-| Pin VESTIGE_SHA256 checksum | ⬜ Not Started | Eddie |
+| Pin VESTIGE_SHA256 checksum | ✅ Done | Pinned to v1.1.2 (2026-08-04); build now fails closed on mismatch |
 | Create k8s namespace | ⬜ Not Started | Eddie / Infra |
 | Generate auth token | ⬜ Not Started | Eddie |
 | DNS for vestige.internal | ⬜ Not Started | Eddie / Infra |
