@@ -221,7 +221,7 @@ describe("AttemptRegistry", () => {
     });
   });
 
-  it("warns when an attempt is discarded with no turn awaiting its result — the silent-kill case (openclaw-c6p)", () => {
+  it("warns when an attempt is discarded with no turn awaiting its result (openclaw-c6p)", () => {
     // This is exactly the gap that made a backgrounded `run_in_background`
     // shell job impossible to diagnose: the turn that started it had already
     // returned (no currentReject to notify) by the time a later turn's
@@ -236,7 +236,13 @@ describe("AttemptRegistry", () => {
 
     expect(logger.calls.warn).toHaveLength(1);
     const [message, context] = logger.calls.warn[0];
-    expect(message).toContain("silently killed");
+    // Wording is deliberate and asserted: this branch cannot know whether
+    // anything was actually running, and it is also the normal end of every
+    // one-shot turn. It must describe the teardown, not claim a loss
+    // (openclaw-tb9g). `reason` is asserted below because it is what makes
+    // the line actionable.
+    expect(message).toContain("is torn down with it");
+    expect(message).not.toContain("silently killed");
     expect(context).toMatchObject({ threadId: entry.threadId, reason: "attempt fingerprint changed" });
   });
 

@@ -149,13 +149,23 @@ function closeEntry(entry: AttemptEntry, reason: string, logger: Logger): void {
     entry.currentReject = null;
     reject(new Error(`attempt discarded: ${reason}`));
   } else {
-    // No turn was actively awaiting this attempt's result — e.g. the last
-    // turn already returned and something it backgrounded (a shell command
-    // started via `run_in_background`) is still running under this
-    // subprocess. There's no promise to reject, so this WARN is the only
-    // signal that the kill happened at all.
+    // No turn was actively awaiting this attempt's result. There's no promise
+    // to reject, so this WARN is the only signal that the teardown happened.
+    //
+    // Deliberately says "any ... IS TORN DOWN WITH IT" rather than the older
+    // "was silently killed": this branch cannot tell whether anything was
+    // actually running. It is also the NORMAL end of every one-shot turn
+    // (heartbeat/cron), where nothing was backgrounded and nothing is lost.
+    // Asserting a kill on every such teardown made the loudest line in the
+    // log the least informative one, which trains readers to ignore it — and
+    // it is the line that matters when work really is lost.
+    //
+    // Narrowing this to fire only when the subprocess genuinely had live
+    // children would be better still, but is not available here: the
+    // backgrounded shells are children of the `claude` subprocess, not of
+    // this bridge process, so this call site has no handle on their liveness.
     logger.warn(
-      "[attempt-registry] discarded an attempt with no turn awaiting its result — any work still running under this subprocess (e.g. a backgrounded shell command) was silently killed",
+      "[attempt-registry] discarded an attempt with no turn awaiting its result — any work still running under this subprocess (e.g. a backgrounded shell command) is torn down with it",
       { threadId: entry.threadId, reason },
     );
   }
