@@ -39,6 +39,12 @@
         "items": { "type": "string" },
         "default": []
       },
+      "ownerNumbers": {
+        "type": "array",
+        "description": "Sender IDs treated as the agent's owner, used to compute senderIsOwner. Mainline does not surface owner classification on the agent hookCtx, so provenance derives it from the inbound sender id and this list. Distinct from trustedSenderIds: owner additionally gates owner-only commands and approval self-authorisation, so keep this to human owner ids and put agent accounts in trustedSenderIds instead.",
+        "items": { "type": "string" },
+        "default": []
+      },
       "maxIterations": {
         "type": "number",
         "description": "Max agent loop iterations before blocking the turn (default: 10)",
