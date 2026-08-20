@@ -18,6 +18,7 @@ import {
   computeSenderIsOwner,
   getSharedIdentityStore,
   type IdentityStore,
+  resolveIdentitySeedReason,
 } from "./identity-store.js";
 import {
   createInboundClaimHandler,
@@ -1555,7 +1556,9 @@ export function registerSecurityHooks(
     "before_prompt_build",
     profiled("before_prompt_build", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
-      const identity = identityStore.get(sessionKey);
+      // Reassigned after a re-seed below so this turn sees the corrected record
+      // rather than the pre-seed one; isOwnerDm() consumes it further down.
+      let identity = identityStore.get(sessionKey);
       // Populate the identity store from the agent hook context (openclaw-ax8s).
       //
       // Identity used to be sourced solely from the inbound_claim handler, but
@@ -1579,24 +1582,44 @@ export function registerSecurityHooks(
       // inbound_claim remains subscribed and unchanged. If a future core
       // version does deliver it to us, it still wins — it carries richer
       // fields (senderName, groupId) and upsert() merges rather than clobbers.
+      //
+      // Re-seed on owner drift as well as on a new sender. The store is
+      // PERSISTED, so a record written while `ownerNumbers` was empty (or
+      // stale) outlives restarts, and a senderId-only guard would never
+      // refresh it: the operator changes ownerNumbers, restarts, and the
+      // cached senderIsOwner=false silently wins forever. Keyed on the
+      // recomputed flag rather than on a config hash so it self-heals
+      // regardless of how the stale value got there.
       const hookSenderId =
         typeof (ctx as { senderId?: unknown }).senderId === "string" &&
         (ctx as { senderId: string }).senderId.length > 0
           ? (ctx as { senderId: string }).senderId
           : undefined;
-      if (hookSenderId && identity?.senderId !== hookSenderId) {
-        identityStore.upsert({
-          sessionKey,
-          senderId: hookSenderId,
-          senderIsOwner: computeSenderIsOwner(hookSenderId, ownerNumbers),
-          ...(ctx.messageProvider ? { sourceProvider: ctx.messageProvider } : {}),
+      if (hookSenderId) {
+        const computedIsOwner = computeSenderIsOwner(hookSenderId, ownerNumbers);
+        const seedReason = resolveIdentitySeedReason({
+          cached: identity,
+          hookSenderId,
+          computedIsOwner,
+          ownerListConfigured: ownerNumbers.length > 0,
         });
-        logger?.info(
-          `[provenance] identity from hookCtx: session=${shortKey(sessionKey)} ` +
-            `sender=${hookSenderId} owner=${computeSenderIsOwner(hookSenderId, ownerNumbers)} ` +
-            `trustedSender=${trustedSenderIds.has(hookSenderId)} ` +
-            `provider=${ctx.messageProvider ?? "none"}`,
-        );
+        if (seedReason) {
+          identityStore.upsert({
+            sessionKey,
+            senderId: hookSenderId,
+            senderIsOwner: computedIsOwner,
+            ...(ctx.messageProvider ? { sourceProvider: ctx.messageProvider } : {}),
+          });
+          logger?.info(
+            `[provenance] identity from hookCtx: session=${shortKey(sessionKey)} ` +
+              `sender=${hookSenderId} owner=${computedIsOwner} ` +
+              `trustedSender=${trustedSenderIds.has(hookSenderId)} ` +
+              `provider=${ctx.messageProvider ?? "none"} reason=${seedReason}`,
+          );
+          // Without this, isOwnerDm() below still sees the pre-seed record and
+          // the correction only takes effect on the NEXT turn.
+          identity = identityStore.get(sessionKey) ?? identity;
+        }
       }
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       sessionOwnerDmMap.set(sessionKey, isOwnerDm(identity));

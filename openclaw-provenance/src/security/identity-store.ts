@@ -95,6 +95,43 @@ export function computeSenderIsOwner(
   return ownerNumbers.includes(senderId);
 }
 
+/** Why a hookCtx-seeded identity needs to be (re)written. */
+export type IdentitySeedReason = "new-sender" | "owner-drift";
+
+/**
+ * Decide whether the before_prompt_build seed must write to the store.
+ *
+ * The store is persisted, so this cannot be a "first write wins" check. A
+ * record written while `ownerNumbers` was empty keeps `senderIsOwner: false`
+ * across restarts; if the guard looked only at senderId, an operator could set
+ * ownerNumbers, restart, and still be classified a non-owner forever. Comparing
+ * against the freshly recomputed flag makes it self-heal no matter how the
+ * stale value got there (empty config, edited config, or a bug).
+ *
+ * `ownerListConfigured` is what keeps that from becoming a downgrade attack on
+ * ourselves. `computeSenderIsOwner` returns false for an empty list as a
+ * FALLBACK — "no opinion" — not as an authoritative "not the owner". Without
+ * this guard, a deployment with `ownerNumbers` unset (the default) would
+ * revoke owner status that `inbound_claim` had legitimately established, on the
+ * very next turn. We only act on a mismatch when there is a list to be
+ * authoritative about; revocation still works, because removing an id from a
+ * NON-empty list is a real answer.
+ *
+ * Returns undefined when the cached record already agrees, which keeps the
+ * steady state at one write per session rather than one per turn.
+ */
+export function resolveIdentitySeedReason(params: {
+  cached: Pick<IdentityRecord, "senderId" | "senderIsOwner"> | undefined;
+  hookSenderId: string;
+  computedIsOwner: boolean;
+  ownerListConfigured: boolean;
+}): IdentitySeedReason | undefined {
+  const { cached, hookSenderId, computedIsOwner, ownerListConfigured } = params;
+  if (cached?.senderId !== hookSenderId) return "new-sender";
+  if (ownerListConfigured && cached?.senderIsOwner !== computedIsOwner) return "owner-drift";
+  return undefined;
+}
+
 /**
  * Derive groupId from the inbound_claim event payload.
  *

@@ -8,6 +8,7 @@ import {
   sessionKeyIsDm,
   computeSenderIsOwner,
   deriveGroupId,
+  resolveIdentitySeedReason,
 } from "../identity-store.js";
 
 describe("IdentityStore", () => {
@@ -304,8 +305,9 @@ describe("computeSenderIsOwner + upsert semantics for hookCtx-seeded identity", 
   });
 
   it("returns false — never throws — when the owner list is empty", () => {
-    // This is today's live state (ownerNumbers unset), so it must degrade
-    // quietly rather than break turns.
+    // Was the live state for the whole life of this plugin: ownerNumbers was
+    // absent from the manifest configSchema, so it could not be set at all
+    // (openclaw-provenance-yct). It must degrade quietly rather than break turns.
     expect(computeSenderIsOwner("159471966640799744", [])).toBe(false);
   });
 
@@ -332,5 +334,141 @@ describe("computeSenderIsOwner + upsert semantics for hookCtx-seeded identity", 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * openclaw-provenance-yct. The seed guard originally fired only when the
+ * senderId differed from what was stored — chosen deliberately to keep writes
+ * at one per session. Because the store is PERSISTED, that made a stale owner
+ * flag permanent: the live record for Eddie's Discord DM held
+ * `senderIsOwner: false` (written while ownerNumbers was unsettable), and after
+ * ownerNumbers was fixed the senderId still matched, so the guard short-circuited
+ * and CLASSIFY_INITIAL_TRUST kept reporting owner=false across restarts.
+ */
+describe("resolveIdentitySeedReason", () => {
+  const SENDER = "159471966640799744";
+
+  it("seeds when there is no cached record at all", () => {
+    expect(
+      resolveIdentitySeedReason({ cached: undefined, hookSenderId: SENDER, computedIsOwner: true, ownerListConfigured: true }),
+    ).toBe("new-sender");
+  });
+
+  it("seeds when the cached sender differs", () => {
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: "999", senderIsOwner: false },
+        hookSenderId: SENDER,
+        computedIsOwner: true,
+        ownerListConfigured: true,
+      }),
+    ).toBe("new-sender");
+  });
+
+  it("re-seeds on owner drift — the actual live regression", () => {
+    // Exactly the persisted record observed in identity.json.
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: SENDER, senderIsOwner: false },
+        hookSenderId: SENDER,
+        computedIsOwner: true,
+        ownerListConfigured: true,
+      }),
+    ).toBe("owner-drift");
+  });
+
+  it("re-seeds when owner is REVOKED, not just granted", () => {
+    // Removing an id from ownerNumbers must also take effect, otherwise the
+    // store would keep handing out owner authority after it was withdrawn —
+    // the security-relevant direction of this bug.
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: SENDER, senderIsOwner: true },
+        hookSenderId: SENDER,
+        computedIsOwner: false,
+        ownerListConfigured: true,
+      }),
+    ).toBe("owner-drift");
+  });
+
+  it("does NOT write when the cached record already agrees", () => {
+    // Preserves the one-write-per-session steady state; without this the hook
+    // would write to disk on every turn.
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: SENDER, senderIsOwner: true },
+        hookSenderId: SENDER,
+        computedIsOwner: true,
+        ownerListConfigured: true,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: SENDER, senderIsOwner: false },
+        hookSenderId: SENDER,
+        computedIsOwner: false,
+        ownerListConfigured: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("treats a cached record with no senderId as a new sender", () => {
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: null, senderIsOwner: false },
+        hookSenderId: SENDER,
+        computedIsOwner: false,
+        ownerListConfigured: true,
+      }),
+    ).toBe("new-sender");
+  });
+});
+
+/**
+ * The empty-list guard. Caught by the existing browser-taint suites rather than
+ * by design: the first version of the drift rule downgraded 14 of them from
+ * `trusted` to `external`, because those fixtures establish an owner identity
+ * directly while the plugin config carries no ownerNumbers. With ownerNumbers
+ * unset — the DEFAULT — an unguarded rule revokes owner status that
+ * inbound_claim legitimately set, on the next turn, in every deployment.
+ */
+describe("resolveIdentitySeedReason — empty ownerNumbers is 'no opinion', not 'not owner'", () => {
+  const SENDER = "159471966640799744";
+
+  it("does NOT revoke a stored owner when no owner list is configured", () => {
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: SENDER, senderIsOwner: true },
+        hookSenderId: SENDER,
+        computedIsOwner: false, // computeSenderIsOwner's empty-list fallback
+        ownerListConfigured: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("still records a genuinely new sender when no owner list is configured", () => {
+    // The senderId path must keep working; the guard is only about the owner flag.
+    expect(
+      resolveIdentitySeedReason({
+        cached: undefined,
+        hookSenderId: SENDER,
+        computedIsOwner: false,
+        ownerListConfigured: false,
+      }),
+    ).toBe("new-sender");
+  });
+
+  it("revokes owner when the id is dropped from a NON-empty list", () => {
+    // Revocation is a real answer when there is a list to be authoritative
+    // about, so this must not be swallowed by the guard above.
+    expect(
+      resolveIdentitySeedReason({
+        cached: { senderId: SENDER, senderIsOwner: true },
+        hookSenderId: SENDER,
+        computedIsOwner: false,
+        ownerListConfigured: true,
+      }),
+    ).toBe("owner-drift");
   });
 });
