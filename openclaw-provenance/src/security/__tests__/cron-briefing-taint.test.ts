@@ -22,7 +22,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerSecurityHooks } from "../index.js";
+import { registerSecurityHooks, type SecurityPluginConfig } from "../index.js";
 import { getSharedWatermarkStore } from "../watermark-store.js";
 import { makeApi } from "./test-shim.js";
 
@@ -42,7 +42,7 @@ const CRON_CTX = { sessionKey: CRON_SESSION_KEY };
 
 // A minimal config resembling production: reads are output-trusted, but the
 // built-in slack://** → external default still governs unlisted channels.
-const CONFIG = {
+const CONFIG: SecurityPluginConfig = {
   taintPolicy: {
     trusted: "allow",
     shared: "restrict",

@@ -21,7 +21,10 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const REPO_ROOT = new URL("../../../", import.meta.url).pathname;
+// `__dirname`, not `import.meta.url`: this package emits CommonJS (no
+// `"type": "module"`), so `import.meta` is a hard tsc error (TS1470) under the
+// tests typecheck gate. Vitest provides `__dirname` in this file either way.
+const REPO_ROOT = join(__dirname, "../../../");
 
 /**
  * Members of `SecurityPluginConfig` that the manifest deliberately does not

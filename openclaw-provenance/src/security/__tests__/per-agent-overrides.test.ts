@@ -48,8 +48,8 @@ describe("Per-agent policy overrides", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
 
@@ -95,8 +95,8 @@ describe("Per-agent policy overrides", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
       agentOverrides: {
         tank: {
@@ -147,7 +147,7 @@ describe("Per-agent policy overrides", () => {
   });
 
   it("agent with taintPolicy+toolOverride allows exec at external taint", () => {
-    // exec now has a per-tool override: external → "confirm". To allow exec at external
+    // exec now has a per-tool override: external → "restrict". To allow exec at external
     // for a specific agent, both taintPolicy AND toolOverrides must be set. taintPolicy
     // alone is insufficient because per-tool overrides beat the taint policy default.
     const logger = makeLogger();
@@ -156,8 +156,8 @@ describe("Per-agent policy overrides", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
       toolOutputTaints: {
         web_search: "external",
@@ -222,15 +222,15 @@ describe("Per-agent policy overrides", () => {
     // If result is undefined, that also means no tools were removed (allow path)
   });
 
-  it("default agent has exec blocked at external taint (confirm mode)", () => {
+  it("default agent has exec blocked at external taint (restrict mode)", () => {
     const logger = makeLogger();
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
       toolOutputTaints: {
         web_search: "external",

@@ -61,8 +61,8 @@ describe("Session reset scope", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
     registerSecurityHooks(api, logger, config);

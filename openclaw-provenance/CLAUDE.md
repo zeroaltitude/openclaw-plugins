@@ -54,9 +54,29 @@ bd close <id>         # Complete work
 
 ```bash
 npm install
-npm run build   # tsc
-npm test        # vitest run
+npm run build            # tsc — emits dist/, excludes src/**/__tests__
+npm run typecheck        # tsc --noEmit over src (same scope as build)
+npm run typecheck:tests  # tsc -p tsconfig.tests.json — src + src/**/__tests__
+npm test                 # typecheck:tests, then vitest run
 ```
+
+### Why there are two tsconfigs
+
+`tsconfig.json` excludes `src/**/__tests__` (tests are not shipped in `dist`)
+and vitest transpiles without typechecking. Together that meant **no test file
+was ever typechecked**, and 32 real type errors accumulated invisibly
+(`openclaw-provenance-v3q`). `tsconfig.tests.json` re-includes the test corpus
+with `noEmit`, and `npm test` runs it first — so a type error in a test now
+fails the suite before vitest starts.
+
+Do not "fix" a test type error by widening a `src` type. In particular,
+`PolicyMode` is `"allow" | "restrict"`; the legacy `"confirm"` mode was
+deliberately removed on 2026-05-27 and is normalized away by
+`normalizePolicyMode()`. The only config surface that still accepts it by type
+is `ToolOverride` (via the internal `LegacyPolicyMode`), and
+`gateway-taint-block.test.ts` deliberately keeps a `"confirm"` there as
+regression coverage for the normalization path. Everywhere else, write
+`"restrict"`.
 
 ## Architecture Overview
 

@@ -1,0 +1,17 @@
+// Typecheck gate for the test corpus.
+//
+// The build config (`tsconfig.json`) excludes `src/**/__tests__` because tests
+// are not shipped in `dist`, and vitest transpiles without typechecking. The
+// combination meant no test file in this repo was ever typechecked — 32 real
+// type errors accumulated invisibly (openclaw-provenance-v3q).
+//
+// This config re-includes them with `noEmit`, so `npm test` fails on a type
+// error in a test the same way it would in `src`.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src"],
+  "exclude": []
+}

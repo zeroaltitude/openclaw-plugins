@@ -37,11 +37,17 @@ function makeLogger() {
 const CONFIG: SecurityPluginConfig = {
   taintPolicy: {
     trusted: "allow",
-    shared: "confirm",
-    external: "confirm",
-    untrusted: "confirm",
+    shared: "restrict",
+    external: "restrict",
+    untrusted: "restrict",
   },
   toolOverrides: {
+    // Deliberately keeps the legacy "confirm" alias. `ToolOverride` is typed
+    // `LegacyPolicyMode`, so this is the one config surface that still accepts
+    // it, and it is what Eddie's real openclaw.json contains. Keeping it here
+    // is our regression coverage for the "confirm" → "restrict" normalization
+    // in normalizePolicyMode(); the canonical `taintPolicy` above uses
+    // "restrict" because `PolicyMode` dropped "confirm" on 2026-05-27.
     gateway: {
       trusted: "allow",
       shared: "confirm",

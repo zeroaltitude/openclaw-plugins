@@ -48,8 +48,8 @@ describe("Cross-session taint inheritance", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
 
@@ -130,8 +130,8 @@ describe("Cross-session taint inheritance", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
 
@@ -204,8 +204,8 @@ describe("Cross-session taint inheritance", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
 
@@ -278,8 +278,8 @@ describe("Cross-session taint inheritance", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
 
@@ -334,8 +334,8 @@ describe("Cross-session taint inheritance", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
       agentOverrides: {
         tank: {
@@ -418,8 +418,8 @@ describe("Owner DM exception narrowing", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
 
@@ -477,7 +477,7 @@ describe("Owner DM exception narrowing", () => {
 
     // message.send has a composite override allowing it at all taint levels,
     // so it goes through even without the owner DM exception.
-    // But the bare "message" tool at "confirm" mode should be caught
+    // But the bare "message" tool at "restrict" mode should be caught
     // by the real-time policy re-evaluation if the composite key doesn't match.
     // Since message.send IS explicitly allowed via DEFAULT_COMPOSITE_TOOL_OVERRIDES,
     // the before_tool_call composite key check lets it through.
@@ -506,8 +506,8 @@ describe("Owner DM exception narrowing", () => {
       workspaceDir: tmpDir,
       taintPolicy: {
         trusted: "allow",
-        external: "confirm",
-        untrusted: "confirm",
+        external: "restrict",
+        untrusted: "restrict",
       },
     };
 
