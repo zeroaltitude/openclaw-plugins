@@ -881,6 +881,11 @@ async function createAttempt(params: {
     inputQueue,
     abortController,
     liveTurnRef,
+    // Retained so a later tool-catalog change can be applied to THIS running
+    // session via setMcpServers instead of forcing a new one. The SDK's Query
+    // is an AsyncGenerator with extra methods; we only need setMcpServers, so
+    // it is narrowed to LiveQueryToolSurface at the registry boundary.
+    query: stream as unknown as AttemptEntry["query"],
     currentHandler: null,
     currentReject: null,
     closed: false,

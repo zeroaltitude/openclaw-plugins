@@ -55,6 +55,7 @@ function makeEntry(threadId = "thread-1", overrides: Partial<AttemptEntry> = {})
     inputQueue: new ControllableUserInputQueue(),
     abortController: new AbortController(),
     liveTurnRef: { turn: { threadId, turnId: "turn-1" } as never },
+    query: { setMcpServers: async () => ({ added: [], removed: [] }) },
     currentHandler: null,
     currentReject: null,
     closed: false,
@@ -354,5 +355,91 @@ describe("AttemptRegistry", () => {
 
     expect(registry.get("thread-idle")).toBeUndefined();
     expect(idleBetweenTurns.closed).toBe(true);
+  });
+});
+
+// ── refreshDynamicTools: the cheap alternative to rotating (openclaw-djc6) ───
+
+describe("AttemptRegistry.refreshDynamicTools", () => {
+  const TOOLS = [{ name: "read" }, { name: "write" }, { name: "exec" }];
+
+  it("swaps the MCP server set on the live query and reports the delta", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const registry = new AttemptRegistry(makeLogger());
+    const entry = makeEntry("thread-refresh", {
+      query: {
+        setMcpServers: async (servers: Record<string, unknown>) => {
+          calls.push(servers);
+          return { added: ["openclaw"], removed: ["openclaw"] };
+        },
+      },
+    });
+    registry.set(entry.threadId, entry);
+
+    const result = await registry.refreshDynamicTools(entry.threadId, {
+      servers: { openclaw: { type: "sdk", name: "openclaw" } },
+      dynamicTools: TOOLS,
+    });
+
+    expect(result).toEqual({ added: ["openclaw"], removed: ["openclaw"] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ openclaw: { type: "sdk" } });
+  });
+
+  it("RE-FINGERPRINTS the entry, so the next turn does not discard it", async () => {
+    // The subtle half of the fix. dynamicTools is part of
+    // AttemptFingerprintInput, so leaving the old fingerprint in place would
+    // make the very next turn compute a mismatch and tear down the subprocess
+    // we refreshed precisely in order to keep.
+    const registry = new AttemptRegistry(makeLogger());
+    const entry = makeEntry("thread-fp");
+    registry.set(entry.threadId, entry);
+    const before = entry.fingerprint;
+
+    await registry.refreshDynamicTools(entry.threadId, {
+      servers: {},
+      dynamicTools: TOOLS,
+    });
+
+    expect(entry.fingerprint).not.toBe(before);
+    expect(entry.fingerprintInput.dynamicTools).toEqual(TOOLS);
+    // And it must equal what a fresh computation over the new input yields —
+    // i.e. exactly what the next turn will compare against.
+    expect(entry.fingerprint).toBe(
+      computeAttemptFingerprint({ ...entry.fingerprintInput, dynamicTools: TOOLS }),
+    );
+  });
+
+  it("returns null when there is no live attempt, so the caller can fall back to rotation", async () => {
+    const registry = new AttemptRegistry(makeLogger());
+    expect(await registry.refreshDynamicTools("absent", { servers: {}, dynamicTools: TOOLS })).toBeNull();
+  });
+
+  it("returns null for an already-closed attempt rather than touching a dead subprocess", async () => {
+    const registry = new AttemptRegistry(makeLogger());
+    const entry = makeEntry("thread-closed", { closed: true });
+    registry.set(entry.threadId, entry);
+    expect(
+      await registry.refreshDynamicTools(entry.threadId, { servers: {}, dynamicTools: TOOLS }),
+    ).toBeNull();
+  });
+
+  it("propagates an SDK failure instead of reporting a refresh that did not happen", async () => {
+    // Swallowing this would leave the model holding the OLD tool surface while
+    // the caller believes the new policy is applied — a policy bypass.
+    const registry = new AttemptRegistry(makeLogger());
+    const entry = makeEntry("thread-boom", {
+      query: {
+        setMcpServers: async () => {
+          throw new Error("mcp registration failed");
+        },
+      },
+    });
+    registry.set(entry.threadId, entry);
+    await expect(
+      registry.refreshDynamicTools(entry.threadId, { servers: {}, dynamicTools: TOOLS }),
+    ).rejects.toThrow("mcp registration failed");
+    // Fingerprint must NOT have advanced on failure.
+    expect(entry.fingerprintInput.dynamicTools).toEqual(BASE_FINGERPRINT_INPUT.dynamicTools);
   });
 });

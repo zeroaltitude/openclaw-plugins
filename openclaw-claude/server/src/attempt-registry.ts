@@ -37,6 +37,18 @@ const NOOP_LOGGER: Logger = {
 };
 
 /**
+ * The single SDK `Query` capability this module needs: replacing the dynamic
+ * MCP server set on an already-running session. Added to the SDK in 0.3.x —
+ * before it existed, a tool-catalog change could only be honoured by starting
+ * a new session, which is what made catalog drift so expensive.
+ */
+export type LiveQueryToolSurface = {
+  setMcpServers(
+    servers: Record<string, unknown>,
+  ): Promise<{ added?: string[]; removed?: string[]; errors?: unknown }>;
+};
+
+/**
  * One entry per thread with a live, persistent `claude` subprocess.
  *
  * `liveTurnRef` is the seam that lets the SDK-facing closures built ONCE at
@@ -56,6 +68,14 @@ export type AttemptEntry = {
   /** Passed as `sdkOptions.abortController` at creation; aborting kills the subprocess. */
   abortController: AbortController;
   liveTurnRef: { turn: ActiveTurn };
+  /**
+   * The live `Query` returned by the SDK's `query()`, narrowed to just the
+   * capability we need from it. Retained so the dynamic tool surface can be
+   * swapped on the RUNNING session (`setMcpServers`) instead of rotating the
+   * thread — see `refreshDynamicTools`. Typed structurally rather than as the
+   * SDK's `Query` so this module stays free of the SDK's type surface.
+   */
+  query: LiveQueryToolSurface;
   /**
    * Set by `runTurn` while it awaits the current turn's result; the pump
    * loop calls it for every message until the turn's `result` message
@@ -133,6 +153,51 @@ export class AttemptRegistry {
       if (entry.currentHandler !== null) continue; // turn in flight — not idle, no matter how long it's running
       if (now - entry.lastUsedAtMs > maxIdleMs) this.discard(threadId, "attempt idle timeout");
     }
+  }
+
+  /**
+   * Swap the dynamic MCP server set on a LIVE attempt instead of rotating the
+   * thread.
+   *
+   * This is the cheap path for a tool-catalog change. Rotation costs a full
+   * transcript copy, a new SDK session id (so a cold prompt cache) and a
+   * respawned subprocess that strands whatever the previous turn backgrounded.
+   * `setMcpServers` re-registers the surface on the running session, so none
+   * of that is paid and the catalog is still genuinely correct — which matters,
+   * because catalog changes are often POLICY (e.g. the owner-only control-plane
+   * deny), and quietly keeping the old surface would be a policy bypass.
+   *
+   * Returns null when there is no live attempt to refresh, so the caller can
+   * fall back to rotation. Never throws for the not-found case; a failure from
+   * the SDK itself does propagate, because silently "succeeding" would leave
+   * the model holding a surface we told the caller we had replaced.
+   */
+  async refreshDynamicTools(
+    threadId: string,
+    params: {
+      servers: Record<string, unknown>;
+      dynamicTools: AttemptFingerprintInput["dynamicTools"];
+    },
+  ): Promise<{ added: string[]; removed: string[] } | null> {
+    const entry = this.byThread.get(threadId);
+    if (!entry || entry.closed) return null;
+    const result = await entry.query.setMcpServers(params.servers);
+    // MUST re-fingerprint, and this is the subtle half of the fix. dynamicTools
+    // is part of AttemptFingerprintInput, so if the entry kept its old
+    // fingerprint the very next turn would compute a mismatch and discard the
+    // attempt — respawning the subprocess we just went out of our way not to
+    // respawn, and undoing the entire benefit.
+    entry.fingerprintInput = { ...entry.fingerprintInput, dynamicTools: params.dynamicTools };
+    entry.fingerprint = computeAttemptFingerprint(entry.fingerprintInput);
+    const added = result.added ?? [];
+    const removed = result.removed ?? [];
+    this.logger.info("[attempt-registry] refreshed dynamic tools on a live attempt", {
+      threadId,
+      toolCount: params.dynamicTools.length,
+      added,
+      removed,
+    });
+    return { added, removed };
   }
 
   size(): number {

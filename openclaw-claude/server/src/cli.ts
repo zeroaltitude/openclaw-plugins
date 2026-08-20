@@ -10,6 +10,7 @@ import { createModelListHandler } from "./handlers/model-list.js";
 import { createThreadArchiveHandler, createThreadUnarchiveHandler } from "./handlers/thread-archive.js";
 import { createThreadCompactStartHandler } from "./handlers/thread-compact.js";
 import { createThreadForkHandler } from "./handlers/thread-fork.js";
+import { createThreadRefreshToolsHandler } from "./handlers/thread-refresh-tools.js";
 import { createThreadInjectItemsHandler } from "./handlers/thread-inject-items.js";
 import { createThreadListHandler } from "./handlers/thread-list.js";
 import { createThreadReadHandler } from "./handlers/thread-read.js";
@@ -177,6 +178,10 @@ export async function main(argv: string[]): Promise<void> {
   );
   server.onMethod("turn/steer", createTurnSteerHandler(activeTurns, STDERR_LOGGER));
   server.onMethod("thread/fork", createThreadForkHandler(threadStore, STDERR_LOGGER));
+  server.onMethod(
+    "thread/refresh_tools",
+    createThreadRefreshToolsHandler(attemptRegistry, STDERR_LOGGER),
+  );
   server.onMethod("thread/inject_items", createThreadInjectItemsHandler(threadStore, STDERR_LOGGER));
   server.onMethod("thread/unsubscribe", createThreadUnsubscribeHandler(threadStore));
   server.onMethod("thread/list", createThreadListHandler(threadStore, attemptRegistry, STDERR_LOGGER));
