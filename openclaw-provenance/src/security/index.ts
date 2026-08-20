@@ -547,6 +547,8 @@ export function registerSecurityHooks(
   // continuity across gateway restarts.
   const identityStore = getSharedIdentityStore(workspaceDir);
   const ownerNumbers = (config?.ownerNumbers ?? []) as readonly string[];
+  // openclaw-ax8s: one IDENTITY_PROBE line per session (diagnostic only).
+  const identityProbeLogged = new Set<string>();
   logger.info(
     `[provenance] Identity store: ${workspaceDir}/.provenance/identity.json | ` +
       `ownerNumbers configured: ${ownerNumbers.length}`,
@@ -1552,6 +1554,33 @@ export function registerSecurityHooks(
     profiled("before_prompt_build", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       const identity = identityStore.get(sessionKey);
+      // DIAGNOSTIC ONLY (openclaw-ax8s) — no behaviour change.
+      //
+      // The comment above asserts mainline "does not populate" identity on the
+      // agent hookCtx, which is why identity is sourced from inbound_claim.
+      // But inbound_claim is a TARGETED CLAIMING hook (only ever invoked as
+      // runInboundClaimForPluginOutcome against the plugin that owns a
+      // conversation binding), so provenance never receives it: zero
+      // "inbound_claim: cached identity" lines exist in the entire journal,
+      // and every turn therefore classifies via missingIdentityTrust rather
+      // than by verifying the sender. trustedSenderIds is consequently inert.
+      //
+      // Meanwhile PluginHookAgentContext DOES declare senderId, and core
+      // populates it in several places. The comment and the type disagree, so
+      // log what actually arrives here before relying on either. One line per
+      // session to keep it cheap.
+      if (!identityProbeLogged.has(sessionKey)) {
+        identityProbeLogged.add(sessionKey);
+        const probeSenderId = (ctx as { senderId?: unknown }).senderId;
+        logger?.info(
+          `[provenance] IDENTITY_PROBE session=${shortKey(sessionKey)} ` +
+            `hookCtx.senderId=${typeof probeSenderId === "string" && probeSenderId.length > 0 ? probeSenderId : "ABSENT"} ` +
+            `identityStore=${identity ? "present" : "EMPTY"} ` +
+            `wouldMatchTrustedSenderIds=${typeof probeSenderId === "string" && trustedSenderIds.has(probeSenderId)} ` +
+            `wouldMatchOwnerNumbers=${typeof probeSenderId === "string" && ownerNumbers.includes(probeSenderId)} ` +
+            `provider=${ctx.messageProvider ?? "none"}`,
+        );
+      }
       if (ctx.agentId) sessionAgentMap.set(sessionKey, ctx.agentId);
       sessionOwnerDmMap.set(sessionKey, isOwnerDm(identity));
       turnStartTimes.set(sessionKey, performance.now());
