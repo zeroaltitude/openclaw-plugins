@@ -3,6 +3,16 @@
  *
  * Validates that subagents inherit taint from their parent sessions,
  * preventing taint laundering via spawn.
+ *
+ * Identity here follows production, not the old shim auto-seed:
+ *   - ownership comes from the configured `ownerNumbers` list plus the
+ *     `senderId` mainline puts on a user turn's hook ctx;
+ *   - `groupId` comes from `seedIdentity()`, standing in for the
+ *     `inbound_claim` handler — the hook ctx never carries it;
+ *   - the parent→child link comes from firing the real `subagent_spawned`
+ *     hook, which is what writes `spawnedBy` in production. Sub-agent turns
+ *     get no identity fields on their ctx at all (mainline strips them for
+ *     every `trigger !== "user"`).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -27,6 +37,43 @@ function makeLogger() {
   };
 }
 
+const OWNER_ID = "owner-123";
+const OWNER_NUMBERS = [OWNER_ID];
+
+/** A genuine user turn: senderId + messageProvider, nothing else. */
+function userCtx(sessionKey: string, agentId = "main") {
+  return { agentId, sessionKey, senderId: OWNER_ID, messageProvider: "slack" };
+}
+
+/** A sub-agent turn: mainline strips identity for non-user triggers. */
+function subagentCtx(sessionKey: string, agentId = "main") {
+  return { agentId, sessionKey };
+}
+
+/**
+ * Record the owner's identity for a GROUP session, as `inbound_claim` would.
+ * `groupId` has no route onto the agent hook ctx, so a group scenario has to
+ * come from the identity store. senderId matches the hook ctx and the
+ * recomputed owner flag agrees with `ownerNumbers`, so the plugin's own
+ * before_prompt_build seed finds nothing to correct and the groupId survives.
+ */
+function seedGroupOwner(tmpDir: string, sessionKey: string, groupId: string) {
+  seedIdentity(tmpDir, sessionKey, {
+    senderId: OWNER_ID,
+    senderIsOwner: true,
+    groupId,
+    sourceProvider: "slack",
+  });
+}
+
+/** Fire the hook that records a parent→child spawn in the identity store. */
+function fireSpawn(
+  api: ReturnType<typeof makeApi>,
+  parentSessionKey: string,
+  childSessionKey: string,
+) {
+  api.fire("subagent_spawned", { parentSessionKey, childSessionKey }, {});
+}
 
 // ── Tests ────────────────────────────────────────────────────
 
@@ -46,6 +93,7 @@ describe("Cross-session taint inheritance", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      ownerNumbers: OWNER_NUMBERS,
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -60,43 +108,26 @@ describe("Cross-session taint inheritance", () => {
 
     // Parent turn starts in a group context (owner DM exception won't apply,
     // so message.read will taint the context to external)
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    seedGroupOwner(tmpDir, parentSession, "group-1");
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(parentSession));
 
     // Parent reads external content
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    }, userCtx(parentSession));
 
     // after_tool_call evaluates taint → escalates to external
     api.fire("after_tool_call", {
       toolName: "message",
       params: { action: "read" },
       result: { content: [{ type: "text", text: "message content" }] },
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    }, userCtx(parentSession));
 
     // Parent spawns subagent (parent's turn is still in-flight)
     // Child's context_assembled fires
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    fireSpawn(api, parentSession, childSession);
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, subagentCtx(childSession));
 
     // Check that the child inherited taint
     const inheritLog = logger.logs.find(l =>
@@ -110,11 +141,7 @@ describe("Cross-session taint inheritance", () => {
       iteration: 0,
       tools: [{ name: "exec" }, { name: "read" }],
       messages: [],
-    }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    }, subagentCtx(childSession));
 
     // exec should be removed
     expect(result?.tools).toBeDefined();
@@ -128,6 +155,7 @@ describe("Cross-session taint inheritance", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      ownerNumbers: OWNER_NUMBERS,
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -141,39 +169,24 @@ describe("Cross-session taint inheritance", () => {
     const childSession = "agent:main:subagent:child-2";
 
     // Parent turn starts — clean, no external content
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(parentSession));
 
     // Parent only uses trusted tools
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "exec" }],
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    }, userCtx(parentSession));
 
     // after_tool_call: exec is trusted — no escalation
     api.fire("after_tool_call", {
       toolName: "exec",
       params: {},
       result: { content: [{ type: "text", text: "ok" }] },
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    }, userCtx(parentSession));
 
     // Child's context_assembled fires
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    fireSpawn(api, parentSession, childSession);
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, subagentCtx(childSession));
 
     // No parent taint inheritance log
     const inheritLog = logger.logs.find(l =>
@@ -186,11 +199,7 @@ describe("Cross-session taint inheritance", () => {
       iteration: 0,
       tools: [{ name: "exec" }, { name: "read" }],
       messages: [],
-    }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    }, subagentCtx(childSession));
 
     // No tools removed (allow mode) — may return systemPrompt for taint introspection
     expect(result?.block).toBeUndefined();
@@ -202,6 +211,7 @@ describe("Cross-session taint inheritance", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      ownerNumbers: OWNER_NUMBERS,
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -215,54 +225,27 @@ describe("Cross-session taint inheritance", () => {
     const childSession = "agent:main:subagent:child-3";
 
     // Parent turn 1: reads external content in a group context and completes
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    seedGroupOwner(tmpDir, parentSession, "group-1");
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(parentSession));
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    }, userCtx(parentSession));
     // after_tool_call: taint evaluated post-execution
     api.fire("after_tool_call", {
       toolName: "message",
       params: { action: "read" },
       result: { content: [{ type: "text", text: "message content" }] },
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    }, userCtx(parentSession));
     // Complete the turn → flushes watermark
-    api.fire("before_response_emit", { content: "done" }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    api.fire("before_response_emit", { content: "done" }, userCtx(parentSession));
 
     // Parent turn 2: spawns a subagent (new turn, inherits watermark)
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 2 }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 2 }, userCtx(parentSession));
 
     // Child starts — should inherit parent's persisted watermark
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    fireSpawn(api, parentSession, childSession);
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, subagentCtx(childSession));
 
     const inheritLog = logger.logs.find(l =>
       l.includes("PARENT_TAINT_INHERITANCE") && l.includes(childSession.slice(-8)),
@@ -276,6 +259,7 @@ describe("Cross-session taint inheritance", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      ownerNumbers: OWNER_NUMBERS,
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -289,36 +273,21 @@ describe("Cross-session taint inheritance", () => {
     const childSession = "agent:main:subagent:child-4";
 
     // Parent reads web content → untrusted
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(parentSession));
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "web_fetch" }],
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    }, userCtx(parentSession));
     // after_tool_call: web_fetch is untrusted
     api.fire("after_tool_call", {
       toolName: "web_fetch",
       params: {},
       result: { content: [{ type: "text", text: "fetched content" }] },
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    }, userCtx(parentSession));
 
     // Child starts
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    fireSpawn(api, parentSession, childSession);
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, subagentCtx(childSession));
 
     const inheritLog = logger.logs.find(l =>
       l.includes("PARENT_TAINT_INHERITANCE") && l.includes(childSession.slice(-8)),
@@ -332,6 +301,7 @@ describe("Cross-session taint inheritance", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      ownerNumbers: OWNER_NUMBERS,
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -352,47 +322,28 @@ describe("Cross-session taint inheritance", () => {
     const childSession = "agent:tank:subagent:child-5";
 
     // Parent reads external content
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(parentSession));
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    }, userCtx(parentSession));
     // after_tool_call: taint evaluated post-execution
     api.fire("after_tool_call", {
       toolName: "message",
       params: { action: "read" },
       result: { content: [{ type: "text", text: "message content" }] },
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-    });
+    }, userCtx(parentSession));
 
     // Tank subagent starts — inherits external taint
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "tank",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    fireSpawn(api, parentSession, childSession);
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, subagentCtx(childSession, "tank"));
 
     // Tank's policy: external = allow → exec should still be available
     const result = api.fire("before_llm_call", {
       iteration: 0,
       tools: [{ name: "exec" }, { name: "read" }],
       messages: [],
-    }, {
-      agentId: "tank",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    }, subagentCtx(childSession, "tank"));
 
     // Tank allows exec at external — no tools removed (may return systemPrompt)
     expect(result?.block).toBeUndefined();
@@ -416,6 +367,7 @@ describe("Owner DM exception narrowing", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      ownerNumbers: OWNER_NUMBERS,
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -429,51 +381,29 @@ describe("Owner DM exception narrowing", () => {
     const childSession = "agent:main:subagent:child-dm-1";
 
     // Parent reads external content in a group context (so message.read taints)
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    seedGroupOwner(tmpDir, parentSession, "group-1");
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(parentSession));
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    }, userCtx(parentSession));
     // after_tool_call: taint evaluated post-execution
     api.fire("after_tool_call", {
       toolName: "message",
       params: { action: "read" },
       result: { content: [{ type: "text", text: "message content" }] },
-    }, {
-      agentId: "main",
-      sessionKey: parentSession,
-      senderIsOwner: true,
-      groupId: "group-1",
-    });
+    }, userCtx(parentSession));
 
     // Child inherits external taint from parent
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    fireSpawn(api, parentSession, childSession);
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, subagentCtx(childSession));
 
     // Child tries to call message tool — should be evaluated by policy, not bypassed.
     // Previously, spawnedBy would grant "owner DM" exception. Now it doesn't.
     const result = api.fire("before_tool_call", {
       toolName: "message",
       params: { action: "send", message: "hello" },
-    }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-      // No groupId → would previously qualify as "owner DM" via spawnedBy
-    });
+    }, subagentCtx(childSession));
 
     // message.send has a composite override allowing it at all taint levels,
     // so it goes through even without the owner DM exception.
@@ -489,11 +419,7 @@ describe("Owner DM exception narrowing", () => {
     const execResult = api.fire("before_tool_call", {
       toolName: "exec",
       params: { command: "echo hi" },
-    }, {
-      agentId: "main",
-      sessionKey: childSession,
-      spawnedBy: parentSession,
-    });
+    }, subagentCtx(childSession));
 
     // exec at external taint → blocked (no owner-DM bypass for subagents)
     expect(execResult?.block).toBe(true);
@@ -504,6 +430,9 @@ describe("Owner DM exception narrowing", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      // The exception hangs off senderIsOwner, which the plugin may only
+      // derive from this list — there is no ctx field that grants it.
+      ownerNumbers: OWNER_NUMBERS,
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -516,43 +445,89 @@ describe("Owner DM exception narrowing", () => {
     const session = "agent:main:main";
 
     // Owner session reads external content
-    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
-      agentId: "main",
-      sessionKey: session,
-      senderIsOwner: true,
-    });
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(session));
     api.fire("after_llm_call", {
       iteration: 0,
       toolCalls: [{ name: "message", params: { action: "read" } }],
-    }, {
-      agentId: "main",
-      sessionKey: session,
-      senderIsOwner: true,
-    });
+    }, userCtx(session));
     // after_tool_call: message.read in owner DM → trusted (owner DM exception)
     api.fire("after_tool_call", {
       toolName: "message",
       params: { action: "read" },
       result: { content: [{ type: "text", text: "message content" }] },
-    }, {
-      agentId: "main",
-      sessionKey: session,
-      senderIsOwner: true,
-    });
+    }, userCtx(session));
 
-    // Owner DM: senderIsOwner=true, no groupId, no spawnedBy → exception applies
+    // Owner DM: senderIsOwner=true (from ownerNumbers), no groupId, no
+    // spawnedBy → exception applies
     const result = api.fire("before_tool_call", {
       toolName: "message",
       params: { action: "send", message: "hello" },
-    }, {
-      agentId: "main",
-      sessionKey: session,
-      senderIsOwner: true,
-      // No groupId, no spawnedBy → genuine owner DM
-    });
+    }, userCtx(session));
 
     // Message send should be allowed (owner DM exception)
     expect(result?.block).toBeUndefined();
+  });
+
+  /**
+   * The exception is only observable on a message action that policy would
+   * otherwise stop: `message.read` is "restrict" at untrusted taint (
+   * DEFAULT_COMPOSITE_TOOL_OVERRIDES), while `message.send` is "allow" at
+   * every level and so cannot discriminate. Taint the session to untrusted
+   * with web_fetch, then probe message.read.
+   */
+  function taintToUntrustedThenProbeMessageRead(
+    api: ReturnType<typeof makeApi>,
+    session: string,
+  ) {
+    api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, userCtx(session));
+    api.fire("after_tool_call", {
+      toolName: "web_fetch",
+      params: {},
+      result: { content: [{ type: "text", text: "fetched content" }] },
+    }, userCtx(session));
+    return api.fire("before_tool_call", {
+      toolName: "message",
+      params: { action: "read", channel: "general" },
+    }, userCtx(session));
+  }
+
+  it("grants the owner DM exception when ownerNumbers names the sender", () => {
+    const logger = makeLogger();
+    const api = makeApi(tmpDir);
+    registerSecurityHooks(api, logger, {
+      workspaceDir: tmpDir,
+      ownerNumbers: OWNER_NUMBERS,
+      // "restrict" is the canonical mode; the legacy "confirm" used elsewhere
+      // in this file normalizes to exactly this (normalizePolicyMode).
+      taintPolicy: { trusted: "allow", external: "restrict", untrusted: "restrict" },
+    });
+
+    const result = taintToUntrustedThenProbeMessageRead(api, "agent:main:main");
+
+    // Owner DM → exception → allowed despite untrusted taint.
+    expect(result?.block).toBeUndefined();
+  });
+
+  it("denies the owner DM exception to a sender absent from ownerNumbers", () => {
+    // Counterpart to the test above — identical session, hooks and probe; only
+    // the ownerNumbers list differs. Under the shim's old auto-seed a test
+    // could hand itself `senderIsOwner: true` on the ctx and take the
+    // exception with no ownerNumbers entry at all, so this pair could not have
+    // been written.
+    const logger = makeLogger();
+    const api = makeApi(tmpDir);
+    registerSecurityHooks(api, logger, {
+      workspaceDir: tmpDir,
+      ownerNumbers: ["somebody-else"],
+      // "restrict" is the canonical mode; the legacy "confirm" used elsewhere
+      // in this file normalizes to exactly this (normalizePolicyMode).
+      taintPolicy: { trusted: "allow", external: "restrict", untrusted: "restrict" },
+    });
+
+    const result = taintToUntrustedThenProbeMessageRead(api, "agent:main:main");
+
+    // Not the owner → message.read is restricted at untrusted taint.
+    expect(result?.block).toBe(true);
   });
 });
 

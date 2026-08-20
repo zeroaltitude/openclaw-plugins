@@ -65,11 +65,16 @@ const CONFIG: SecurityPluginConfig = {
 
 const SESSION_KEY = "agent:main:main";
 
+/**
+ * Mainline's user-turn ctx shape: `senderId` only. `senderIsOwner` and
+ * `senderName` used to be declared here; production never puts either on the
+ * agent hook ctx. The turn still classifies `trusted` — now via the
+ * `trustedSenderIds: ["owner-123"]` config above, which is the path this
+ * scenario was always meant to exercise.
+ */
 const OWNER_CTX = {
   sessionKey: SESSION_KEY,
   senderId: "owner-123",
-  senderIsOwner: true,
-  senderName: "owner",
 };
 
 // ── Tests ────────────────────────────────────────────────────

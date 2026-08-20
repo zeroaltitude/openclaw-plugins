@@ -100,27 +100,34 @@ follow the same shape:
   tests, including a legacy-hook-name translation shim (see the file's
   header comment) for tests written before the mainline hook migration.
 
-### Test-shim identity auto-seeding — pass `{ autoSeedIdentity: false }`
+### Identity in tests: never put it on the ctx
 
-`makeApi()` auto-seeds the IdentityStore from identity fields on the fire()
-ctx. It defaults **on** only to keep the pre-migration corpus green, and it
-does not model production: mainline's `PluginHookAgentContext` carries just
-`senderId` (and only when `trigger === "user"`) plus `messageProvider` — never
-`senderIsOwner`, `sourceProvider`, `groupId` or `spawnedBy`.
+The test shim does **not** invent identity. A hook ctx may carry only what
+mainline's `PluginHookAgentContext` carries — `senderId` (and only when
+`trigger === "user"`) plus `messageProvider`. `senderIsOwner`,
+`sourceProvider`, `groupId` and `spawnedBy` never appear on it, so putting
+them there tests nothing.
 
-Leaving it on hides the real path in two ways. It pre-writes a record whose
-`senderId` matches the hook's, so `resolveIdentitySeedReason()` returns
-`undefined` and `before_prompt_build`'s own seed — the `computeSenderIsOwner()`
-/ `ownerNumbers` chain — never runs. And it lets a test claim ownership by
-setting `senderIsOwner: true` on ctx, which production can only ever derive
-from configured `ownerNumbers`. Three shipped bugs in that chain (`09d6cb7`,
-`72700d8`, `4b8ce31`) had a green suite throughout.
+Two routes, pick by what the test asserts:
 
-**New tests must pass `makeApi(dir, { autoSeedIdentity: false })`** and set only
-`senderId` / `messageProvider` on ctx, so the plugin does its own seeding.
-`production-identity-seed.test.ts` is the reference; 5 of its 8 cases fail if
-auto-seed is switched back on. Migrating the legacy files to faithful mode is
-tracked as `openclaw-provenance-1yv` follow-up work.
+- **Ownership** → configure `ownerNumbers` and put the matching `senderId` on
+  the ctx. `before_prompt_build` computes `senderIsOwner` itself via
+  `computeSenderIsOwner()`; that is production's only route to owner status,
+  and to the owner-DM message exception that hangs off it.
+- **`groupId` / `spawnedBy` / `sourceProvider`** → `seedIdentity(dir, key, …)`,
+  or fire `inbound_claim` / `subagent_spawned`. These reach the IdentityStore
+  from those handlers in production and from nowhere else.
+
+`makeApi()` used to auto-seed the store from ctx identity fields to keep the
+pre-migration corpus green. That hid the real path twice over: it pre-wrote a
+record whose `senderId` matched the hook's, so `resolveIdentitySeedReason()`
+returned `undefined` and the `computeSenderIsOwner()` / `ownerNumbers` chain
+never ran (three shipped bugs — `09d6cb7`, `72700d8`, `4b8ce31` — had a green
+suite throughout); and it let a test claim ownership outright by setting
+`senderIsOwner: true`. Removed in `openclaw-provenance-iz3`;
+`makeApi({ autoSeedIdentity: true })` now throws. `production-identity-seed.test.ts`
+is the reference for the seed chain, `initial-trust-classification.test.ts` for
+the `identity.sourceProvider` branch.
 
 ### Approvals are gated at the command layer, not in `ApprovalStore`
 

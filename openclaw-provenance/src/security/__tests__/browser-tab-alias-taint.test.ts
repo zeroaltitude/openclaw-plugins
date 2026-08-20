@@ -29,13 +29,20 @@ function makeLogger() {
   };
 }
 
+/**
+ * A genuine user turn as mainline shapes it: `senderId` (populated only for
+ * `trigger === "user"`) plus `messageProvider`. Ownership is NOT declared
+ * here — it is derived by the plugin from OWNER_NUMBERS below, which is the
+ * only route production has.
+ */
 const ownerCtx = {
   agentId: "main",
   sessionKey: "agent:main:discord:dm:owner",
   messageProvider: "discord",
   senderId: "owner-123",
-  senderIsOwner: true,
 };
+
+const OWNER_NUMBERS = ["owner-123"];
 
 describe("Browser tab alias taint resolution (openclaw-provenance-40x)", () => {
   let tmpDir: string;
@@ -56,6 +63,7 @@ describe("Browser tab alias taint resolution (openclaw-provenance-40x)", () => {
     const { store } = registerSecurityHooks(api, logger, {
       workspaceDir: tmpDir,
       verbose: true,
+      ownerNumbers: OWNER_NUMBERS,
       ...config,
     });
     return { api, logger, store };

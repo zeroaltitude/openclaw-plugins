@@ -1,14 +1,23 @@
 /**
  * Heartbeat Trust Classification — Test Suite
  *
- * Validates that heartbeats are classified as trusted even when
- * messageProvider reflects the delivery channel (e.g. "discord")
- * rather than the source ("heartbeat").
+ * Validates that heartbeat turns are classified as trusted even though
+ * `messageProvider` reflects the delivery channel (e.g. "discord") rather
+ * than the source, using only signals production actually delivers:
  *
- * Tests three defense layers:
- *   1. sourceProvider — overrides messageProvider for trust classification
- *   2. missingIdentityTrust config — fallback for unknown senders
- *   3. Both together — belt and suspenders
+ *   1. the sessionKey system-source segment (`…:heartbeat`) — the real
+ *      defense, since mainline strips identity for every non-user trigger and
+ *      never puts a `sourceProvider` on the agent hook ctx;
+ *   2. the `missingIdentityTrust` config — the fallback for a turn with no
+ *      identity record at all.
+ *
+ * The `identity.sourceProvider` branch of classifyInitialTrust (written by
+ * `inbound_claim`, not by the hook ctx) is pinned in
+ * `initial-trust-classification.test.ts`.
+ *
+ * Ownership is never declared on a ctx here: `senderIsOwner` is the plugin's
+ * own conclusion from configured `ownerNumbers`, so tests that need an owner
+ * configure one.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -19,7 +28,7 @@ import {
   registerSecurityHooks,
   type SecurityPluginConfig,
 } from "../index.js";
-import { makeApi, seedIdentity } from "./test-shim.js";
+import { makeApi } from "./test-shim.js";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -58,50 +67,13 @@ describe("Heartbeat trust classification", () => {
     return { api, logger, store };
   }
 
-  it("classifies heartbeat with sourceProvider as trusted", () => {
-    const { api, logger } = setup();
-
-    api.fire("context_assembled", {
-      systemPrompt: "test",
-      messages: [{ role: "user", content: "heartbeat" }],
-      messageCount: 1,
-    }, {
-      agentId: "main",
-      sessionKey: "agent:main:discord:channel:123",
-      messageProvider: "discord",
-      sourceProvider: "heartbeat",
-    });
-
-    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
-    expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
-    expect(trustLine).toContain("sourceProvider=heartbeat");
-  });
-
-  it("classifies heartbeat WITHOUT sourceProvider as shared (default missingIdentityTrust)", () => {
-    const { api, logger } = setup();
-
-    api.fire("context_assembled", {
-      systemPrompt: "test",
-      messages: [{ role: "user", content: "heartbeat" }],
-      messageCount: 1,
-    }, {
-      agentId: "main",
-      sessionKey: "agent:main:discord:channel:123",
-      messageProvider: "discord",
-    });
-
-    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
-    expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: shared");
-  });
-
-  it("classifies heartbeat sessionKey suffix as trusted even when sourceProvider is missing", () => {
-    // Regression: when core dispatches a heartbeat turn without populating
-    // identity.sourceProvider, the sessionKey suffix is the only signal that
-    // the turn isn't user-driven. Without this fallback, an interrupted
-    // heartbeat turn silently escalates the watermark to non-trusted (the
-    // …ddpw95:heartbeat sealing bug).
+  it("classifies a heartbeat sessionKey segment as trusted", () => {
+    // Regression: when core dispatches a heartbeat turn it populates no
+    // identity at all (`buildAgentHookContextIdentityFields()` returns `{}`
+    // for every trigger !== "user"), so the sessionKey segment is the only
+    // signal that the turn isn't user-driven. Without this fallback, an
+    // interrupted heartbeat turn silently escalates the watermark to
+    // non-trusted (the …ddpw95:heartbeat sealing bug).
     const { api, logger } = setup();
 
     api.fire("context_assembled", {
@@ -119,7 +91,28 @@ describe("Heartbeat trust classification", () => {
     expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
   });
 
-  it("classifies heartbeat WITHOUT sourceProvider as trusted when missingIdentityTrust is configured", () => {
+  it("falls to missingIdentityTrust (shared) without an identity or a heartbeat segment", () => {
+    // Negative control for the test above: same identity-less ctx, but on an
+    // ordinary channel session key. This is the pre-fallback bug shape — a
+    // heartbeat delivered over discord whose session key carried no marker.
+    const { api, logger } = setup();
+
+    api.fire("context_assembled", {
+      systemPrompt: "test",
+      messages: [{ role: "user", content: "heartbeat" }],
+      messageCount: 1,
+    }, {
+      agentId: "main",
+      sessionKey: "agent:main:discord:channel:123",
+      messageProvider: "discord",
+    });
+
+    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
+    expect(trustLine).toBeDefined();
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: shared");
+  });
+
+  it("classifies an identity-less turn as trusted when missingIdentityTrust is configured", () => {
     const { api, logger } = setup({
       missingIdentityTrust: "trusted",
     });
@@ -139,44 +132,6 @@ describe("Heartbeat trust classification", () => {
     expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
   });
 
-  it("classifies cron-event sourceProvider as trusted", () => {
-    const { api, logger } = setup();
-
-    api.fire("context_assembled", {
-      systemPrompt: "test",
-      messages: [{ role: "user", content: "cron task" }],
-      messageCount: 1,
-    }, {
-      agentId: "main",
-      sessionKey: "agent:main:discord:channel:123",
-      messageProvider: "discord",
-      sourceProvider: "cron-event",
-    });
-
-    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
-    expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
-  });
-
-  it("classifies exec-event sourceProvider as trusted", () => {
-    const { api, logger } = setup();
-
-    api.fire("context_assembled", {
-      systemPrompt: "test",
-      messages: [{ role: "user", content: "exec done" }],
-      messageCount: 1,
-    }, {
-      agentId: "main",
-      sessionKey: "agent:main:discord:channel:123",
-      messageProvider: "discord",
-      sourceProvider: "exec-event",
-    });
-
-    const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
-    expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
-  });
-
   it("still classifies external discord messages as external/shared", () => {
     const { api, logger } = setup();
 
@@ -189,7 +144,6 @@ describe("Heartbeat trust classification", () => {
       sessionKey: "agent:main:discord:channel:123",
       messageProvider: "discord",
       senderId: "unknown-user-456",
-      senderIsOwner: false,
     });
 
     const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
@@ -197,9 +151,13 @@ describe("Heartbeat trust classification", () => {
     expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: external");
   });
 
-  it("classifies owner discord messages as trusted", () => {
+  it("classifies owner discord messages as trusted via ownerNumbers", () => {
+    // Was previously configured with `trustedSenderIds: ["owner-123"]` AND a
+    // `senderIsOwner: true` ctx field, so it passed on either path and
+    // distinguished neither. No trustedSenderIds here: the only route to
+    // trusted is ownerNumbers → computeSenderIsOwner → the owner branch.
     const { api, logger } = setup({
-      trustedSenderIds: ["owner-123"],
+      ownerNumbers: ["owner-123"],
     });
 
     api.fire("context_assembled", {
@@ -211,38 +169,43 @@ describe("Heartbeat trust classification", () => {
       sessionKey: "agent:main:discord:channel:123",
       messageProvider: "discord",
       senderId: "owner-123",
-      senderIsOwner: true,
     });
 
     const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
     expect(trustLine).toBeDefined();
     expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
+    expect(trustLine).toContain("owner=true");
   });
 
-  it("logs sourceProvider when it differs from messageProvider", () => {
-    const { api, logger } = setup();
+  it("classifies a trustedSenderIds sender as trusted without making them an owner", () => {
+    // The other half of the split: trust by allowlisted sender id, with no
+    // ownerNumbers entry. `owner=false` is the assertion that separates this
+    // path from the one above — an allowlisted sender gets trusted content
+    // classification, not owner privileges (e.g. the owner-DM exception).
+    const { api, logger } = setup({
+      trustedSenderIds: ["helper-456"],
+    });
 
     api.fire("context_assembled", {
       systemPrompt: "test",
-      messages: [{ role: "user", content: "heartbeat" }],
+      messages: [{ role: "user", content: "hello" }],
       messageCount: 1,
     }, {
       agentId: "main",
       sessionKey: "agent:main:discord:channel:123",
       messageProvider: "discord",
-      sourceProvider: "heartbeat",
+      senderId: "helper-456",
     });
 
     const trustLine = logger.logs.find(l => l.includes("CLASSIFY_INITIAL_TRUST:"));
     expect(trustLine).toBeDefined();
-    expect(trustLine).toContain("provider=discord");
-    expect(trustLine).toContain("sourceProvider=heartbeat");
-    expect(trustLine).toContain("effectiveProvider=heartbeat");
+    expect(trustLine).toContain("CLASSIFY_INITIAL_TRUST: trusted");
+    expect(trustLine).toContain("owner=false");
   });
 
   it("allows heartbeat_respond and keeps its output trusted during heartbeat turns", () => {
-    const cleanSessionKey = "agent:main:slack:channel:heartbeat-clean";
-    const taintedSessionKey = "agent:main:slack:channel:heartbeat-tainted";
+    const cleanSessionKey = "agent:main:slack:channel:clean:heartbeat";
+    const taintedSessionKey = "agent:main:slack:channel:tainted:heartbeat";
     const { api, store } = setup();
 
     api.fire("context_assembled", {
@@ -253,7 +216,6 @@ describe("Heartbeat trust classification", () => {
       agentId: "main",
       sessionKey: cleanSessionKey,
       messageProvider: "slack",
-      sourceProvider: "heartbeat",
     });
 
     api.fire("after_tool_call", {
@@ -275,7 +237,6 @@ describe("Heartbeat trust classification", () => {
       agentId: "main",
       sessionKey: taintedSessionKey,
       messageProvider: "slack",
-      sourceProvider: "heartbeat",
     });
     store.getActive(taintedSessionKey)?.recordToolCall("web_fetch", 1);
 

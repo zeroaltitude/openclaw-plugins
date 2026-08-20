@@ -59,7 +59,6 @@ describe("Per-agent policy overrides", () => {
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
       agentId: "main",
       sessionKey: "agent:main:test1",
-      senderIsOwner: true,
     });
 
     // after_llm_call logs proposed tools (no escalation)
@@ -114,7 +113,6 @@ describe("Per-agent policy overrides", () => {
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
       agentId: "tank",
       sessionKey: "agent:tank:test1",
-      senderIsOwner: true,
     });
 
     // after_llm_call logs proposed tools (no escalation)
@@ -182,7 +180,6 @@ describe("Per-agent policy overrides", () => {
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
       agentId: "tank",
       sessionKey: "agent:tank:test2",
-      senderIsOwner: true,
     });
 
     // Tank uses web_search
@@ -243,7 +240,6 @@ describe("Per-agent policy overrides", () => {
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, {
       agentId: "main",
       sessionKey: "agent:main:test2",
-      senderIsOwner: true,
     });
 
     // Main uses web_search

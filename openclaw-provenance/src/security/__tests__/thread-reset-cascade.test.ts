@@ -59,6 +59,9 @@ describe("Session reset scope", () => {
     const api = makeApi(tmpDir);
     const config: SecurityPluginConfig = {
       workspaceDir: tmpDir,
+      // The owner flag on the identity records below is the plugin's own
+      // conclusion from this list, not something a ctx can assert.
+      ownerNumbers: ["owner-123"],
       taintPolicy: {
         trusted: "allow",
         external: "confirm",
@@ -69,18 +72,34 @@ describe("Session reset scope", () => {
     return { logger, api };
   }
 
+  /**
+   * A user turn as mainline shapes it: senderId + messageProvider only.
+   * The group membership these scenarios rely on lives in the identity store
+   * (see seedGroupIdentity) because `groupId` has no route onto the hook ctx.
+   */
   function groupCtx(sessionKey: string) {
     return {
       agentId: "tank",
       sessionKey,
-      senderIsOwner: true,
       senderId: "owner-123",
-      groupId: "c0ag7jag35g",
+      messageProvider: "slack",
     };
+  }
+
+  /** Cache the owner's group identity for a session, as inbound_claim would. */
+  function seedGroupIdentity(sessionKey: string) {
+    seedIdentity(tmpDir, sessionKey, {
+      senderId: "owner-123",
+      senderIsOwner: true,
+      groupId: "c0ag7jag35g",
+      sourceProvider: "slack",
+    });
   }
 
   /** Simulate a full turn that taints a session via web_fetch */
   function simulateTaintedTurn(api: ReturnType<typeof makeApi>, sessionKey: string) {
+    seedGroupIdentity(sessionKey);
+
     // 1. context_assembled — start the session/graph
     api.fire("context_assembled", { systemPrompt: "", messageCount: 1 }, groupCtx(sessionKey));
 

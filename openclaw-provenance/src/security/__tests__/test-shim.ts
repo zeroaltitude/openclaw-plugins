@@ -41,71 +41,31 @@
  *   loop_iteration_*    | no-op (observation-only hooks dropped from
  *                       |  the new architecture)
  *
- * Tests that exercise identity-driven behaviour (senderIsOwner,
- * groupId, sourceProvider, etc.) should call seedIdentity() before
- * firing agent-loop hooks. Pre-migration these came from the agent
- * hookCtx; now they come from the IdentityStore (populated by
- * inbound_claim in production).
+ * ── Identity is never invented from the ctx ──
  *
- * ── Identity auto-seeding is legacy-only. New tests must opt out. ──
+ * `makeApi()` used to auto-seed the IdentityStore from identity fields found
+ * on the fire() ctx, so that pre-migration tests declaring `senderIsOwner`,
+ * `groupId`, `sourceProvider` or `spawnedBy` on a ctx kept passing. That was a
+ * fiction — mainline's `PluginHookAgentContext` carries only `senderId` (and
+ * only for `trigger === "user"`) plus `messageProvider` — and it hid the
+ * plugin's own seed, up to and including letting a test declare itself the
+ * owner. It is gone (openclaw-provenance-iz3).
  *
- * By default `makeApi()` also auto-seeds the IdentityStore from identity
- * fields found on the fire() ctx (see autoSeedFromCtx below). That default
- * exists solely to keep the pre-migration corpus green, and it is a
- * FICTION — see MakeApiOptions.autoSeedIdentity for what it hides. Pass
- * `{ autoSeedIdentity: false }` in any new test.
+ * A ctx now passes through untouched, so the plugin does its own seeding.
+ * Tests that need identity-driven behaviour have two routes:
+ *
+ *   - ownership: configure `ownerNumbers` and put the matching `senderId` on
+ *     the ctx. `before_prompt_build` computes `senderIsOwner` itself — the
+ *     only way production ever derives it.
+ *   - groupId / spawnedBy / sourceProvider: call seedIdentity() (or fire
+ *     `inbound_claim` / `subagent_spawned`), which is where these come from in
+ *     production. No hook ctx carries them.
  */
 
 import { getSharedIdentityStore, type IdentityRecord } from "../identity-store.js";
 
 interface HookHandler {
   (...args: any[]): any;
-}
-
-/**
- * Auto-seed the IdentityStore from a legacy test ctx that carries
- * identity fields directly (senderId, senderIsOwner, etc.). Pre-migration
- * these came from agent hookCtx; tests still construct them that way.
- * Idempotent: subsequent calls upsert the same fields and only flush
- * once per change.
- *
- * Looks at multiple env-var hints and ctx fields to find the workspaceDir.
- * If none is found, falls back to the literal string "unknown" — most
- * tests construct the IdentityStore via registerSecurityHooks(), which
- * sets the workspace via config; this fallback is only for tests that
- * don't go through that path.
- */
-function autoSeedFromCtx(workspaceDir: string, ctx: any): void {
-  if (!ctx || typeof ctx !== "object") return;
-  const sessionKey = ctx.sessionKey;
-  if (typeof sessionKey !== "string" || sessionKey.length === 0) return;
-  // Only seed identity-relevant fields if at least one is present on ctx;
-  // pure agent-hookCtx fires (no identity) shouldn't churn the store.
-  const hasIdentity =
-    ctx.senderId !== undefined ||
-    ctx.senderIsOwner !== undefined ||
-    ctx.senderName !== undefined ||
-    ctx.sourceProvider !== undefined ||
-    ctx.groupId !== undefined ||
-    ctx.spawnedBy !== undefined ||
-    ctx.messageProvider !== undefined;
-  if (!hasIdentity) return;
-  const store = getSharedIdentityStore(workspaceDir);
-  store.upsert({
-    sessionKey,
-    senderId: ctx.senderId !== undefined ? ctx.senderId : null,
-    senderName: ctx.senderName !== undefined ? ctx.senderName : null,
-    senderIsOwner: ctx.senderIsOwner === true,
-    sourceProvider:
-      typeof ctx.sourceProvider === "string"
-        ? ctx.sourceProvider
-        : typeof ctx.messageProvider === "string"
-          ? ctx.messageProvider
-          : undefined,
-    groupId: ctx.groupId !== undefined ? ctx.groupId : null,
-    spawnedBy: ctx.spawnedBy !== undefined ? ctx.spawnedBy : null,
-  });
-  store.flush();
 }
 
 export interface TestApi {
@@ -119,58 +79,68 @@ export interface TestApi {
 
 export interface MakeApiOptions {
   /**
-   * Auto-seed the IdentityStore from identity fields found on the fire()
-   * ctx. Defaults to `true` for backwards compatibility with the
-   * pre-migration test corpus; **new tests should pass `false`.**
+   * Always `false` (the default). Retained so the flag that carried the
+   * migration reads as settled rather than forgotten, and so a test rebased
+   * from before openclaw-provenance-iz3 fails loudly instead of silently
+   * losing its identity setup.
    *
-   * Why it is a fiction: mainline's `PluginHookAgentContext`
-   * (openclaw `src/plugins/hook-types.ts`) carries only `senderId` — and
-   * only for `trigger === "user"`, since
+   * The auto-seed this used to enable invented an IdentityStore record from
+   * identity fields on the fire() ctx. Mainline's `PluginHookAgentContext`
+   * (openclaw `src/plugins/hook-types.ts`) carries only `senderId` — and only
+   * for `trigger === "user"`, since
    * `buildAgentHookContextIdentityFields()` returns `{}` for every other
    * trigger — plus `messageProvider`. It never carries `senderIsOwner`,
-   * `sourceProvider`, `groupId` or `spawnedBy`. Auto-seeding invents an
-   * identity record from fields production never supplies, which hides two
-   * things:
+   * `sourceProvider`, `groupId` or `spawnedBy`. Seeding from those fields hid
+   * three things:
    *
-   *  1. **The production seed never runs.** `before_prompt_build` seeds the
+   *  1. **The production seed never ran.** `before_prompt_build` seeds the
    *     store itself from `ctx.senderId`, computing `senderIsOwner` via
    *     `computeSenderIsOwner()` against configured `ownerNumbers`. It gates
    *     that write on `resolveIdentitySeedReason()`, which returns
    *     `undefined` when the cached record's `senderId` already equals the
-   *     hook's. Because the shim writes exactly such a record before the
-   *     handler runs, the reason resolves to `undefined` and the whole
-   *     ownerNumbers → senderIsOwner → policy chain is skipped. Three
+   *     hook's. Because the shim wrote exactly such a record before the
+   *     handler ran, the reason resolved to `undefined` and the whole
+   *     ownerNumbers → senderIsOwner → policy chain was skipped. Three
    *     production bugs shipped in that chain (manifest configSchema,
    *     pluginConfig forwarding, owner-flag drift) with a green suite.
    *
-   *  2. **`senderIsOwner` becomes test-assertable.** A test can declare
+   *  2. **`senderIsOwner` was test-assertable.** A test could declare
    *     `senderIsOwner: true` on ctx and be treated as owner — a privilege
    *     production can only ever derive from `ownerNumbers`.
    *
-   * It also means the no-identity path is only reachable with a *synthesized*
-   * record (`senderId: null`) rather than with no record at all: any ctx
-   * carrying `messageProvider` — which is nearly every test ctx — trips the
-   * `hasIdentity` check below. Policy outcomes happen to agree today, but a
-   * future fail-closed `if (!identity)` branch would be untestable.
-   *
-   * With `autoSeedIdentity: false` the shim passes ctx through untouched, so
-   * the plugin's own seeding logic runs and both the seeded and the genuinely
-   * absent identity paths are reachable. See
-   * `production-identity-seed.test.ts`.
+   *  3. **The no-identity path was unreachable.** Any ctx carrying
+   *     `messageProvider` — nearly every test ctx — got a *synthesized*
+   *     record (`senderId: null`) instead of no record at all, so a
+   *     fail-closed `if (!identity)` branch could not be tested.
    */
-  autoSeedIdentity?: boolean;
+  autoSeedIdentity?: false;
 }
 
 /**
- * Construct a test API with the legacy-hook compat shim. Tests should
- * pass the workspaceDir they will pass to registerSecurityHooks() so
- * the shim can auto-seed identity into the same IdentityStore.
+ * Construct a test API with the legacy-hook compat shim.
  */
 export function makeApi(
-  workspaceDir: string = "__test_default__",
+  /**
+   * Unused since the identity auto-seed was removed — the shim no longer
+   * touches any store. Kept so every call site still reads
+   * `makeApi(tmpDir)` next to `registerSecurityHooks(api, logger,
+   * { workspaceDir: tmpDir })` and `seedIdentity(tmpDir, …)`, which is the
+   * pairing that matters; dropping it would churn every call site to delete a
+   * harmless argument.
+   */
+  _workspaceDir: string = "__test_default__",
   opts: MakeApiOptions = {},
 ): TestApi {
-  const autoSeedIdentity = opts.autoSeedIdentity !== false;
+  // The type says `false`, but vitest does not typecheck. Fail loudly rather
+  // than silently ignoring a rebased test's identity setup.
+  if ((opts as { autoSeedIdentity?: unknown }).autoSeedIdentity === true) {
+    throw new Error(
+      "makeApi({ autoSeedIdentity: true }) was removed (openclaw-provenance-iz3): " +
+        "the shim no longer invents identity records from the fire() ctx. " +
+        "Configure ownerNumbers + ctx.senderId for ownership, or call " +
+        "seedIdentity() for groupId/spawnedBy/sourceProvider.",
+    );
+  }
   const hooks = new Map<string, HookHandler[]>();
   const commands = new Map<string, { name: string; handler: (ctx: any) => any }>();
   function rawFire(name: string, event: any, ctx: any): any {
@@ -188,16 +158,9 @@ export function makeApi(
       hooks.get(name)!.push(handler);
     },
     fire(name: string, event: any, ctx: any): any {
-      // Auto-seed identity from any ctx that carries identity fields.
-      // Pre-migration tests constructed ctx with senderIsOwner/groupId/
-      // etc. directly; in production those flow from inbound_claim into
-      // IdentityStore. Doing it here keeps tests un-touched while making
-      // the new lookup path work.
-      //
-      // Opt-out (autoSeedIdentity: false) leaves ctx alone so the plugin's
-      // own before_prompt_build seed runs — the production path. See
-      // MakeApiOptions.autoSeedIdentity.
-      if (autoSeedIdentity) autoSeedFromCtx(workspaceDir, ctx);
+      // ctx passes through untouched: identity comes from the plugin's own
+      // before_prompt_build seed, from inbound_claim/subagent_spawned, or from
+      // seedIdentity() — never from fields a test puts on the ctx.
 
       // Pass through new hook names unchanged.
       if (
