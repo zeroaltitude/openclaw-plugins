@@ -54,9 +54,52 @@ bd close <id>         # Complete work
 
 ```bash
 npm install
-npm run build   # tsc
-npm test        # vitest run
+npm run validate        # all three gates below, in order — use this before pushing
 ```
+
+The individual gates:
+
+```bash
+npm run build           # tsc — emits dist/, authority on what the shipped build must satisfy
+npm run typecheck       # tsc --noEmit over src, EXCLUDING __tests__ (same scope as build)
+npm run typecheck:tests # tsc -p tsconfig.tests.json — INCLUDES __tests__
+npm test                # vitest run
+```
+
+**Why there are two typecheck configs.** `tsconfig.json` excludes
+`src/**/__tests__`, and vitest transpiles without typechecking. Between those
+two facts, no test file in this repo was typechecked at all until
+`tsconfig.tests.json` was added — 32 real type errors had accumulated
+invisibly (`openclaw-provenance-v3q`). `typecheck:tests` is the gate that keeps
+that hole closed; run it whenever you touch a test's config literals or the
+exported config types.
+
+`tsconfig.tests.json` deliberately overrides `module`/`moduleResolution` to
+ESM. The build emits CommonJS (`module: Node16` with no `"type": "module"` in
+`package.json`), but vitest executes test files as ESM, so `import.meta.url` is
+legal in a test and illegal in the build. Each config models the environment
+its files actually run in; neither replaces the other.
+
+### Policy mode types: `PolicyMode` vs `LegacyPolicyMode`
+
+`policy-engine.ts` exports both, and the distinction is load-bearing:
+
+- **`LegacyPolicyMode`** = `"allow" | "restrict" | "confirm"` — the **input**
+  contract. Every surface a user can write config into is typed with this,
+  because `normalizePolicyMode()` still accepts the legacy `"confirm"` alias
+  (removed as a distinct mode 2026-05-27, mapped to `"restrict"` ever since).
+  That means `SecurityPluginConfig["taintPolicy"]`,
+  `AgentPolicyOverride["taintPolicy"]`, `ToolOverride`, and
+  `buildPolicyConfig()`'s first parameter.
+- **`PolicyMode`** = `"allow" | "restrict"` — everything **downstream** of
+  normalization, including the resolved `PolicyConfig`.
+
+Rule of thumb: if a value could have come from an operator's config file, it is
+`LegacyPolicyMode`. Once it has been through `normalizePolicyMode()`, it is
+`PolicyMode`. Typing an input surface as `PolicyMode` is the bug that
+`openclaw-provenance-v3q` fixed — it rejected input the implementation happily
+accepts, and no one noticed because the only callers passing `"confirm"` were
+tests, which were never typechecked.
 
 ## Architecture Overview
 

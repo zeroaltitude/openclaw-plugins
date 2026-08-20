@@ -29,6 +29,7 @@ import {
   buildPolicyConfig,
   evaluateWithApprovals,
   getToolMode,
+  type LegacyPolicyMode,
   type PolicyConfig,
   type PolicyMode,
   type ToolOverride,
@@ -115,7 +116,8 @@ interface AgentContext {
 
 /** Per-agent overrides for taint policy and tool classifications */
 export interface AgentPolicyOverride {
-  taintPolicy?: Partial<Record<string, PolicyMode>>;
+  /** Accepts legacy "confirm" on input; normalized to "restrict" during merge. */
+  taintPolicy?: Partial<Record<string, LegacyPolicyMode>>;
   toolOverrides?: Record<string, ToolOverride>;
   toolOutputTaints?: Record<string, TrustLevel>;
   /** Per-agent URI trust pattern overrides */
@@ -128,7 +130,8 @@ export interface SecurityPluginConfig {
   toolOutputTaints?: Record<string, TrustLevel>;
   maxCompletedGraphs?: number;
   verbose?: boolean;
-  taintPolicy?: Partial<Record<string, PolicyMode>>;
+  /** Accepts legacy "confirm" on input; normalized to "restrict" during merge. */
+  taintPolicy?: Partial<Record<string, LegacyPolicyMode>>;
   maxIterations?: number;
   workspaceDir?: string;
   /** Additional sender IDs classified as trusted */
@@ -583,8 +586,8 @@ export function registerSecurityHooks(
 
   for (const [agentId, overrides] of Object.entries(agentOverrides)) {
     // Merge taint policy: agent overrides on top of defaults
-    const mergedTaintPolicy = {
-      ...(config?.taintPolicy as Partial<Record<string, PolicyMode>> ?? {}),
+    const mergedTaintPolicy: Partial<Record<string, LegacyPolicyMode>> = {
+      ...(config?.taintPolicy ?? {}),
       ...(overrides.taintPolicy ?? {}),
     };
     // Merge tool overrides: agent overrides on top of defaults (include composite defaults)
@@ -595,7 +598,7 @@ export function registerSecurityHooks(
     };
     agentPolicyConfigs.set(
       agentId,
-      buildPolicyConfig(mergedTaintPolicy as any, mergedToolOverrides, config?.maxIterations, logger),
+      buildPolicyConfig(mergedTaintPolicy, mergedToolOverrides, config?.maxIterations, logger),
     );
 
     // Merge tool output taints: agent overrides on top of defaults (include composite).

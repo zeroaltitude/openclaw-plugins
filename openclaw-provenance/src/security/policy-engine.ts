@@ -45,8 +45,14 @@ export type { TaintPolicyConfig };
 export type PolicyMode = "allow" | "restrict";
 const MODE_ORDER: PolicyMode[] = ["allow", "restrict"];
 
-/** Legacy mode string that may still appear in user config / persisted data. */
-type LegacyPolicyMode = PolicyMode | "confirm";
+/**
+ * Legacy mode string that may still appear in user config / persisted data.
+ *
+ * Exported because it is part of the *input* contract, not an internal detail:
+ * every config surface that a user can write "confirm" into is typed with this,
+ * while everything downstream of normalizePolicyMode() is typed PolicyMode.
+ */
+export type LegacyPolicyMode = PolicyMode | "confirm";
 
 /**
  * Normalize a possibly-legacy mode string to a canonical PolicyMode.
@@ -367,7 +373,7 @@ export const DEFAULT_DANGEROUS_TOOLS = DEFAULT_TOOL_EXECUTION_POLICY;
  * Build a complete PolicyConfig from user-provided config, merging with defaults.
  */
 export function buildPolicyConfig(
-  taintPolicy?: Partial<Record<string, PolicyMode>>,
+  taintPolicy?: Partial<Record<string, LegacyPolicyMode>>,
   toolOverrides?: Record<string, ToolOverride>,
   maxIterations?: number,
   logger?: {
@@ -375,7 +381,7 @@ export function buildPolicyConfig(
   },
 ): PolicyConfig {
   // Handle legacy 6-level configs
-  let resolvedPolicy: Partial<Record<string, PolicyMode>> = (taintPolicy ?? {}) as Partial<Record<string, PolicyMode>>;
+  let resolvedPolicy: Partial<Record<string, LegacyPolicyMode>> = taintPolicy ?? {};
   if (taintPolicy && hasLegacyKeys(taintPolicy as Record<string, unknown>)) {
     const { mapped, warnings } = mapLegacyTaintPolicy(
       taintPolicy as Record<string, string>,
@@ -383,7 +389,7 @@ export function buildPolicyConfig(
     for (const w of warnings) {
       logger?.warn(`[provenance] ${w}`);
     }
-    resolvedPolicy = mapped as Partial<Record<string, PolicyMode>>;
+    resolvedPolicy = mapped as Partial<Record<string, LegacyPolicyMode>>;
   }
 
   // Normalize any legacy "confirm" in the resolved taint policy → "restrict".

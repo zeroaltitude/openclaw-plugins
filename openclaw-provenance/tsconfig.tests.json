@@ -1,0 +1,24 @@
+// Typecheck-only config that INCLUDES src/**/__tests__.
+//
+// Why this file exists: tsconfig.json excludes "src/**/__tests__", and vitest
+// transpiles without typechecking. Between the two, no test file in this repo
+// was ever typechecked — 32 real type errors had accumulated invisibly
+// (openclaw-provenance-v3q). `npm run typecheck:tests` closes that hole.
+//
+// Why the module settings differ from tsconfig.json: the build emits CommonJS
+// (module: Node16 + no "type": "module" in package.json), but vitest executes
+// test files as ESM. Modeling the build's CJS semantics here would reject
+// `import.meta.url`, which is legal and correct in the environment the tests
+// actually run in. So this config describes vitest's module semantics, while
+// tsconfig.json remains the authority on what the shipped build must satisfy.
+// Both gates run; neither replaces the other.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  },
+  "include": ["src"],
+  "exclude": []
+}

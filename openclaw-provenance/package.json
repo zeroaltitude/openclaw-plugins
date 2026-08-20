@@ -10,8 +10,11 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json",
     "dev": "tsc --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "validate": "npm run typecheck && npm run typecheck:tests && npm run test"
   },
   "devDependencies": {
     "@types/node": "^25.2.1",
