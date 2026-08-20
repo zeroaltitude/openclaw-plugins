@@ -1,8 +1,35 @@
 /**
- * Owner-verified approval state management.
+ * Tool-approval state management.
  *
- * Tracks which tools have been approved by the owner for a given session.
- * Approvals are gated by verified owner identity (senderIsOwner), not by codes.
+ * Tracks which tools have been approved for a given session, so the policy
+ * engine can let an otherwise-blocked tool through (`policy-engine.ts`
+ * `evaluateWithApprovals()`, plus the execution-layer re-check in
+ * `index.ts`'s `before_tool_call`).
+ *
+ * ── Where the authorization actually lives ──
+ *
+ * This store performs NO authorization of its own: every `approve()` call it
+ * receives is honoured unconditionally. The gate sits one layer up, at the
+ * only mutation site — the `/approve-exec` command registered in
+ * `security/index.ts` with `requireAuth: true`. Core enforces that flag in
+ * openclaw `src/plugins/plugin-command-execution.ts`, refusing the
+ * invocation unless `isAuthorizedSender` is true.
+ *
+ * `isAuthorizedSender` is NOT this plugin's `senderIsOwner`. Core resolves it
+ * in `src/auto-reply/command-auth.ts`: owner status is the default basis, but
+ * a configured `commandsAllowFrom` allowlist (or wildcard), or native-CLI
+ * authorization, also satisfies it. On such a deployment a non-owner sender
+ * can lift provenance tool blocks. An earlier version of this comment claimed
+ * approvals were "gated by verified owner identity (senderIsOwner)" — no such
+ * gate exists here or anywhere in this plugin; `senderIsOwner` is only ever
+ * read for trust classification (`classifyInitialTrust`, `isOwnerDm`), never
+ * for approvals.
+ *
+ * What the approval surface is *not* reachable from is the agent loop. Plugin
+ * commands dispatch from an inbound message body starting with `/`, matched
+ * before the loop runs, so a prompt-injected model cannot call
+ * `/approve-exec` to unblock itself. That property — not an owner check in
+ * this file — is what keeps tainted content away from approvals.
  *
  * Approvals can be:
  * - Session-scoped (default): cleared when the session is reset

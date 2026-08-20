@@ -99,3 +99,34 @@ follow the same shape:
   for driving `registerSecurityHooks()` through its real hook pipeline in
   tests, including a legacy-hook-name translation shim (see the file's
   header comment) for tests written before the mainline hook migration.
+
+### Test-shim identity auto-seeding — pass `{ autoSeedIdentity: false }`
+
+`makeApi()` auto-seeds the IdentityStore from identity fields on the fire()
+ctx. It defaults **on** only to keep the pre-migration corpus green, and it
+does not model production: mainline's `PluginHookAgentContext` carries just
+`senderId` (and only when `trigger === "user"`) plus `messageProvider` — never
+`senderIsOwner`, `sourceProvider`, `groupId` or `spawnedBy`.
+
+Leaving it on hides the real path in two ways. It pre-writes a record whose
+`senderId` matches the hook's, so `resolveIdentitySeedReason()` returns
+`undefined` and `before_prompt_build`'s own seed — the `computeSenderIsOwner()`
+/ `ownerNumbers` chain — never runs. And it lets a test claim ownership by
+setting `senderIsOwner: true` on ctx, which production can only ever derive
+from configured `ownerNumbers`. Three shipped bugs in that chain (`09d6cb7`,
+`72700d8`, `4b8ce31`) had a green suite throughout.
+
+**New tests must pass `makeApi(dir, { autoSeedIdentity: false })`** and set only
+`senderId` / `messageProvider` on ctx, so the plugin does its own seeding.
+`production-identity-seed.test.ts` is the reference; 5 of its 8 cases fail if
+auto-seed is switched back on. Migrating the legacy files to faithful mode is
+tracked as `openclaw-provenance-1yv` follow-up work.
+
+### Approvals are gated at the command layer, not in `ApprovalStore`
+
+`ApprovalStore` honours every `approve()` unconditionally. The gate is
+`requireAuth: true` on the `/approve-exec` registration, enforced by core in
+`src/plugins/plugin-command-execution.ts` against `isAuthorizedSender` — which
+is owner-based *by default* but also satisfied by a configured
+`commandsAllowFrom` allowlist, so it is not equivalent to `senderIsOwner`.
+Don't reintroduce claims of a `senderIsOwner` approval gate; none exists.
