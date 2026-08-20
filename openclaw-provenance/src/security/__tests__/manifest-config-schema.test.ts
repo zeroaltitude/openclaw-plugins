@@ -24,15 +24,20 @@ import { join } from "node:path";
 const REPO_ROOT = new URL("../../../", import.meta.url).pathname;
 
 /**
- * Members of `SecurityPluginConfig` that the code reads but the manifest does
- * not declare. Every entry is a latent startup-crash landmine of exactly the
- * `ownerNumbers` kind: setting it hard-fails the gateway.
+ * Members of `SecurityPluginConfig` that the manifest deliberately does not
+ * declare, because they are not operator-settable. Verified against the single
+ * construction site in `src/index.ts` rather than assumed:
  *
- * Pinned rather than fixed on purpose — writing a schema for each needs its
- * real semantics (is `workspaceDir` operator-settable or host-injected?), and a
- * wrong `type` would trade a latent crash for an immediate one. Tracked in
- * openclaw-provenance-yct. The value of pinning is that this set may only
- * SHRINK: a newly-added undeclared key fails this test.
+ * - `workspaceDir`   — host-injected from `api.config.agents.*.workspace`.
+ * - `verbose`        — hardcoded `true` at the call site.
+ * - `toolTrustOverrides`, `maxCompletedGraphs`, `execCommandRules` — not
+ *   forwarded at all, so they are dead config surface. Declaring them in the
+ *   manifest would advertise settings that silently do nothing, which is worse
+ *   than omitting them; wiring them up is a separate decision.
+ *   (`execCommandRules` still gets its 16 built-in defaults internally.)
+ *
+ * Anything NOT in this set must be declared, or setting it hard-fails gateway
+ * startup the way `ownerNumbers` did. This set may only shrink.
  */
 const KNOWN_UNDECLARED = new Set([
   "toolTrustOverrides",
@@ -41,6 +46,21 @@ const KNOWN_UNDECLARED = new Set([
   "workspaceDir",
   "execCommandRules",
 ]);
+
+/**
+ * Manifest-declared keys that `register()` does not forward, so they are
+ * accepted and then ignored.
+ *
+ * `developerMode` appears zero times in the plugin source outside tests and is
+ * not a member of `SecurityPluginConfig`, yet it is declared and operators have
+ * it set. It cannot simply be deleted from the manifest: `additionalProperties`
+ * is false, so undeclaring a key that live configs already set would hard-fail
+ * gateway startup — the same failure this file exists to prevent. Removing it
+ * needs a deprecation path (accept-and-warn, then drop), and wiring it up needs
+ * its intended semantics, which no longer exist anywhere in the code.
+ * Tracked in openclaw-provenance-yct.
+ */
+const KNOWN_UNFORWARDED = new Set(["developerMode"]);
 
 function schemaProperties(): Set<string> {
   const manifest = JSON.parse(
@@ -115,6 +135,35 @@ describe("manifest configSchema", () => {
             `startup and provokes a doctor --fix that strips the whole config block.\n` +
             `Declare them in the manifest, or add to KNOWN_UNDECLARED with a reason:\n` +
             unexpected.map((m) => `  ${m}`).join("\n")
+        : "",
+    ).toEqual([]);
+  });
+
+  /**
+   * The complementary invariant, and the one that actually bit: `register()` in
+   * src/index.ts forwards config to `registerSecurityHooks` by explicit
+   * key-by-key enumeration. A key can therefore be valid in the manifest, present
+   * on disk, accepted at startup — and still never reach the code that reads it,
+   * which is precisely what happened to `ownerNumbers`. Declaring a setting and
+   * dropping it on the floor is worse than rejecting it, because it fails silently.
+   */
+  it("forwards every manifest-declared key from api.pluginConfig", () => {
+    const src = readFileSync(join(REPO_ROOT, "src/index.ts"), "utf8");
+    const start = src.indexOf("registerSecurityHooks(");
+    expect(start, "register() must call registerSecurityHooks").toBeGreaterThan(-1);
+    const callSite = src.slice(start);
+
+    const notForwarded = [...schemaProperties()].filter(
+      (key) =>
+        !KNOWN_UNFORWARDED.has(key) && !new RegExp(`\\bcfg\\s*\\.\\s*${key}\\b`).test(callSite),
+    );
+
+    expect(
+      notForwarded,
+      notForwarded.length
+        ? `Declared in openclaw.plugin.json but never read off cfg in src/index.ts, ` +
+            `so the setting is accepted and then silently ignored:\n` +
+            notForwarded.map((k) => `  ${k}`).join("\n")
         : "",
     ).toEqual([]);
   });

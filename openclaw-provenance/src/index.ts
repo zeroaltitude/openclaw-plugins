@@ -35,6 +35,7 @@ export function register(api: OpenClawPluginApi) {
     uriExtractors: (cfg.uriExtractors as any) ?? undefined,
     uriTrust: (cfg.uriTrust as any) ?? undefined,
     missingIdentityTrust: (cfg.missingIdentityTrust as TrustLevel) ?? undefined,
+    ownerNumbers: (cfg.ownerNumbers as string[]) ?? undefined,
     workspaceDir:
       (api.config as any)?.agents?.defaults?.workspace ??
       (api.config as any)?.agents?.workspace ??
