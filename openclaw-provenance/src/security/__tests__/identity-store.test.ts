@@ -283,3 +283,54 @@ describe("deriveGroupId", () => {
     ).toBe("1234");
   });
 });
+
+/**
+ * openclaw-ax8s. Identity used to be sourced solely from inbound_claim, which
+ * is a TARGETED CLAIMING hook that provenance never receives (measured: zero
+ * such log lines ever, sender=unknown on 16996 of 16996 turns). The effect was
+ * that trustedSenderIds could never match and every turn fell through to
+ * missingIdentityTrust — fail-open on a security plugin.
+ *
+ * before_prompt_build now seeds the store from the agent hook context. These
+ * pin the semantics that path relies on.
+ */
+describe("computeSenderIsOwner + upsert semantics for hookCtx-seeded identity", () => {
+  it("marks a configured owner id as owner", () => {
+    expect(computeSenderIsOwner("159471966640799744", ["159471966640799744"])).toBe(true);
+  });
+
+  it("does NOT mark an unlisted sender as owner", () => {
+    expect(computeSenderIsOwner("999", ["159471966640799744"])).toBe(false);
+  });
+
+  it("returns false — never throws — when the owner list is empty", () => {
+    // This is today's live state (ownerNumbers unset), so it must degrade
+    // quietly rather than break turns.
+    expect(computeSenderIsOwner("159471966640799744", [])).toBe(false);
+  });
+
+  it("returns false for a missing senderId", () => {
+    expect(computeSenderIsOwner(null, ["159471966640799744"])).toBe(false);
+    expect(computeSenderIsOwner(undefined, ["159471966640799744"])).toBe(false);
+  });
+
+  it("upsert MERGES rather than clobbers, so a later inbound_claim still wins", () => {
+    // The hookCtx seed sets senderId/senderIsOwner only. If core ever does
+    // deliver inbound_claim to us it carries richer fields (senderName,
+    // groupId); merging is what lets both coexist instead of one erasing the
+    // other.
+    const dir = mkdtempSync(join(tmpdir(), "prov-identity-merge-"));
+    try {
+    const store = new IdentityStore(dir);
+    store.upsert({ sessionKey: "s1", senderId: "abc", senderIsOwner: true });
+    store.upsert({ sessionKey: "s1", senderName: "Eddie", groupId: "g1" });
+    const rec = store.get("s1");
+    expect(rec?.senderId).toBe("abc");
+    expect(rec?.senderIsOwner).toBe(true);
+    expect(rec?.senderName).toBe("Eddie");
+    expect(rec?.groupId).toBe("g1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

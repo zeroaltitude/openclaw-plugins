@@ -14,7 +14,11 @@ import {
 } from "./provenance-graph.js";
 import type { TurnProvenanceGraph } from "./provenance-graph.js";
 import { getSharedWatermarkStore, WatermarkStore } from "./watermark-store.js";
-import { getSharedIdentityStore, type IdentityStore } from "./identity-store.js";
+import {
+  computeSenderIsOwner,
+  getSharedIdentityStore,
+  type IdentityStore,
+} from "./identity-store.js";
 import {
   createInboundClaimHandler,
   createSubagentSpawnedHandler,
@@ -547,8 +551,6 @@ export function registerSecurityHooks(
   // continuity across gateway restarts.
   const identityStore = getSharedIdentityStore(workspaceDir);
   const ownerNumbers = (config?.ownerNumbers ?? []) as readonly string[];
-  // openclaw-ax8s: one IDENTITY_PROBE line per session (diagnostic only).
-  const identityProbeLogged = new Set<string>();
   logger.info(
     `[provenance] Identity store: ${workspaceDir}/.provenance/identity.json | ` +
       `ownerNumbers configured: ${ownerNumbers.length}`,
@@ -1554,30 +1556,45 @@ export function registerSecurityHooks(
     profiled("before_prompt_build", (event: any, ctx: AgentContext) => {
       const sessionKey = ctx.sessionKey ?? "unknown";
       const identity = identityStore.get(sessionKey);
-      // DIAGNOSTIC ONLY (openclaw-ax8s) — no behaviour change.
+      // Populate the identity store from the agent hook context (openclaw-ax8s).
       //
-      // The comment above asserts mainline "does not populate" identity on the
-      // agent hookCtx, which is why identity is sourced from inbound_claim.
-      // But inbound_claim is a TARGETED CLAIMING hook (only ever invoked as
-      // runInboundClaimForPluginOutcome against the plugin that owns a
-      // conversation binding), so provenance never receives it: zero
-      // "inbound_claim: cached identity" lines exist in the entire journal,
-      // and every turn therefore classifies via missingIdentityTrust rather
-      // than by verifying the sender. trustedSenderIds is consequently inert.
+      // Identity used to be sourced solely from the inbound_claim handler, but
+      // inbound_claim is a TARGETED CLAIMING hook: core only ever invokes it as
+      // runInboundClaimForPluginOutcome(pluginOwnedBinding.pluginId, ...) against
+      // the single plugin that owns a conversation binding. Provenance owns no
+      // binding, so it never received it — measured as zero "inbound_claim:
+      // cached identity" lines in the entire journal and sender=unknown on
+      // 16996 of 16996 turns. Consequence: trustedSenderIds could never match
+      // and every turn fell through to missingIdentityTrust, i.e. fail-open.
       //
-      // Meanwhile PluginHookAgentContext DOES declare senderId, and core
-      // populates it in several places. The comment and the type disagree, so
-      // log what actually arrives here before relying on either. One line per
-      // session to keep it cheap.
-      if (!identityProbeLogged.has(sessionKey)) {
-        identityProbeLogged.add(sessionKey);
-        const probeSenderId = (ctx as { senderId?: unknown }).senderId;
+      // before_prompt_build DOES fire for us on every turn, and core populates
+      // senderId on its context for genuine user turns
+      // (openclaw src/plugins/hook-agent-context.ts:135-138 strips identity for
+      // any trigger !== "user", by design). So this is the right seam.
+      //
+      // senderIsOwner is computed here rather than read from the context: the
+      // context type does not carry it, and ownership is our own policy
+      // question against our own configured list.
+      //
+      // inbound_claim remains subscribed and unchanged. If a future core
+      // version does deliver it to us, it still wins — it carries richer
+      // fields (senderName, groupId) and upsert() merges rather than clobbers.
+      const hookSenderId =
+        typeof (ctx as { senderId?: unknown }).senderId === "string" &&
+        (ctx as { senderId: string }).senderId.length > 0
+          ? (ctx as { senderId: string }).senderId
+          : undefined;
+      if (hookSenderId && identity?.senderId !== hookSenderId) {
+        identityStore.upsert({
+          sessionKey,
+          senderId: hookSenderId,
+          senderIsOwner: computeSenderIsOwner(hookSenderId, ownerNumbers),
+          ...(ctx.messageProvider ? { sourceProvider: ctx.messageProvider } : {}),
+        });
         logger?.info(
-          `[provenance] IDENTITY_PROBE session=${shortKey(sessionKey)} ` +
-            `hookCtx.senderId=${typeof probeSenderId === "string" && probeSenderId.length > 0 ? probeSenderId : "ABSENT"} ` +
-            `identityStore=${identity ? "present" : "EMPTY"} ` +
-            `wouldMatchTrustedSenderIds=${typeof probeSenderId === "string" && trustedSenderIds.has(probeSenderId)} ` +
-            `wouldMatchOwnerNumbers=${typeof probeSenderId === "string" && ownerNumbers.includes(probeSenderId)} ` +
+          `[provenance] identity from hookCtx: session=${shortKey(sessionKey)} ` +
+            `sender=${hookSenderId} owner=${computeSenderIsOwner(hookSenderId, ownerNumbers)} ` +
+            `trustedSender=${trustedSenderIds.has(hookSenderId)} ` +
             `provider=${ctx.messageProvider ?? "none"}`,
         );
       }
