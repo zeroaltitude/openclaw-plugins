@@ -370,20 +370,45 @@ describe("AttemptRegistry.refreshDynamicTools", () => {
       query: {
         setMcpServers: async (servers: Record<string, unknown>) => {
           calls.push(servers);
-          return { added: ["openclaw"], removed: ["openclaw"] };
+          return { added: ["remote"], removed: ["stale"] };
         },
       },
     });
     registry.set(entry.threadId, entry);
+    const remote = { type: "http", url: "https://example.invalid/mcp" };
 
     const result = await registry.refreshDynamicTools(entry.threadId, {
-      servers: { openclaw: { type: "sdk", name: "openclaw" } },
+      servers: { remote },
       dynamicTools: TOOLS,
     });
 
-    expect(result).toEqual({ added: ["openclaw"], removed: ["openclaw"] });
+    expect(result).toEqual({ added: ["remote"], removed: ["stale"] });
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ openclaw: { type: "sdk" } });
+    expect(calls[0]).toEqual({ remote });
+  });
+
+  it("returns null (rotate) for an sdk server when the attempt has no dynamic-tools handle", async () => {
+    // openclaw-d42b. This used to forward the shape-only `{ type: "sdk", name }`
+    // entry verbatim, which made the SDK disconnect the in-process transport
+    // while the CLI kept advertising and routing `mcp__openclaw__*` — so every
+    // later tool call failed `SDK MCP server not found: openclaw` for the rest
+    // of the attempt's life. With no handle there is no instance to hand back,
+    // so the only safe answer is "rotate instead".
+    //
+    // The live-handle path (splice the instance, withdraw/reinstate to force a
+    // re-list) is covered end-to-end in tests/dynamic-tools-refresh.test.ts.
+    const registry = new AttemptRegistry(makeLogger());
+    const entry = makeEntry("thread-no-handle");
+    registry.set(entry.threadId, entry);
+
+    expect(
+      await registry.refreshDynamicTools(entry.threadId, {
+        servers: { openclaw: { type: "sdk", name: "openclaw" } },
+        dynamicTools: TOOLS,
+      }),
+    ).toBeNull();
+    // Nothing was applied, so the fingerprint must not have advanced.
+    expect(entry.fingerprintInput.dynamicTools).toEqual(BASE_FINGERPRINT_INPUT.dynamicTools);
   });
 
   it("RE-FINGERPRINTS the entry, so the next turn does not discard it", async () => {
