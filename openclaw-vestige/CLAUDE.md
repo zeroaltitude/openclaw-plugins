@@ -67,3 +67,20 @@ _Add a brief overview of your project architecture_
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_
+
+## Continuous Integration
+
+`.github/workflows/vestige-bridge-tests.yml` (repo root) runs `server/tests` under pytest
+on Python 3.12 — matching `docker/Dockerfile.bridge`, which is `FROM ubuntu:24.04` and
+installs the distro `python3`. It fires on every PR regardless of base branch, and on
+pushes to `main` that touch `openclaw-vestige/server/**`.
+
+The job asserts a **minimum executed-test count** and prints it to the log, because a
+pytest run that collects nothing exits 0 and looks green. When reviewing a run, read the
+number. See the root `CLAUDE.md` → *Repository CI* for the full rationale and for what in
+this monorepo is still **not** covered.
+
+The TypeScript plugin (`openclaw-plugin/`) is **not** in CI — and as of 2026-08-26 its
+`package.json` has no `test` script at all, so there is nothing to run. Neither is the Rust
+engine, which lives in `~/projects/vestige` with its own separate blind spot
+(`openclaw-vestige-9ii`).
