@@ -1,11 +1,14 @@
 """Basic sanity tests for Pydantic models."""
 
 from app.models import (
+    CodebaseAction,
     CodebaseRequest,
     DemoteRequest,
     HealthResponse,
     IngestRequest,
+    IntentionAction,
     IntentionRequest,
+    IntentionTrigger,
     MemoryAction,
     MemoryRequest,
     PromoteRequest,
@@ -53,13 +56,26 @@ def test_promote_demote():
 
 
 def test_codebase_request():
-    r = CodebaseRequest(content="Use dependency injection", pattern_type="decision")
-    assert r.pattern_type == "decision"
+    """Mirrors the engine's action-dispatched codebase tool (openclaw-vestige-7wh)."""
+    r = CodebaseRequest(
+        action=CodebaseAction.remember_decision,
+        decision="Use dependency injection",
+        rationale="testability",
+    )
+    assert r.action == CodebaseAction.remember_decision
+    assert r.rationale == "testability"
 
 
 def test_intention_request():
-    r = IntentionRequest(content="remind me to review", trigger="next session")
-    assert r.trigger == "next session"
+    """`trigger` is an object and `action` is required (openclaw-vestige-7wh)."""
+    r = IntentionRequest(
+        action=IntentionAction.set,
+        description="remind me to review",
+        trigger=IntentionTrigger(type="time", in_minutes=30),
+    )
+    assert r.action == IntentionAction.set
+    assert r.trigger is not None
+    assert r.trigger.in_minutes == 30
 
 
 def test_vestige_response():

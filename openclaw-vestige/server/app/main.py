@@ -33,6 +33,7 @@ from .models import (
     SearchRequest,
     SessionContextRequest,
     SmartIngestRequest,
+    TRIGGER_FIELD_TO_ENGINE,
     VestigeResponse,
 )
 
@@ -87,23 +88,47 @@ app.add_middleware(BearerAuthMiddleware)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _agent_context(agent_id: str | None, existing_context: str | None = None) -> dict[str, Any]:
-    """Build optional agent context dict.
+def _agent_args(agent_id: str | None) -> dict[str, Any]:
+    """Agent-attribution arguments safe to add to any tool call.
 
-    Instead of overwriting the user's context with agent_id, we include
-    agent_id as a separate field and preserve the original context.
+    Only ``agent_id`` is sent. No engine tool declares an ``agent_id`` field and
+    none of the engine's argument structs use ``deny_unknown_fields``, so this is
+    inert at the engine today — it is carried for attribution in MCP-level request
+    logs and for forward compatibility.
+
+    This helper deliberately does **not** emit a ``context`` key. It used to, as a
+    string, which was a silent no-op for the tools that have no ``context`` field
+    and an outright failure for the ones whose ``context`` is an object:
+    ``/intention`` returned ``invalid type: string "agent:tank", expected struct
+    ContextSpec``, and ``/predict`` had its structured context overwritten
+    (openclaw-vestige-7wh). Object-context tools use :func:`_with_agent_topic`;
+    tools that accept free-form provenance use :func:`_provenance` as ``source``.
     """
-    result: dict[str, Any] = {}
-    if existing_context:
-        result["context"] = existing_context
+    return {"agent_id": agent_id} if agent_id else {}
+
+
+def _provenance(agent_id: str | None, existing_context: str | None = None) -> str | None:
+    """Collapse agent identity and a caller-supplied context into one string.
+
+    Suitable for the engine's free-form ``source`` field (smart_ingest).
+    """
+    parts = [p for p in (f"agent:{agent_id}" if agent_id else None, existing_context) if p]
+    return " | ".join(parts) if parts else None
+
+
+def _with_agent_topic(
+    ctx: dict[str, Any], agent_id: str | None, key: str = "topics"
+) -> dict[str, Any]:
+    """Record agent identity inside an *object*-typed engine context.
+
+    The engine's context structs carry no identity field, so agent identity rides
+    along as the first topic — the same approach /session_context already used.
+    """
     if agent_id:
-        result["agent_id"] = agent_id
-        # If there's already a context, prepend agent identity
-        if "context" in result:
-            result["context"] = f"agent:{agent_id} | {result['context']}"
-        else:
-            result["context"] = f"agent:{agent_id}"
-    return result
+        topics = ctx.setdefault(key, [])
+        if isinstance(topics, list):
+            topics.insert(0, f"agent:{agent_id}")
+    return ctx
 
 
 # ── Body truncation ──────────────────────────────────────────────────────────
@@ -197,14 +222,17 @@ async def search(
     req: SearchRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
+    # The engine's search tool has no `mode` (always hybrid) and names the score
+    # floor `min_similarity` — but its SearchArgs struct is
+    # #[serde(rename_all = "camelCase")] with no alias, so only `minSimilarity`
+    # actually deserializes. `threshold` was silently dropped (openclaw-vestige-7wh).
     args: dict[str, Any] = {
         "query": req.query,
-        "mode": req.mode.value,
         "limit": req.limit,
     }
     if req.threshold is not None:
-        args["threshold"] = req.threshold
-    args.update(_agent_context(x_agent_id))
+        args["minSimilarity"] = req.threshold
+    args.update(_agent_args(x_agent_id))
     response = await _tool("search", args)
     # Apply body truncation when requested (default 8000 chars)
     max_chars = req.truncate_body_chars
@@ -218,12 +246,17 @@ async def ingest(
     req: IngestRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
+    # The engine has no `context` field on smart_ingest; `source` is its free-form
+    # provenance slot, so agent identity + caller context go there.
     args: dict[str, Any] = {
         "content": req.content,
         "node_type": req.node_type,
         "tags": req.tags,
     }
-    args.update(_agent_context(x_agent_id, req.context))
+    source = _provenance(x_agent_id, req.context)
+    if source:
+        args["source"] = source
+    args.update(_agent_args(x_agent_id))
     return await _tool("ingest", args)
 
 
@@ -237,7 +270,10 @@ async def smart_ingest(
         "node_type": req.node_type,
         "tags": req.tags,
     }
-    args.update(_agent_context(x_agent_id, req.context))
+    source = _provenance(x_agent_id, req.context)
+    if source:
+        args["source"] = source
+    args.update(_agent_args(x_agent_id))
     return await _tool("smart_ingest", args)
 
 
@@ -248,7 +284,7 @@ async def promote(
 ):
     # v2.0: promote_memory deprecated → use memory tool with action='promote'
     args: dict[str, Any] = {"action": "promote", "id": req.memory_id}
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("memory", args)
 
 
@@ -259,7 +295,7 @@ async def demote(
 ):
     # v2.0: demote_memory deprecated → use memory tool with action='demote'
     args: dict[str, Any] = {"action": "demote", "id": req.memory_id}
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("memory", args)
 
 
@@ -274,7 +310,7 @@ async def memory(
         "action": MEMORY_ACTION_TO_ENGINE.get(req.action, req.action.value),
         "id": req.memory_id,
     }
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("memory", args)
 
 
@@ -283,12 +319,19 @@ async def codebase(
     req: CodebaseRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
-    args: dict[str, Any] = {
-        "content": req.content,
-        "pattern_type": req.pattern_type,
-        "tags": req.tags,
-    }
-    args.update(_agent_context(x_agent_id, req.context))
+    # The engine's codebase tool is action-dispatched and requires `action`; it has
+    # no `content`/`pattern_type`/`tags` fields at all, so the old argument shape
+    # failed with `missing field \`action\`` on every call (openclaw-vestige-7wh).
+    args: dict[str, Any] = {"action": req.action.value}
+    for field in ("name", "description", "decision", "rationale", "codebase", "limit"):
+        value = getattr(req, field)
+        if value is not None:
+            args[field] = value
+    if req.alternatives:
+        args["alternatives"] = req.alternatives
+    if req.files:
+        args["files"] = req.files
+    args.update(_agent_args(x_agent_id))
     return await _tool("codebase", args)
 
 
@@ -297,13 +340,37 @@ async def intention(
     req: IntentionRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
-    args: dict[str, Any] = {
-        "content": req.content,
-        "tags": req.tags,
-    }
-    if req.trigger:
-        args["trigger"] = req.trigger
-    args.update(_agent_context(x_agent_id))
+    # The engine's intention tool is action-dispatched: it requires `action`, names
+    # the body `description` (not `content`), takes `trigger` as an object (not a
+    # string), and has no `tags`. Its nested TriggerSpec is
+    # #[serde(rename_all = "camelCase")] with no aliases, so multi-word trigger
+    # fields must be sent camelCase or they are silently dropped. The old shape
+    # failed on every call (openclaw-vestige-7wh).
+    args: dict[str, Any] = {"action": req.action.value}
+    for field in (
+        "description",
+        "priority",
+        "deadline",
+        "id",
+        "status",
+        "snooze_minutes",
+        "include_snoozed",
+        "filter_status",
+        "limit",
+    ):
+        value = getattr(req, field)
+        if value is not None:
+            args[field] = value
+    if req.trigger is not None:
+        args["trigger"] = {
+            TRIGGER_FIELD_TO_ENGINE.get(k, k): v
+            for k, v in req.trigger.model_dump(exclude_none=True).items()
+        }
+    ctx = req.context.model_dump(exclude_none=True) if req.context else {}
+    ctx = _with_agent_topic(ctx, x_agent_id)
+    if ctx:
+        args["context"] = ctx
+    args.update(_agent_args(x_agent_id))
     return await _tool("intention", args)
 
 
@@ -315,7 +382,7 @@ async def dream(
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
     args: dict[str, Any] = {"memory_count": req.memory_count}
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("dream", args)
 
 
@@ -331,13 +398,10 @@ async def session_context(
         "include_intentions": req.include_intentions,
         "include_predictions": req.include_predictions,
     }
-    if req.context:
-        ctx = req.context.model_dump(exclude_none=True)
-        if x_agent_id:
-            ctx.setdefault("topics", []).insert(0, f"agent:{x_agent_id}")
+    ctx = req.context.model_dump(exclude_none=True) if req.context else {}
+    ctx = _with_agent_topic(ctx, x_agent_id)
+    if ctx:
         args["context"] = ctx
-    elif x_agent_id:
-        args["context"] = {"topics": [f"agent:{x_agent_id}"]}
     return await _tool("session_context", args)
 
 
@@ -353,7 +417,7 @@ async def explore_connections(
     }
     if req.to_id:
         args["to"] = req.to_id
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("explore_connections", args)
 
 
@@ -362,10 +426,16 @@ async def predict(
     req: PredictRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
+    # predict's `context` is an object (current_file / current_topics / codebase).
+    # The old code built it and then had it overwritten by _agent_context's string
+    # `context`, so every call with an X-Agent-Id header lost its context entirely
+    # (openclaw-vestige-7wh). Agent identity rides along as a topic instead.
     args: dict[str, Any] = {}
-    if req.context:
-        args["context"] = req.context.model_dump(exclude_none=True)
-    args.update(_agent_context(x_agent_id))
+    ctx = req.context.model_dump(exclude_none=True) if req.context else {}
+    ctx = _with_agent_topic(ctx, x_agent_id, key="current_topics")
+    if ctx:
+        args["context"] = ctx
+    args.update(_agent_args(x_agent_id))
     return await _tool("predict", args)
 
 
@@ -374,12 +444,15 @@ async def importance_score(
     req: ImportanceScoreRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
+    # ImportanceArgs is #[serde(rename_all = "camelCase")] with no alias, so
+    # `context_topics` never deserialized — only `contextTopics` does
+    # (openclaw-vestige-7wh).
     args: dict[str, Any] = {"content": req.content}
     if req.context_topics:
-        args["context_topics"] = req.context_topics
+        args["contextTopics"] = req.context_topics
     if req.project:
         args["project"] = req.project
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("importance_score", args)
 
 
@@ -389,7 +462,7 @@ async def consolidate(
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
     args: dict[str, Any] = {}
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("consolidate", args)
 
 
@@ -399,5 +472,5 @@ async def backup(
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
     args: dict[str, Any] = {}
-    args.update(_agent_context(x_agent_id))
+    args.update(_agent_args(x_agent_id))
     return await _tool("backup", args)

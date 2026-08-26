@@ -18,9 +18,21 @@ class SearchMode(str, Enum):
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Search query text")
-    mode: SearchMode = Field(SearchMode.hybrid, description="Search mode")
+    mode: SearchMode = Field(
+        SearchMode.hybrid,
+        description=(
+            "Accepted for backwards compatibility and ignored. The engine's unified "
+            "`search` tool has no mode parameter — it always runs hybrid (keyword + "
+            "semantic + convex fusion) internally."
+        ),
+    )
     limit: int = Field(10, ge=1, le=100, description="Max results")
-    threshold: float | None = Field(None, ge=0.0, le=1.0, description="Min relevance score")
+    threshold: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Min similarity score 0-1 (forwarded as the engine's minSimilarity)",
+    )
     truncate_body_chars: int | None = Field(
         8000,
         ge=0,
@@ -81,19 +93,99 @@ class DemoteRequest(BaseModel):
 
 # ── Codebase ──────────────────────────────────────────────────────────────────
 
+class CodebaseAction(str, Enum):
+    remember_pattern = "remember_pattern"
+    remember_decision = "remember_decision"
+    get_context = "get_context"
+
+
 class CodebaseRequest(BaseModel):
-    content: str = Field(..., description="Codebase pattern or decision to remember")
-    pattern_type: str = Field("pattern", description="Type: pattern, decision, convention")
-    tags: list[str] = Field(default_factory=list, description="Tags")
-    context: str | None = Field(None, description="Optional context")
+    """Mirrors the engine's unified `codebase` tool.
+
+    See vestige: crates/vestige-mcp/src/tools/codebase_unified.rs. Required
+    fields are action-dependent and validated by the engine, not here.
+    """
+
+    action: CodebaseAction = Field(..., description="Action to perform")
+    # remember_pattern
+    name: str | None = Field(None, description="[remember_pattern] Pattern name/title")
+    description: str | None = Field(None, description="[remember_pattern] Pattern description")
+    # remember_decision
+    decision: str | None = Field(None, description="[remember_decision] The decision made")
+    rationale: str | None = Field(None, description="[remember_decision] Why it was made")
+    alternatives: list[str] = Field(
+        default_factory=list, description="[remember_decision] Alternatives considered"
+    )
+    # shared
+    files: list[str] = Field(default_factory=list, description="Files affected")
+    codebase: str | None = Field(None, description="Codebase/project identifier")
+    # get_context
+    limit: int | None = Field(None, ge=1, le=100, description="[get_context] Max items per category")
 
 
 # ── Intention ─────────────────────────────────────────────────────────────────
 
+class IntentionAction(str, Enum):
+    set = "set"
+    check = "check"
+    update = "update"
+    list = "list"
+
+
+class IntentionTrigger(BaseModel):
+    """[set] When to fire. Mirrors the engine's TriggerSpec."""
+
+    type: str | None = Field(None, description="time | context | event")
+    at: str | None = Field(None, description="ISO timestamp for time triggers")
+    in_minutes: int | None = Field(None, description="Minutes from now")
+    codebase: str | None = Field(None, description="Trigger while in this codebase")
+    file_pattern: str | None = Field(None, description="Trigger on files matching this pattern")
+    topic: str | None = Field(None, description="Trigger when discussing this topic")
+    condition: str | None = Field(None, description="Natural-language condition for event triggers")
+
+
+#: The engine's TriggerSpec is #[serde(rename_all = "camelCase")] with no serde
+#: aliases, so its multi-word fields only deserialize from camelCase even though
+#: the advertised JSON schema spells them snake_case. Translate on the way out.
+TRIGGER_FIELD_TO_ENGINE: dict[str, str] = {
+    "in_minutes": "inMinutes",
+    "file_pattern": "filePattern",
+}
+
+
+class IntentionContext(BaseModel):
+    """[check] Current context for matching intentions."""
+
+    codebase: str | None = Field(None, description="Current codebase/project name")
+    file: str | None = Field(None, description="Current file path")
+    topics: list[str] = Field(default_factory=list, description="Current discussion topics")
+
+
 class IntentionRequest(BaseModel):
-    content: str = Field(..., description="Intention or reminder content")
-    trigger: str | None = Field(None, description="When to trigger")
-    tags: list[str] = Field(default_factory=list, description="Tags")
+    """Mirrors the engine's unified `intention` tool.
+
+    See vestige: crates/vestige-mcp/src/tools/intention_unified.rs. Required
+    fields are action-dependent and validated by the engine, not here.
+    """
+
+    action: IntentionAction = Field(..., description="set | check | update | list")
+    # set
+    description: str | None = Field(None, description="[set] What to remember to do")
+    trigger: IntentionTrigger | None = Field(None, description="[set] When to trigger")
+    priority: str | None = Field(None, description="[set] low | normal | high | critical")
+    deadline: str | None = Field(None, description="[set] Optional ISO deadline")
+    # update
+    id: str | None = Field(None, description="[update] Intention ID")
+    status: str | None = Field(None, description="[update] complete | snooze | cancel")
+    snooze_minutes: int | None = Field(None, description="[update] Minutes to snooze")
+    # check
+    context: IntentionContext | None = Field(None, description="[check] Current context")
+    include_snoozed: bool | None = Field(None, description="[check] Include snoozed intentions")
+    # list
+    filter_status: str | None = Field(
+        None, description="[list] active | fulfilled | cancelled | snoozed | all"
+    )
+    limit: int | None = Field(None, ge=1, le=100, description="[list] Max intentions to return")
 
 
 # ── Dream (v2.0) ─────────────────────────────────────────────────────────────
