@@ -26,6 +26,7 @@ from .models import (
     ImportanceScoreRequest,
     IngestRequest,
     IntentionRequest,
+    MEMORY_ACTION_TO_ENGINE,
     MemoryRequest,
     PredictRequest,
     PromoteRequest,
@@ -267,9 +268,11 @@ async def memory(
     req: MemoryRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
+    # The engine's memory tool requires "id", not "memory_id", and knows
+    # "state" rather than the bridge's legacy "check_state".
     args: dict[str, Any] = {
-        "action": req.action.value,
-        "memory_id": req.memory_id,
+        "action": MEMORY_ACTION_TO_ENGINE.get(req.action, req.action.value),
+        "id": req.memory_id,
     }
     args.update(_agent_context(x_agent_id))
     return await _tool("memory", args)

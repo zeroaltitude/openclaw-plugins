@@ -52,9 +52,18 @@ class SmartIngestRequest(BaseModel):
 class MemoryAction(str, Enum):
     get = "get"
     delete = "delete"
-    check_state = "check_state"
+    state = "state"
+    check_state = "check_state"  # legacy alias for "state"
     promote = "promote"
     demote = "demote"
+
+
+# The engine's memory tool declares enum ["get", "delete", "state", "promote",
+# "demote", "edit"] (crates/vestige-mcp/src/tools/memory_unified.rs). Anything
+# this bridge accepts but the engine doesn't must be translated here.
+MEMORY_ACTION_TO_ENGINE: dict[MemoryAction, str] = {
+    MemoryAction.check_state: "state",
+}
 
 
 class MemoryRequest(BaseModel):
