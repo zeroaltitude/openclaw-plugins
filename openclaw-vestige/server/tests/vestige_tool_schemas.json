@@ -1,0 +1,171 @@
+{
+  "_meta": {
+    "description": "Snapshot of the vestige-mcp tool input schemas the bridge calls. The engine is the contract; this file is the checked-in copy of it that test_tool_arg_contracts.py validates bridge-constructed arguments against.",
+    "source_repo": "~/projects/vestige",
+    "source_commit": "3bd2b71f184eaa69fa518c8b7896ed36361045ff",
+    "source_paths": "crates/vestige-mcp/src/server.rs (tools/list) + crates/vestige-mcp/src/tools/*.rs (schema())",
+    "captured": "2026-08-26",
+    "refresh": "python3 scripts/refresh-tool-schemas.py  (needs a reachable vestige-mcp; see the script header)"
+  },
+  "tools": {
+    "search": {
+      "type": "object",
+      "properties": {
+        "query": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "min_retention": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "min_similarity": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "detail_level": { "type": "string", "enum": ["brief", "summary", "full"] },
+        "context_topics": { "type": "array", "items": { "type": "string" } },
+        "token_budget": { "type": "integer", "minimum": 100, "maximum": 10000 }
+      },
+      "required": ["query"]
+    },
+    "smart_ingest": {
+      "type": "object",
+      "properties": {
+        "content": { "type": "string" },
+        "node_type": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "source": { "type": "string" },
+        "forceCreate": { "type": "boolean" },
+        "items": { "type": "array", "maxItems": 20 }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["get", "delete", "state", "promote", "demote", "edit"]
+        },
+        "id": { "type": "string" },
+        "reason": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": ["action", "id"]
+    },
+    "codebase": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["remember_pattern", "remember_decision", "get_context"]
+        },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "decision": { "type": "string" },
+        "rationale": { "type": "string" },
+        "alternatives": { "type": "array", "items": { "type": "string" } },
+        "files": { "type": "array", "items": { "type": "string" } },
+        "codebase": { "type": "string" },
+        "limit": { "type": "integer" }
+      },
+      "required": ["action"]
+    },
+    "intention": {
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "enum": ["set", "check", "update", "list"] },
+        "description": { "type": "string" },
+        "trigger": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["time", "context", "event"] },
+            "at": { "type": "string" },
+            "in_minutes": { "type": "integer" },
+            "codebase": { "type": "string" },
+            "file_pattern": { "type": "string" },
+            "topic": { "type": "string" },
+            "condition": { "type": "string" }
+          }
+        },
+        "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"] },
+        "deadline": { "type": "string" },
+        "id": { "type": "string" },
+        "status": { "type": "string", "enum": ["complete", "snooze", "cancel"] },
+        "snooze_minutes": { "type": "integer" },
+        "context": {
+          "type": "object",
+          "properties": {
+            "current_time": { "type": "string" },
+            "codebase": { "type": "string" },
+            "file": { "type": "string" },
+            "topics": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "include_snoozed": { "type": "boolean" },
+        "filter_status": {
+          "type": "string",
+          "enum": ["active", "fulfilled", "cancelled", "snoozed", "all"]
+        },
+        "limit": { "type": "integer" }
+      },
+      "required": ["action"]
+    },
+    "dream": {
+      "type": "object",
+      "properties": {
+        "memory_count": { "type": "integer" }
+      }
+    },
+    "session_context": {
+      "type": "object",
+      "properties": {
+        "queries": { "type": "array", "items": { "type": "string" } },
+        "token_budget": { "type": "integer", "minimum": 100, "maximum": 10000 },
+        "context": {
+          "type": "object",
+          "properties": {
+            "codebase": { "type": "string" },
+            "topics": { "type": "array", "items": { "type": "string" } },
+            "file": { "type": "string" }
+          }
+        },
+        "include_status": { "type": "boolean" },
+        "include_intentions": { "type": "boolean" },
+        "include_predictions": { "type": "boolean" }
+      }
+    },
+    "explore_connections": {
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "enum": ["chain", "associations", "bridges"] },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "limit": { "type": "integer" }
+      },
+      "required": ["action", "from"]
+    },
+    "predict": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "type": "object",
+          "properties": {
+            "current_file": { "type": "string" },
+            "current_topics": { "type": "array", "items": { "type": "string" } },
+            "codebase": { "type": "string" }
+          }
+        }
+      }
+    },
+    "importance_score": {
+      "type": "object",
+      "properties": {
+        "content": { "type": "string" },
+        "context_topics": { "type": "array", "items": { "type": "string" } },
+        "project": { "type": "string" }
+      },
+      "required": ["content"]
+    },
+    "consolidate": {
+      "type": "object",
+      "properties": {}
+    },
+    "backup": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+}
