@@ -6,8 +6,11 @@
  * security policies with owner-verified approval.
  */
 
-// @ts-ignore TS7016: plugin-sdk types not available; using runtime definition
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk" assert { "resolution-mode": "require" };
+// Real host-API types resolve via the openclaw symlink (`openclaw/plugin-sdk/core`
+// exports OpenClawPluginApi). On CI runners the symlink dangles, so the @ts-ignore
+// keeps typecheck green there; locally it is inert and the import typechecks fully.
+// @ts-ignore TS2307: openclaw symlink absent on CI runners
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core" assert { "resolution-mode": "require" };
 import { registerSecurityHooks } from "./security/index.js";
 import type { TrustLevel } from "./security/trust-levels.js";
 
