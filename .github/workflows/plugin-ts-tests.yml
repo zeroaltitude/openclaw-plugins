@@ -1,0 +1,201 @@
+# Runs the three TypeScript plugin suites in this monorepo.
+#
+# Until this file existed, `openclaw-provenance` (313 tests), the
+# `openclaw-claude` bridge server (223 tests) and `openclaw-beads` (66 tests)
+# had real, green, fast test commands that ran nowhere — 602 tests whose only
+# execution was a human remembering to run them. `vestige-bridge-tests.yml`
+# (openclaw-vestige-skf) closed the same hole for the Python bridge and was
+# deliberately scoped to Python so a red TS suite could not destabilize the new
+# gate; this is the follow-up that covers the TS half (openclaw-vestige-1j5).
+#
+# Four deliberate choices, all guarding against a gate that looks green but
+# checks nothing:
+#
+#  1. `pull_request` has NO `branches:` filter. For a `pull_request` event that
+#     filter matches the *base* ref, so `branches: [main]` would mean a PR
+#     stacked on another feature branch fires no run at all — and "no run" reads
+#     as "nothing to check" rather than "unverified".
+#  2. Every suite asserts its own size. `vitest run` and `node --test` both exit
+#     0 on an empty selection, so a broken glob or a collection failure would
+#     otherwise be indistinguishable from success. Each job writes JUnit XML and
+#     runs `.github/scripts/assert-junit-min-tests.py`, which prints the executed
+#     count into the log and fails below the floor.
+#  3. One job per plugin. A single job running all three would let the first red
+#     suite mask the other two, and each plugin has its own package-lock.json to
+#     cache against anyway.
+#  4. Dual reporters (`spec`/`default` to stdout, `junit` to file). A JUnit
+#     reporter on its own suppresses the human-readable output entirely — the
+#     log would show one line, "JUNIT report written to ...", and nothing about
+#     which tests ran.
+#
+# Node 24 is pinned across all three jobs. `openclaw-claude/server` is the only
+# package declaring `engines` (">=22.0.0"); 24 satisfies it, is what the local
+# baselines below were measured on, and keeps the three jobs comparable.
+
+name: plugin-ts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'openclaw-provenance/**'
+      - 'openclaw-claude/server/**'
+      - 'openclaw-beads/**'
+      - '.github/workflows/plugin-ts-tests.yml'
+      - '.github/scripts/assert-junit-min-tests.py'
+  pull_request:
+    paths:
+      - 'openclaw-provenance/**'
+      - 'openclaw-claude/server/**'
+      - 'openclaw-beads/**'
+      - '.github/workflows/plugin-ts-tests.yml'
+      - '.github/scripts/assert-junit-min-tests.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-ts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provenance:
+    name: provenance (npm run validate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: openclaw-provenance/package-lock.json
+
+      # `openclaw-provenance` devDepends on `openclaw: file:../../openclaw` —
+      # a path OUTSIDE this repo (the OpenClaw core checkout a developer keeps
+      # as a sibling of openclaw-plugins). It is absent on a runner, and that is
+      # fine: npm ci leaves a dangling symlink and exits 0, and the package
+      # contributes no types anyway. `src/index.ts` is the only importer, its
+      # import of `openclaw/plugin-sdk` carries an explicit
+      # `// @ts-ignore TS7016: plugin-sdk types not available`, and no
+      # `./plugin-sdk` export exists in either the local build or the published
+      # package — so the symlink is inert for all three gates. Verified by
+      # running `npm ci && npm run validate` against a clean `git archive`
+      # extraction with no sibling directory: exit 0, 313 tests.
+      #
+      # If someone removes that @ts-ignore, this job goes red — correctly, since
+      # the import does not resolve locally either.
+      - name: Install dependencies
+        working-directory: openclaw-provenance
+        run: npm ci
+
+      # These three steps are `npm run validate` (= typecheck && typecheck:tests
+      # && test), split out so the log names the gate that failed instead of
+      # just "validate". See openclaw-provenance/CLAUDE.md for why there are two
+      # typecheck configs — tsconfig.json excludes src/**/__tests__ and vitest
+      # does not typecheck, so tsconfig.tests.json is the only thing that
+      # typechecks a test file.
+      - name: Typecheck (src)
+        working-directory: openclaw-provenance
+        run: npm run typecheck
+
+      - name: Typecheck (tests)
+        working-directory: openclaw-provenance
+        run: npm run typecheck:tests
+
+      - name: Run test suite
+        working-directory: openclaw-provenance
+        run: npm test -- --reporter=default --reporter=junit --outputFile.junit=vitest-report.xml
+
+      - name: Assert the suite is not silently empty
+        working-directory: openclaw-provenance
+        # Ratchet, not a target: 313 was the count on this branch's merge base.
+        run: python3 ../.github/scripts/assert-junit-min-tests.py vitest-report.xml 313 provenance
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-vitest-report
+          path: openclaw-provenance/vitest-report.xml
+          if-no-files-found: warn
+
+  claude-bridge:
+    name: claude bridge (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: openclaw-claude/server/package-lock.json
+
+      - name: Install dependencies
+        working-directory: openclaw-claude/server
+        run: npm ci
+
+      - name: Run test suite
+        working-directory: openclaw-claude/server
+        run: npm test -- --reporter=default --reporter=junit --outputFile.junit=vitest-report.xml
+
+      - name: Assert the suite is not silently empty
+        working-directory: openclaw-claude/server
+        # Ratchet, not a target: 223 was the count on this branch's merge base.
+        run: python3 ../../.github/scripts/assert-junit-min-tests.py vitest-report.xml 223 claude-bridge
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-bridge-vitest-report
+          path: openclaw-claude/server/vitest-report.xml
+          if-no-files-found: warn
+
+  beads:
+    name: beads (node --test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: openclaw-beads/package-lock.json
+
+      - name: Install dependencies
+        working-directory: openclaw-beads
+        run: npm ci
+
+      # This is `npm test` (= `npm run build && node --test test/*.test.mjs`)
+      # with reporters added, run as two steps rather than via `npm test --`.
+      # Reason, measured: `node --test <files> --test-reporter=junit ...` treats
+      # the trailing flags as test-file patterns, ignores them, writes no report
+      # and still exits 0. The reporter flags MUST precede the file list.
+      - name: Build
+        working-directory: openclaw-beads
+        run: npm run build
+
+      - name: Run test suite
+        working-directory: openclaw-beads
+        run: |
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=node-test-report.xml \
+            test/*.test.mjs
+
+      - name: Assert the suite is not silently empty
+        working-directory: openclaw-beads
+        # Ratchet, not a target: 66 was the count on this branch's merge base.
+        run: python3 ../.github/scripts/assert-junit-min-tests.py node-test-report.xml 66 beads
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beads-node-test-report
+          path: openclaw-beads/node-test-report.xml
+          if-no-files-found: warn
