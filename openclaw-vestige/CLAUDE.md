@@ -50,20 +50,53 @@ bd close <id>         # Complete work
 <!-- END BEADS INTEGRATION -->
 
 
-## Build & Test
-
-_Add your build and test commands here_
-
-```bash
-# Example:
-# npm install
-# npm test
-```
-
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+**This repo does not contain the memory engine.** It is the access layer in front of it.
+
+```
+OpenClaw agent
+  └─ openclaw-plugin/        TypeScript MCP plugin — declares the vestige_* tools,
+     (src/index.ts)          forwards each to an HTTP endpoint on the bridge
+        │
+        ▼  https://vestige.bighatbio.me/api
+     server/                 FastAPI bridge — Bearer auth, agent identity (X-Agent-Id),
+     (app/main.py)           REST → MCP JSON-RPC translation. One endpoint per tool.
+        │
+        ▼  http://localhost:3100/mcp  (Streamable HTTP, protocol 2025-03-26)
+     vestige-mcp             THE ENGINE. Rust. Lives in ~/projects/vestige
+                             (crates/vestige-core + crates/vestige-mcp).
+```
+
+So: a bug in what a `vestige_*` tool *computes* is almost always in `~/projects/vestige`,
+not here. A bug in auth, agent identity, argument names, or endpoint shape is here.
+See `~/.openclaw-tank/refs/vestige.md` for the engine's build environment and gotchas.
+
+Deployment is a single EC2 host (`vestige.bighatbio.me`) running `vestige-mcp` on :3100,
+the bridge on :8000, and Caddy in front — see `docs/EC2-QUICKSTART.md`. **A change to the
+engine is not live until that binary is replaced and the process restarted.** The bridge
+holds one long-lived MCP session; `GET /api/health`'s `uptime_seconds` is time since that
+session was established, which makes it a usable proxy for "how old is the running engine."
+
+## Build & Test
+
+```bash
+# TypeScript plugin
+cd openclaw-plugin && npm install && npm test        # jest
+
+# FastAPI bridge
+cd server && pip install -r requirements-dev.txt && pytest
+```
+
+The engine's gates live in `~/projects/vestige` (`cargo test --workspace`, plus
+`cargo test -p vestige-mcp --bin vestige-mcp` — see the warning in `refs/vestige.md`
+about `--lib` silently running zero tests there).
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Beads issues are filed **here** (`openclaw-vestige-*`) even when the fix lands in
+  `~/projects/vestige`. Engine commits carry the Beads id in the subject.
+- Bridge endpoints must send the argument names the engine's tool schema declares.
+  These drift (see `openclaw-vestige-ow6`: `/memory` sent `memory_id`, the tool
+  requires `id`, so the endpoint never worked). When adding or editing an endpoint,
+  read the corresponding `crates/vestige-mcp/src/tools/*.rs` schema, don't guess.
