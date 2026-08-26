@@ -16,6 +16,7 @@ from fastapi import FastAPI, Header, HTTPException
 from .auth import BearerAuthMiddleware
 from .mcp_client import MCPClient, MCPError, MCPToolError
 from .models import (
+    MEMORY_ACTION_ALIASES,
     BackupRequest,
     CodebaseRequest,
     ConsolidateRequest,
@@ -25,6 +26,7 @@ from .models import (
     HealthResponse,
     ImportanceScoreRequest,
     IngestRequest,
+    IntentionAction,
     IntentionRequest,
     MemoryRequest,
     PredictRequest,
@@ -86,23 +88,63 @@ app.add_middleware(BearerAuthMiddleware)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _agent_context(agent_id: str | None, existing_context: str | None = None) -> dict[str, Any]:
-    """Build optional agent context dict.
+# ── Engine argument contract ─────────────────────────────────────────────────
+#
+# The engine is the contract: every argument this bridge sends must be a
+# property the target tool's JSON schema declares. Two things make that
+# non-obvious, and both have bitten us (openclaw-vestige-ow6):
+#
+# 1. The bridge's REST field names are not the engine's argument names
+#    (``memory_id`` vs ``id``). Translate explicitly, per endpoint.
+#
+# 2. Some tools publish snake_case properties but deserialize with
+#    ``#[serde(rename_all = "camelCase")]`` and no snake_case alias, so the
+#    documented name is silently dropped on the wire. ``_WIRE_ALIASES`` maps
+#    the published schema name to the name the deserializer actually accepts.
+#    This is an engine-side defect (tracked separately); when the engine adds
+#    ``#[serde(alias = ...)]`` for these, the entry can be deleted.
+#    Verified against vestige @ 3bd2b71, crates/vestige-mcp/src/tools/.
+_WIRE_ALIASES: dict[str, dict[str, str]] = {
+    "search": {
+        "min_retention": "minRetention",
+        "min_similarity": "minSimilarity",
+        "context_topics": "contextTopics",
+    },
+    "importance_score": {"context_topics": "contextTopics"},
+}
 
-    Instead of overwriting the user's context with agent_id, we include
-    agent_id as a separate field and preserve the original context.
+#: Same defect, one level down, inside the ``intention`` tool's nested objects.
+_INTENTION_TRIGGER_ALIASES = {"in_minutes": "inMinutes", "file_pattern": "filePattern"}
+_INTENTION_CONTEXT_ALIASES = {"current_time": "currentTime"}
+
+
+def _rename(args: dict[str, Any], aliases: dict[str, str]) -> dict[str, Any]:
+    """Return ``args`` with any key in ``aliases`` renamed to its wire name."""
+    return {aliases.get(key, key): value for key, value in args.items()}
+
+
+def _agent_topics(topics: list[str] | None, agent_id: str | None) -> list[str]:
+    """Prepend the calling agent's identity to a context-topics list.
+
+    Agent scoping is not a first-class engine concept — no tool schema has an
+    ``agent_id`` property (see docs/DESIGN-PER-AGENT-MEMORY.md, still a design).
+    Where a tool accepts free-form topics we carry identity there; where it does
+    not, we send nothing rather than an argument the engine will discard.
     """
-    result: dict[str, Any] = {}
-    if existing_context:
-        result["context"] = existing_context
+    result = list(topics or [])
     if agent_id:
-        result["agent_id"] = agent_id
-        # If there's already a context, prepend agent identity
-        if "context" in result:
-            result["context"] = f"agent:{agent_id} | {result['context']}"
-        else:
-            result["context"] = f"agent:{agent_id}"
+        result.insert(0, f"agent:{agent_id}")
     return result
+
+
+def _agent_source(context: str | None, agent_id: str | None) -> str | None:
+    """Build the ``source`` argument for ingest-family tools.
+
+    ``smart_ingest`` has no ``context`` property; ``source`` ("Source or
+    reference for this knowledge") is where provenance belongs.
+    """
+    parts = [p for p in (f"agent:{agent_id}" if agent_id else None, context) if p]
+    return " | ".join(parts) or None
 
 
 # ── Body truncation ──────────────────────────────────────────────────────────
@@ -156,6 +198,7 @@ def _truncate_result_bodies(result: Any, max_chars: int) -> Any:
 
 
 async def _tool(name: str, arguments: dict[str, Any]) -> VestigeResponse:
+    arguments = _rename(arguments, _WIRE_ALIASES.get(name, {}))
     try:
         result = await mcp.call_tool(name, arguments)
         return VestigeResponse(success=True, data=result)
@@ -196,14 +239,16 @@ async def search(
     req: SearchRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
+    # req.mode has no engine counterpart — the unified `search` tool is always
+    # hybrid. It stays on the REST model for compatibility but is not forwarded.
     args: dict[str, Any] = {
         "query": req.query,
-        "mode": req.mode.value,
         "limit": req.limit,
     }
     if req.threshold is not None:
-        args["threshold"] = req.threshold
-    args.update(_agent_context(x_agent_id))
+        args["min_similarity"] = req.threshold
+    if topics := _agent_topics(None, x_agent_id):
+        args["context_topics"] = topics
     response = await _tool("search", args)
     # Apply body truncation when requested (default 8000 chars)
     max_chars = req.truncate_body_chars
@@ -222,8 +267,12 @@ async def ingest(
         "node_type": req.node_type,
         "tags": req.tags,
     }
-    args.update(_agent_context(x_agent_id, req.context))
-    return await _tool("ingest", args)
+    if source := _agent_source(req.context, x_agent_id):
+        args["source"] = source
+    # The engine dropped `ingest` from tools/list in v1.7; it survives only as a
+    # deprecated redirect to the identical smart_ingest code path. Call the
+    # advertised tool directly.
+    return await _tool("smart_ingest", args)
 
 
 @app.post("/smart_ingest", response_model=VestigeResponse)
@@ -236,56 +285,51 @@ async def smart_ingest(
         "node_type": req.node_type,
         "tags": req.tags,
     }
-    args.update(_agent_context(x_agent_id, req.context))
+    if source := _agent_source(req.context, x_agent_id):
+        args["source"] = source
     return await _tool("smart_ingest", args)
 
 
+# The `memory` tool schema declares no topic-like or provenance property, so
+# the calling agent's identity has nowhere to go on these three endpoints.
+# We send nothing rather than an argument the engine would silently discard.
+
 @app.post("/promote", response_model=VestigeResponse)
-async def promote(
-    req: PromoteRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
+async def promote(req: PromoteRequest):
     # v2.0: promote_memory deprecated → use memory tool with action='promote'
-    args: dict[str, Any] = {"action": "promote", "id": req.memory_id}
-    args.update(_agent_context(x_agent_id))
-    return await _tool("memory", args)
+    return await _tool("memory", {"action": "promote", "id": req.memory_id})
 
 
 @app.post("/demote", response_model=VestigeResponse)
-async def demote(
-    req: DemoteRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
+async def demote(req: DemoteRequest):
     # v2.0: demote_memory deprecated → use memory tool with action='demote'
-    args: dict[str, Any] = {"action": "demote", "id": req.memory_id}
-    args.update(_agent_context(x_agent_id))
-    return await _tool("memory", args)
+    return await _tool("memory", {"action": "demote", "id": req.memory_id})
 
 
 @app.post("/memory", response_model=VestigeResponse)
-async def memory(
-    req: MemoryRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
-    args: dict[str, Any] = {
-        "action": req.action.value,
-        "memory_id": req.memory_id,
-    }
-    args.update(_agent_context(x_agent_id))
+async def memory(req: MemoryRequest):
+    action = MEMORY_ACTION_ALIASES.get(req.action.value, req.action.value)
+    args: dict[str, Any] = {"action": action, "id": req.memory_id}
+    if req.reason is not None:
+        args["reason"] = req.reason
+    if req.content is not None:
+        args["content"] = req.content
     return await _tool("memory", args)
 
 
 @app.post("/codebase", response_model=VestigeResponse)
-async def codebase(
-    req: CodebaseRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
-    args: dict[str, Any] = {
-        "content": req.content,
-        "pattern_type": req.pattern_type,
-        "tags": req.tags,
-    }
-    args.update(_agent_context(x_agent_id, req.context))
+async def codebase(req: CodebaseRequest):
+    # Pass-through of the engine's `codebase` schema; omit unset optionals so
+    # each action only carries the fields it actually uses.
+    args: dict[str, Any] = {"action": req.action.value}
+    for field in ("name", "description", "decision", "rationale", "codebase"):
+        if (value := getattr(req, field)) is not None:
+            args[field] = value
+    for field in ("alternatives", "files"):
+        if value := getattr(req, field):
+            args[field] = value
+    if req.action.value == "get_context":
+        args["limit"] = req.limit
     return await _tool("codebase", args)
 
 
@@ -294,26 +338,36 @@ async def intention(
     req: IntentionRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
-    args: dict[str, Any] = {
-        "content": req.content,
-        "tags": req.tags,
-    }
-    if req.trigger:
-        args["trigger"] = req.trigger
-    args.update(_agent_context(x_agent_id))
+    # Pass-through of the engine's `intention` schema.
+    args: dict[str, Any] = {"action": req.action.value}
+    for field in ("description", "deadline", "id", "snooze_minutes", "include_snoozed", "limit"):
+        if (value := getattr(req, field)) is not None:
+            args[field] = value
+    for field in ("priority", "status", "filter_status"):
+        if (value := getattr(req, field)) is not None:
+            args[field] = value.value
+    if req.trigger is not None:
+        trigger = req.trigger.model_dump(exclude_none=True, mode="json")
+        args["trigger"] = _rename(trigger, _INTENTION_TRIGGER_ALIASES)
+
+    # Only the `check` action reads `context`, and its topics list is the one
+    # place this tool can carry agent identity.
+    if req.action is IntentionAction.check:
+        context = req.context.model_dump(exclude_none=True) if req.context else {}
+        if topics := _agent_topics(context.get("topics"), x_agent_id):
+            context["topics"] = topics
+        if context:
+            args["context"] = _rename(context, _INTENTION_CONTEXT_ALIASES)
+
     return await _tool("intention", args)
 
 
 # ── v2.0 Endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/dream", response_model=VestigeResponse)
-async def dream(
-    req: DreamRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
-    args: dict[str, Any] = {"memory_count": req.memory_count}
-    args.update(_agent_context(x_agent_id))
-    return await _tool("dream", args)
+async def dream(req: DreamRequest):
+    # `dream` declares only memory_count — no place for agent identity.
+    return await _tool("dream", {"memory_count": req.memory_count})
 
 
 @app.post("/session_context", response_model=VestigeResponse)
@@ -339,10 +393,8 @@ async def session_context(
 
 
 @app.post("/explore_connections", response_model=VestigeResponse)
-async def explore_connections(
-    req: ExploreConnectionsRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
+async def explore_connections(req: ExploreConnectionsRequest):
+    # `explore_connections` declares no topic-like property.
     args: dict[str, Any] = {
         "action": req.action.value,
         "from": req.from_id,
@@ -350,7 +402,6 @@ async def explore_connections(
     }
     if req.to_id:
         args["to"] = req.to_id
-    args.update(_agent_context(x_agent_id))
     return await _tool("explore_connections", args)
 
 
@@ -359,11 +410,13 @@ async def predict(
     req: PredictRequest,
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
-    args: dict[str, Any] = {}
-    if req.context:
-        args["context"] = req.context.model_dump(exclude_none=True)
-    args.update(_agent_context(x_agent_id))
-    return await _tool("predict", args)
+    # `context` is an object here. Merge agent identity into current_topics —
+    # assigning a string to `context` (the old behaviour) discarded the
+    # caller's whole prediction context.
+    context = req.context.model_dump(exclude_none=True) if req.context else {}
+    if topics := _agent_topics(context.get("current_topics"), x_agent_id):
+        context["current_topics"] = topics
+    return await _tool("predict", {"context": context} if context else {})
 
 
 @app.post("/importance_score", response_model=VestigeResponse)
@@ -372,29 +425,18 @@ async def importance_score(
     x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
 ):
     args: dict[str, Any] = {"content": req.content}
-    if req.context_topics:
-        args["context_topics"] = req.context_topics
+    if topics := _agent_topics(req.context_topics, x_agent_id):
+        args["context_topics"] = topics
     if req.project:
         args["project"] = req.project
-    args.update(_agent_context(x_agent_id))
     return await _tool("importance_score", args)
 
 
 @app.post("/consolidate", response_model=VestigeResponse)
-async def consolidate(
-    req: ConsolidateRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
-    args: dict[str, Any] = {}
-    args.update(_agent_context(x_agent_id))
-    return await _tool("consolidate", args)
+async def consolidate(req: ConsolidateRequest):
+    return await _tool("consolidate", {})
 
 
 @app.post("/backup", response_model=VestigeResponse)
-async def backup(
-    req: BackupRequest,
-    x_agent_id: str | None = Header(None, alias="X-Agent-Id"),
-):
-    args: dict[str, Any] = {}
-    args.update(_agent_context(x_agent_id))
-    return await _tool("backup", args)
+async def backup(req: BackupRequest):
+    return await _tool("backup", {})

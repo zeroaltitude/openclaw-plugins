@@ -53,13 +53,23 @@ def test_promote_demote():
 
 
 def test_codebase_request():
-    r = CodebaseRequest(content="Use dependency injection", pattern_type="decision")
-    assert r.pattern_type == "decision"
+    r = CodebaseRequest(
+        action="remember_decision",
+        decision="Use dependency injection",
+        rationale="Testability",
+    )
+    assert r.action.value == "remember_decision"
+    assert r.decision == "Use dependency injection"
 
 
 def test_intention_request():
-    r = IntentionRequest(content="remind me to review", trigger="next session")
-    assert r.trigger == "next session"
+    r = IntentionRequest(
+        action="set",
+        description="remind me to review",
+        trigger={"type": "context", "condition": "next session"},
+    )
+    assert r.action.value == "set"
+    assert r.trigger.condition == "next session"
 
 
 def test_vestige_response():
