@@ -1,0 +1,101 @@
+# Runs the openclaw-vestige FastAPI bridge's pytest suite.
+#
+# Before this workflow existed, `openclaw-plugins` had no `.github/` directory at
+# all, so `openclaw-vestige/server/tests` only ran when a human remembered to run
+# pytest by hand.
+#
+# Two deliberate choices, both guarding against a gate that looks green but
+# checks nothing:
+#
+#  1. `pull_request` has NO `branches:` filter. For a `pull_request` event that
+#     filter matches the *base* ref, so `branches: [main]` would mean a PR
+#     stacked on another feature branch fires no run at all — and "no run" reads
+#     as "nothing to check" rather than "unverified". Leaving it off means every
+#     PR gets the gate regardless of base.
+#  2. The suite's size is asserted, not assumed. pytest exits 5 on "no tests
+#     collected", which already fails the job, but a partial silent drop (one
+#     file stops importing, a rename breaks a path) would still exit 0. The
+#     `MIN_TESTS` ratchet below turns that into a red build and prints the count
+#     into the log so a reviewer can check the number instead of the checkmark.
+
+name: vestige-bridge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'openclaw-vestige/server/**'
+      - '.github/workflows/vestige-bridge-tests.yml'
+  pull_request:
+    paths:
+      - 'openclaw-vestige/server/**'
+      - '.github/workflows/vestige-bridge-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vestige-bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (bridge)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12 is what production actually runs: docker/Dockerfile.bridge is
+      # FROM ubuntu:24.04 and installs the distro `python3`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: openclaw-vestige/server/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: openclaw-vestige/server
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run bridge test suite
+        working-directory: openclaw-vestige/server
+        run: python -m pytest tests -v --junitxml=pytest-report.xml
+
+      - name: Assert the suite is not silently empty
+        working-directory: openclaw-vestige/server
+        env:
+          # Ratchet, not a target: raise this when tests are added, never lower
+          # it to make a red build green. 24 was the count on main at the commit
+          # that introduced this workflow.
+          MIN_TESTS: '24'
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse('pytest-report.xml').getroot()
+          suites = root.findall('testsuite') or [root]
+          total = sum(int(s.get('tests', 0)) for s in suites)
+          skipped = sum(int(s.get('skipped', 0)) for s in suites)
+          floor = int(os.environ['MIN_TESTS'])
+
+          print(f'tests executed: {total} (skipped {skipped}, floor {floor})')
+          if total < floor:
+              sys.exit(
+                  f'FAIL: only {total} tests executed, expected at least {floor}. '
+                  'Either tests were deleted (lower MIN_TESTS deliberately, in the '
+                  'same commit) or collection is silently broken.'
+              )
+          PY
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vestige-bridge-pytest-report
+          path: openclaw-vestige/server/pytest-report.xml
+          if-no-files-found: warn
