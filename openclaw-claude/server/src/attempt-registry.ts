@@ -49,6 +49,23 @@ export type LiveQueryToolSurface = {
 };
 
 /**
+ * The bridge-owned in-process MCP server backing `mcp__<serverName>__*`, as
+ * this module needs to see it. Structurally typed (rather than importing
+ * `DynamicToolsHandle`) for the same reason `LiveQueryToolSurface` is: it keeps
+ * this module free of the MCP/Anthropic SDK type surface.
+ */
+export type LiveDynamicToolSurface = {
+  /** The MCP server name — the `openclaw` in `mcp__openclaw__*`. */
+  serverName: string;
+  /** The live `McpServer`. MUST be handed back to `setMcpServers` on every refresh. */
+  instance: unknown;
+  /** Swap the advertised + callable tool set on the running server. */
+  setTools(specs: AttemptFingerprintInput["dynamicTools"]): void;
+  /** The currently advertised spec set. */
+  getTools(): AttemptFingerprintInput["dynamicTools"];
+};
+
+/**
  * One entry per thread with a live, persistent `claude` subprocess.
  *
  * `liveTurnRef` is the seam that lets the SDK-facing closures built ONCE at
@@ -76,6 +93,17 @@ export type AttemptEntry = {
    * SDK's `Query` so this module stays free of the SDK's type surface.
    */
   query: LiveQueryToolSurface;
+  /**
+   * The bridge-owned dynamic-tools MCP server for this attempt, if the thread
+   * carried any dynamic tools when the attempt was created. Retained because
+   * `refreshDynamicTools` cannot work without it on two counts: it needs
+   * `setTools` to actually change the surface, and it needs `instance` to hand
+   * back to `setMcpServers` so the SDK's desired-state diff does not tear the
+   * transport down. Undefined when the attempt was created with no dynamic
+   * tools — in which case there is no server to refresh and the caller must
+   * rotate instead.
+   */
+  dynamicTools?: LiveDynamicToolSurface;
   /**
    * Set by `runTurn` while it awaits the current turn's result; the pump
    * loop calls it for every message until the turn's `result` message
@@ -171,6 +199,53 @@ export class AttemptRegistry {
    * fall back to rotation. Never throws for the not-found case; a failure from
    * the SDK itself does propagate, because silently "succeeding" would leave
    * the model holding a surface we told the caller we had replaced.
+   *
+   * ── Why this is more than one `setMcpServers` call (openclaw-d42b) ─────────
+   *
+   * `Query.setMcpServers` treats the PRESENCE OF `instance` as the desired-state
+   * signal for sdk-type servers:
+   *
+   *   for (const [name, cfg] of Object.entries(arg))
+   *     if (cfg.type === "sdk" && "instance" in cfg) desired[name] = cfg.instance;
+   *     else passthrough[name] = cfg;
+   *   for (const name of connected) if (!(name in desired)) await disconnectSdkMcpServer(name);
+   *   for (const [name, inst] of Object.entries(desired)) if (!connected.has(name)) connect(name, inst);
+   *   await request({ subtype: "mcp_set_servers", servers: { ...passthrough, ...shapesOf(desired) } });
+   *
+   * Two consequences drive the shape of this method:
+   *
+   * 1. A SHAPE-ONLY `{ type: "sdk", name }` entry (no `instance`) lands in
+   *    `passthrough`, so the SDK disconnects the in-process transport — while
+   *    still telling the CLI the sdk server exists. The CLI keeps advertising
+   *    and routing `mcp__<name>__*`; the next call arrives as an `mcp_message`
+   *    control request, finds no transport, and throws
+   *    `SDK MCP server not found: <name>` for the REST OF THE ATTEMPT'S LIFE
+   *    (the re-fingerprint below is what pins the broken attempt in place).
+   *    So we must always splice our owned `instance` back in, and must never
+   *    forward a shape-only sdk entry.
+   *
+   * 2. A server already in `connected` is neither disconnected nor reconnected,
+   *    and the CLI is handed a server set identical to the one it already has —
+   *    so it never re-issues `tools/list`. Verified empirically against
+   *    `claude` CLI 2.1.220: after a single instance-carrying `setMcpServers`,
+   *    the tool set the model sees is UNCHANGED, and
+   *    `notifications/tools/list_changed` does not move it either (the
+   *    notification is delivered; the CLI simply ignores it). `mcp_reconnect`
+   *    is not an option — the CLI rejects it for sdk servers with
+   *    "SDK servers should be handled in print.ts".
+   *
+   *    The one mechanism that DOES work is to go with the grain of that diff:
+   *    withdraw our server, then reinstate it with the instance. The SDK then
+   *    genuinely disconnects and reconnects it, the CLI sees a server set that
+   *    changed, and it re-lists — picking up the new specs. Confirmed
+   *    empirically: `removed: ["probe"]` then `added: ["probe"]`, a fresh
+   *    `tools/list` serving the NEW names, and a subsequent call to a
+   *    newly-added tool dispatching successfully.
+   *
+   * We only pay that two-call dance when the spec set actually changed. An
+   * unchanged refresh (common — openclaw re-evaluates tool policy every turn and
+   * usually lands on the same answer) takes the single-call path, which
+   * preserves the transport and costs no surface churn.
    */
   async refreshDynamicTools(
     threadId: string,
@@ -181,7 +256,76 @@ export class AttemptRegistry {
   ): Promise<{ added: string[]; removed: string[] } | null> {
     const entry = this.byThread.get(threadId);
     if (!entry || entry.closed) return null;
-    const result = await entry.query.setMcpServers(params.servers);
+    const handle = entry.dynamicTools;
+
+    // Split the requested set into "the sdk server we own" and everything else.
+    // An sdk-type entry we do NOT own cannot be honoured: we have no instance
+    // for it, and forwarding it verbatim is exactly the bug above. Reject it
+    // loudly rather than silently breaking the caller's tool surface.
+    const passthrough: Record<string, unknown> = {};
+    let ownedName: string | null = null;
+    for (const [name, cfg] of Object.entries(params.servers)) {
+      if (!isSdkServerConfig(cfg)) {
+        passthrough[name] = cfg;
+        continue;
+      }
+      if (!handle) {
+        // The attempt was created with no dynamic tools, so there is no
+        // in-process server to refresh and we cannot materialise one here.
+        // Returning null routes the caller to rotation, which handles it.
+        this.logger.info(
+          "[attempt-registry] refresh requested an sdk MCP server but this attempt has none; caller should rotate",
+          { threadId, server: name },
+        );
+        return null;
+      }
+      if (name !== handle.serverName) {
+        throw new Error(
+          `thread/refresh_tools requested sdk MCP server '${name}', but this bridge only owns '${handle.serverName}'. ` +
+            "Refusing to forward it: an sdk entry the bridge cannot back with a live instance would disconnect the transport " +
+            "while leaving the server advertised, breaking every subsequent tool call.",
+        );
+      }
+      ownedName = name;
+    }
+
+    const specsChanged =
+      JSON.stringify(normalizeTools(entry.fingerprintInput.dynamicTools)) !==
+      JSON.stringify(normalizeTools(params.dynamicTools));
+
+    // Swap the live surface FIRST, so that whichever `tools/list` the steps
+    // below provoke is answered with the new specs.
+    handle?.setTools(params.dynamicTools);
+
+    const withInstance: Record<string, unknown> =
+      handle && ownedName
+        ? { ...passthrough, [ownedName]: { type: "sdk", name: ownedName, instance: handle.instance } }
+        : { ...passthrough };
+
+    let result: { added?: string[]; removed?: string[] };
+    const relist = Boolean(handle && ownedName && specsChanged);
+    if (relist) {
+      if (entry.currentHandler !== null) {
+        // Not expected — openclaw refreshes between turns — but worth surfacing
+        // if it ever happens, because the withdraw/reinstate pair briefly takes
+        // the tool surface away from a model that may be mid-decision.
+        this.logger.warn(
+          "[attempt-registry] re-listing the dynamic tool surface while a turn is in flight",
+          { threadId, server: ownedName },
+        );
+      }
+      // Phase 1 — withdraw our sdk server (keeping any caller-supplied non-sdk
+      // servers) so the SDK disconnects it and the CLI is told it is gone.
+      await entry.query.setMcpServers({ ...passthrough });
+      // Phase 2 — reinstate it WITH the live instance. The SDK reconnects the
+      // same `McpServer` over a fresh in-process transport (its disconnect
+      // closes the transport but does not close the server, so the instance is
+      // reusable) and the CLI re-lists, picking up the new specs.
+      result = await entry.query.setMcpServers(withInstance);
+    } else {
+      result = await entry.query.setMcpServers(withInstance);
+    }
+
     // MUST re-fingerprint, and this is the subtle half of the fix. dynamicTools
     // is part of AttemptFingerprintInput, so if the entry kept its old
     // fingerprint the very next turn would compute a mismatch and discard the
@@ -189,11 +333,18 @@ export class AttemptRegistry {
     // respawn, and undoing the entire benefit.
     entry.fingerprintInput = { ...entry.fingerprintInput, dynamicTools: params.dynamicTools };
     entry.fingerprint = computeAttemptFingerprint(entry.fingerprintInput);
-    const added = result.added ?? [];
-    const removed = result.removed ?? [];
+
+    // Our own server's churn across the two phases is an artifact of forcing the
+    // re-list, not a change in the server SET the caller asked for — it was
+    // present before and after. Reporting it would tell openclaw a server
+    // appeared when none did.
+    const suppress = relist && ownedName ? ownedName : null;
+    const added = (result.added ?? []).filter((n) => n !== suppress);
+    const removed = (result.removed ?? []).filter((n) => n !== suppress);
     this.logger.info("[attempt-registry] refreshed dynamic tools on a live attempt", {
       threadId,
       toolCount: params.dynamicTools.length,
+      relisted: relist,
       added,
       removed,
     });
@@ -203,6 +354,31 @@ export class AttemptRegistry {
   size(): number {
     return this.byThread.size;
   }
+}
+
+/**
+ * True for an MCP server config the SDK will route through its in-process
+ * (`sdk`) path — the ones whose transport lifecycle `setMcpServers` manages by
+ * the presence of `instance`, and therefore the only ones that need the
+ * splice-the-instance-back-in treatment.
+ */
+function isSdkServerConfig(cfg: unknown): boolean {
+  return (
+    typeof cfg === "object" &&
+    cfg !== null &&
+    (cfg as { type?: unknown }).type === "sdk"
+  );
+}
+
+/** Order- and optional-field-insensitive normalization of a dynamic tool set. */
+function normalizeTools(tools: AttemptFingerprintInput["dynamicTools"]) {
+  return [...tools]
+    .map((t) => ({
+      name: t.name,
+      description: t.description ?? null,
+      inputSchema: t.inputSchema ?? null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function closeEntry(entry: AttemptEntry, reason: string, logger: Logger): void {
@@ -270,9 +446,7 @@ function normalizeAttemptFingerprintInput(input: AttemptFingerprintInput) {
     allowAll: input.allowAll,
     systemPromptAppend: input.systemPromptAppend ?? null,
     mcpServersConfig: input.mcpServersConfig ?? null,
-    dynamicTools: [...input.dynamicTools]
-      .map((t) => ({ name: t.name, description: t.description ?? null, inputSchema: t.inputSchema ?? null }))
-      .sort((a, b) => a.name.localeCompare(b.name)),
+    dynamicTools: normalizeTools(input.dynamicTools),
   };
 }
 

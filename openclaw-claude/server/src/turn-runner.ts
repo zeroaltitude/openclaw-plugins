@@ -33,6 +33,7 @@ import {
 import {
   buildDynamicToolsMcpServer,
   type DynamicToolCallResponse,
+  type DynamicToolsHandle,
   type ToolCallBridge,
 } from "./dynamic-tools.js";
 import { formatRateLimitMessage, parseAnthropicRateLimitError } from "./rate-limits.js";
@@ -783,6 +784,12 @@ async function createAttempt(params: {
   // Build the dynamic-tools MCP bridge if the thread carries any. The bridge
   // forwards each tools/call up through JSON-RPC to the openclaw plugin and
   // emits codex-shaped item/started + item/completed notifications around it.
+  //
+  // Hoisted out of the block so it can be retained on the AttemptEntry: a later
+  // `thread/refresh_tools` needs BOTH `setTools` (to change the surface at all)
+  // and `instance` (to hand back to setMcpServers so the SDK's desired-state
+  // diff doesn't tear down the transport). See `refreshDynamicTools`.
+  let dynamicToolsHandle: DynamicToolsHandle | undefined;
   if (dynamicTools.length > 0) {
     const bridge: ToolCallBridge = async ({ ctx: callCtx, callId, tool, args: toolArgs }) => {
       const response = await args.requestClient(
@@ -852,9 +859,10 @@ async function createAttempt(params: {
       logger,
     });
     handle.ctxRef.current = ctx;
-    mcpServers.openclaw = {
+    dynamicToolsHandle = handle;
+    mcpServers[handle.serverName] = {
       type: "sdk",
-      name: "openclaw",
+      name: handle.serverName,
       instance: handle.instance,
     };
   }
@@ -886,6 +894,7 @@ async function createAttempt(params: {
     // is an AsyncGenerator with extra methods; we only need setMcpServers, so
     // it is narrowed to LiveQueryToolSurface at the registry boundary.
     query: stream as unknown as AttemptEntry["query"],
+    ...(dynamicToolsHandle ? { dynamicTools: dynamicToolsHandle } : {}),
     currentHandler: null,
     currentReject: null,
     closed: false,

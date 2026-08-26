@@ -53,8 +53,36 @@ export type ToolCallBridge = (params: {
 
 export type DynamicToolsHandle = {
   instance: McpServer;
+  /**
+   * The MCP server name this handle is registered under (the `openclaw` in
+   * `mcp__openclaw__*`). Retained so `AttemptRegistry.refreshDynamicTools` can
+   * tell an incoming `{ type: "sdk", name }` entry it OWNS — and can therefore
+   * splice `instance` back in — from one it doesn't, without either side
+   * hardcoding the name.
+   */
+  serverName: string;
   /** Updated by the turn runner before each turn so the bridge knows which turn it is. */
   ctxRef: { current: ToolCallContext | null };
+  /**
+   * Replace the advertised tool set on a LIVE server.
+   *
+   * Both request handlers read the current spec set through this cell rather
+   * than closing over the constructor argument, so a swap takes effect for
+   * `tools/list` AND `tools/call` immediately — including the unknown-tool
+   * rejection, which is the half that makes a POLICY narrowing actually bite
+   * instead of merely being un-advertised.
+   *
+   * Emits `notifications/tools/list_changed` as the MCP spec requires. Be aware
+   * that on `claude` CLI 2.1.220 that notification is a no-op: the CLI does not
+   * re-issue `tools/list` in response to it, so the notification alone will NOT
+   * make the model see the new surface. Making the CLI re-list requires the
+   * remove-then-re-add `setMcpServers` dance in `refreshDynamicTools` — see the
+   * long comment there. We still send it because it is correct per spec and
+   * costs nothing, but nothing may depend on it.
+   */
+  setTools(specs: DynamicToolSpec[]): void;
+  /** The currently advertised spec set (diagnostics + tests). */
+  getTools(): DynamicToolSpec[];
 };
 
 export function buildDynamicToolsMcpServer(opts: {
@@ -79,15 +107,26 @@ export function buildDynamicToolsMcpServer(opts: {
   // declare the `tools` capability ourselves — registerTool would have done
   // it as a side effect. Without this, the SDK refuses to call `tools/list`
   // with the error "Server does not support tools".
+  //
+  // `listChanged: true` is the spec's declaration that this server emits
+  // `notifications/tools/list_changed`, which `setTools` does. (The claude CLI
+  // ignores it today — see the note on `DynamicToolsHandle.setTools`.)
   const instance = new McpServer(
     { name: opts.serverName, version: "0.1.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: { listChanged: true } } },
   );
-  const toolByName = new Map(opts.tools.map((t) => [t.name, t]));
 
-  // tools/list — raw JSON Schema pass-through.
+  // MUTABLE spec set. Previously both handlers closed over `opts.tools`
+  // directly, which made the surface immutable for the life of the SDK session
+  // — so `thread/refresh_tools` could report `refreshed: true` while the model
+  // kept seeing (and being able to call) the OLD catalog. Since catalog changes
+  // are often policy, that was a policy bypass, not just staleness.
+  let specs: DynamicToolSpec[] = [...opts.tools];
+  let toolByName = new Map(specs.map((t) => [t.name, t]));
+
+  // tools/list — raw JSON Schema pass-through, read from the live spec set.
   instance.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: opts.tools.map((spec) => {
+    tools: specs.map((spec) => {
       const inputSchema = spec.inputSchema ?? { type: "object", additionalProperties: true };
       return {
         name: spec.name,
@@ -131,7 +170,29 @@ export function buildDynamicToolsMcpServer(opts: {
     }
   });
 
-  return { instance, ctxRef };
+  return {
+    instance,
+    serverName: opts.serverName,
+    ctxRef,
+    setTools(next: DynamicToolSpec[]): void {
+      specs = [...next];
+      toolByName = new Map(specs.map((t) => [t.name, t]));
+      // Best-effort and deliberately non-fatal: the server may be momentarily
+      // transport-less (the SDK closes the in-process transport when it
+      // disconnects an sdk MCP server), and a failed courtesy notification must
+      // never fail the refresh that already succeeded in swapping the specs.
+      try {
+        void instance.server.sendToolListChanged();
+      } catch (err) {
+        opts.logger.debug("[dynamic-tools] tools/list_changed notification failed (ignored)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    getTools(): DynamicToolSpec[] {
+      return [...specs];
+    },
+  };
 }
 
 function toMcpContent(item: DynamicToolCallOutputContentItem): Record<string, unknown> {
