@@ -1,8 +1,8 @@
 # Runs the three TypeScript plugin suites in this monorepo.
 #
 # Until this file existed, `openclaw-provenance` (313 tests), the
-# `openclaw-claude` bridge server (211 tests) and `openclaw-beads` (66 tests)
-# had real, green, fast test commands that ran nowhere — 590 tests whose only
+# `openclaw-claude` bridge server (223 tests) and `openclaw-beads` (66 tests)
+# had real, green, fast test commands that ran nowhere — 602 tests whose only
 # execution was a human remembering to run them. `vestige-bridge-tests.yml`
 # (openclaw-vestige-skf) closed the same hole for the Python bridge and was
 # deliberately scoped to Python so a red TS suite could not destabilize the new
@@ -143,8 +143,8 @@ jobs:
 
       - name: Assert the suite is not silently empty
         working-directory: openclaw-claude/server
-        # Ratchet, not a target: 211 was the count on this branch's merge base.
-        run: python3 ../../.github/scripts/assert-junit-min-tests.py vitest-report.xml 211 claude-bridge
+        # Ratchet, not a target: 223 was the count on this branch's merge base.
+        run: python3 ../../.github/scripts/assert-junit-min-tests.py vitest-report.xml 223 claude-bridge
 
       - name: Upload test report
         if: always()
