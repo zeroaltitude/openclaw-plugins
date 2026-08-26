@@ -213,3 +213,9 @@ __marimo__/
 # Understand-Anything / graphify analysis artifacts (generated per-run, never source)
 **/.ua/
 **/graphify-out/
+
+# JUnit reports written by the plugin-ts CI jobs (.github/workflows/plugin-ts-tests.yml).
+# Appended here rather than beside coverage.xml above so this does not collide
+# with the pytest-report.xml line added by the vestige-bridge workflow PR.
+vitest-report.xml
+node-test-report.xml

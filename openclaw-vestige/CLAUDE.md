@@ -81,12 +81,19 @@ session was established, which makes it a usable proxy for "how old is the runni
 ## Build & Test
 
 ```bash
-# TypeScript plugin
-cd openclaw-plugin && npm install && npm test        # jest
+# TypeScript plugin — build only; there is NO test script and no test suite.
+cd openclaw-plugin && npm install && npm run build   # tsc
 
 # FastAPI bridge
 cd server && pip install -r requirements-dev.txt && pytest
 ```
+
+This block used to claim `npm test  # jest` for the plugin. That was
+aspirational — `openclaw-plugin/package.json` has only `build` and `dev`, jest
+is not a dependency, and there are no test files. Corrected in
+`openclaw-vestige-1j5` while wiring the monorepo's TypeScript suites into CI;
+if a suite is ever added here, wire it into `.github/workflows/plugin-ts-tests.yml`
+alongside the other three.
 
 The engine's gates live in `~/projects/vestige` (`cargo test --workspace`, plus
 `cargo test -p vestige-mcp --bin vestige-mcp` — see the warning in `refs/vestige.md`
