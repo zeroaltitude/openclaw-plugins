@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
@@ -83,6 +83,25 @@ class MemoryRequest(BaseModel):
         None, description="Why this memory is promoted/demoted (promote/demote only)"
     )
     content: str | None = Field(None, description="Replacement content (edit only)")
+
+    @model_validator(mode="after")
+    def _edit_requires_content(self) -> MemoryRequest:
+        """``edit`` without usable content is a client error, not an engine error.
+
+        The engine's ``execute_edit`` rejects a missing ``content`` with
+        ``"Missing 'content' field. Required for edit action."`` and a
+        whitespace-only one with ``"Content cannot be empty"`` — but only after a
+        round trip, and the bridge wraps that failure in a ``200`` whose body
+        carries the error. Catching it here turns both cases into a ``422`` that
+        names the offending field, which is what an HTTP caller can act on.
+        """
+        if self.action is MemoryAction.edit and not (self.content or "").strip():
+            raise ValueError(
+                "action 'edit' requires a non-empty 'content' field — it replaces "
+                "the memory's content in place (embedding regenerated, FSRS state "
+                "preserved)"
+            )
+        return self
 
 
 class PromoteRequest(BaseModel):
