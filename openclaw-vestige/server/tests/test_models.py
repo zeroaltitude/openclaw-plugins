@@ -1,5 +1,8 @@
 """Basic sanity tests for Pydantic models."""
 
+import pytest
+from pydantic import ValidationError
+
 from app.models import (
     CodebaseRequest,
     DemoteRequest,
@@ -43,6 +46,43 @@ def test_smart_ingest_request():
 def test_memory_request():
     r = MemoryRequest(action=MemoryAction.get, memory_id="abc-123")
     assert r.action == MemoryAction.get
+
+
+# ── openclaw-vestige-cmj: the `edit` action ──────────────────────────────────
+
+def test_memory_request_edit_carries_content():
+    r = MemoryRequest(action=MemoryAction.edit, memory_id="abc-123", content="rewritten")
+    assert r.action == MemoryAction.edit
+    assert r.content == "rewritten"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, "", "   ", "\n\t "],
+    ids=["missing", "empty", "spaces", "whitespace"],
+)
+def test_memory_request_edit_without_content_is_rejected(content):
+    """The engine fails these too — but only after a round trip. Reject locally."""
+    with pytest.raises(ValidationError) as excinfo:
+        MemoryRequest(action=MemoryAction.edit, memory_id="abc-123", content=content)
+    assert "content" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        MemoryAction.get,
+        MemoryAction.delete,
+        MemoryAction.state,
+        MemoryAction.check_state,
+        MemoryAction.promote,
+        MemoryAction.demote,
+    ],
+)
+def test_memory_request_content_only_required_for_edit(action):
+    """The guard must not make `content` mandatory for every action."""
+    r = MemoryRequest(action=action, memory_id="abc-123")
+    assert r.content is None
 
 
 def test_promote_demote():

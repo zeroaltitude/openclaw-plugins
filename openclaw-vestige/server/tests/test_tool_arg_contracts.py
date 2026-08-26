@@ -305,6 +305,72 @@ def test_memory_check_state_maps_to_engine_state_action(calls):
     assert recorded[0][1]["action"] == "state"
 
 
+# ---------------------------------------------------------------------------
+# Targeted tests for openclaw-vestige-cmj — the `edit` action
+# ---------------------------------------------------------------------------
+
+def test_memory_edit_forwards_content_under_the_engines_field_name(calls):
+    """``MemoryArgs`` is ``rename_all = "camelCase"``, but ``content`` is one word.
+
+    So the wire name is plain ``content`` — no ``_WIRE_ALIASES`` entry needed
+    for the ``memory`` tool. This pins that, because the schema-vs-struct gap is
+    exactly what openclaw-vestige-ow6 was.
+    """
+    client, recorded = calls
+    recorded.clear()
+
+    resp = client.post(
+        "/memory",
+        json={"action": "edit", "memory_id": _MEMORY_ID, "content": "rewritten body"},
+    )
+    assert resp.status_code == 200
+
+    tool, args = recorded[0]
+    assert tool == "memory"
+    assert args == {"action": "edit", "id": _MEMORY_ID, "content": "rewritten body"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "edit", "memory_id": _MEMORY_ID},
+        {"action": "edit", "memory_id": _MEMORY_ID, "content": None},
+        {"action": "edit", "memory_id": _MEMORY_ID, "content": ""},
+        {"action": "edit", "memory_id": _MEMORY_ID, "content": "   "},
+    ],
+    ids=["missing", "null", "empty", "whitespace"],
+)
+def test_memory_edit_without_content_is_rejected_before_the_engine(calls, payload):
+    """422 at the bridge, and no tool call — the engine never sees it."""
+    client, recorded = calls
+    recorded.clear()
+
+    resp = client.post("/memory", json=payload)
+    assert resp.status_code == 422, resp.text
+    assert "content" in resp.text
+    assert recorded == []
+
+
+def test_memory_content_is_not_forwarded_for_non_edit_actions(calls):
+    """The engine ignores ``content`` unless the action is ``edit``.
+
+    A caller that sends it anyway gets it forwarded — harmless, and the arg is a
+    declared property — but ``delete`` must not start requiring it.
+    """
+    client, recorded = calls
+    recorded.clear()
+
+    resp = client.post("/memory", json={"action": "delete", "memory_id": _MEMORY_ID})
+    assert resp.status_code == 200
+    assert "content" not in recorded[0][1]
+
+
+def test_edit_is_in_the_engines_published_action_enum():
+    """The snapshot is the record of what production deserializes."""
+    assert "edit" in _SCHEMAS["memory"]["properties"]["action"]["enum"]
+    assert "content" in _SCHEMAS["memory"]["properties"]
+
+
 def test_search_threshold_is_forwarded_as_min_similarity(calls):
     """'threshold' is not a search property — it was silently discarded."""
     client, recorded = calls

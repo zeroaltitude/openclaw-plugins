@@ -70,7 +70,7 @@ jobs:
           # Ratchet, not a target: raise this when tests are added, never lower
           # it to make a red build green. 24 was the count on main at the commit
           # that introduced this workflow.
-          MIN_TESTS: '24'
+          MIN_TESTS: '117'
         run: |
           python - <<'PY'
           import os
