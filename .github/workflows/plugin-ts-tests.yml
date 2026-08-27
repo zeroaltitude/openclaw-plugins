@@ -27,6 +27,9 @@
 #     reporter on its own suppresses the human-readable output entirely — the
 #     log would show one line, "JUNIT report written to ...", and nothing about
 #     which tests ran.
+#  5. The provenance job states whether its own host-API typecheck guard is live
+#     here, rather than letting an unresolvable dependency downgrade that guard
+#     to nothing while the job stays green. See the step's comment below.
 #
 # Node 24 is pinned across all three jobs. `openclaw-claude/server` is the only
 # package declaring `engines` (">=22.0.0"); 24 satisfies it, is what the local
@@ -43,6 +46,7 @@ on:
       - 'openclaw-beads/**'
       - '.github/workflows/plugin-ts-tests.yml'
       - '.github/scripts/assert-junit-min-tests.py'
+      - '.github/scripts/assert-host-api-guard.mjs'
   pull_request:
     paths:
       - 'openclaw-provenance/**'
@@ -50,6 +54,7 @@ on:
       - 'openclaw-beads/**'
       - '.github/workflows/plugin-ts-tests.yml'
       - '.github/scripts/assert-junit-min-tests.py'
+      - '.github/scripts/assert-host-api-guard.mjs'
   workflow_dispatch:
 
 permissions:
@@ -74,21 +79,47 @@ jobs:
 
       # `openclaw-provenance` devDepends on `openclaw: file:../../openclaw` —
       # a path OUTSIDE this repo (the OpenClaw core checkout a developer keeps
-      # as a sibling of openclaw-plugins). It is absent on a runner, and that is
-      # fine: npm ci leaves a dangling symlink and exits 0, and the package
-      # contributes no types anyway. `src/index.ts` is the only importer, its
-      # import of `openclaw/plugin-sdk` carries an explicit
-      # `// @ts-ignore TS7016: plugin-sdk types not available`, and no
-      # `./plugin-sdk` export exists in either the local build or the published
-      # package — so the symlink is inert for all three gates. Verified by
-      # running `npm ci && npm run validate` against a clean `git archive`
-      # extraction with no sibling directory: exit 0, 313 tests.
+      # as a sibling of openclaw-plugins). It is absent on a runner: npm ci
+      # leaves a DANGLING symlink and exits 0.
       #
-      # If someone removes that @ts-ignore, this job goes red — correctly, since
-      # the import does not resolve locally either.
+      # That is not harmless, and an earlier version of this comment was wrong
+      # to say it was. PR #33 repointed `src/index.ts` at
+      # `openclaw/plugin-sdk/core`, which DOES exist and DOES export
+      # `OpenClawPluginApi` — that import is now the only thing making
+      # `npm run typecheck` catch host-API drift. It still carries an explicit
+      # `// @ts-ignore TS2307`, so when the symlink dangles the import error is
+      # swallowed, `OpenClawPluginApi` degrades to `any`, and the three gates
+      # below pass anything at all while staying green.
       - name: Install dependencies
         working-directory: openclaw-provenance
         run: npm ci
+
+      # Say out loud whether the guard described above is actually live in this
+      # run, before the steps that depend on it. Measured on a `git archive`
+      # extraction of main with no sibling directory (openclaw-vestige-ive):
+      # `api.thisMemberDoesNotExistOnTheHostApi()` inside `register()`
+      # typechecks EXIT 0 there, and TS2339 on a dev box with the sibling built.
+      #
+      # The probe compiles the real module specifier rather than testing the
+      # symlink, because testing the symlink is not sufficient — also measured:
+      # openclaw's `dist/` is gitignored and untracked, so a plain
+      # `actions/checkout` of the core repo yields a sibling that dereferences
+      # fine while `dist/plugin-sdk/core.d.ts` is absent and the guard is still
+      # dead. Only the compiler's verdict distinguishes those.
+      #
+      # HOST_API_GUARD_REQUIRED is a ratchet like MIN_TESTS: today the host
+      # types are unreachable on a runner and there is no fix this workflow can
+      # apply by itself, so a DEAD verdict is reported as a warning annotation
+      # and does not fail the job. Flip it to 'true' in the same commit that
+      # makes the types reachable here; never flip it back off to turn a red
+      # build green. openclaw-vestige-6mf tracks that fix, including the design
+      # question it turns on: which host version the plugin's type contract
+      # should compile against.
+      - name: Report host-API typecheck guard status
+        working-directory: openclaw-provenance
+        env:
+          HOST_API_GUARD_REQUIRED: 'false'
+        run: node ../.github/scripts/assert-host-api-guard.mjs
 
       # These three steps are `npm run validate` (= typecheck && typecheck:tests
       # && test), split out so the log names the gate that failed instead of

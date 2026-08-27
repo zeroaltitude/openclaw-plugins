@@ -220,3 +220,9 @@ __marimo__/
 # with the pytest-report.xml line added by the vestige-bridge workflow PR.
 vitest-report.xml
 node-test-report.xml
+
+# Scratch file written into openclaw-provenance/ by
+# .github/scripts/assert-host-api-guard.mjs. The script removes it in a finally
+# block; this only covers a hard kill mid-probe, so a stray copy can never be
+# committed by accident.
+.host-api-guard-probe.ts
