@@ -7,7 +7,11 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 ```bash
 bd ready              # Find available work
 bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
+bd update <id> --claim --actor <you>  # Claim work ATOMICALLY — check the exit code;
+                                      # nonzero means another agent won, so stand down
+                                      # (openclaw-1lw7). Never claim with
+                                      # `--assignee <me> --status in_progress`: that is
+                                      # last-write-wins and every racer thinks it won.
 bd close <id>         # Complete work
 bd sync               # Sync with git
 ```
