@@ -34,6 +34,8 @@ import {
   ensureFreshExport,
   setIssueMetadata,
   referencesFromLabels,
+  claimIssue,
+  normalizeSentinelAssignees,
   type BdIssue,
   type BdRepo,
   type BdMutateInput,
@@ -44,8 +46,37 @@ import {
   writeSessionMapCache,
 } from "./session-map.js";
 import { TtlCache } from "./ttl-cache.js";
+import { formatClaimOutcome, isSharedAssignee } from "./claim.js";
+import {
+  SharedOfferRegistry,
+  DEFAULT_SHARED_OFFER_TTL_MS,
+} from "./shared-offer-registry.js";
 
 export { TtlCache } from "./ttl-cache.js";
+export {
+  SHARED_ASSIGNEE_SENTINELS,
+  classifyClaimFailure,
+  formatClaimOutcome,
+  isSharedAssignee,
+  isSharedAssigneeSentinel,
+  normalizeAssignee,
+  type ClaimOutcome,
+} from "./claim.js";
+export {
+  SharedOfferRegistry,
+  DEFAULT_SHARED_OFFER_TTL_MS,
+} from "./shared-offer-registry.js";
+
+/**
+ * Process-wide offer registry for shared ready issues (openclaw-1lw7).
+ *
+ * Module scope on purpose: every agent's prompt is built by this one plugin
+ * instance in the one gateway process, so this map is what makes "offer a
+ * shared issue id to exactly one agent at a time" atomic across competing
+ * heartbeat wakes. See src/shared-offer-registry.ts for why that is sufficient
+ * as an admission gate and why it is explicitly NOT the primary mechanism.
+ */
+const sharedOffers = new SharedOfferRegistry();
 
 const DEFAULT_PROMPT_BLOCK_TTL_MS = 60_000;
 const DEFAULT_READY_API_TTL_MS = 20_000;
@@ -107,7 +138,33 @@ interface BeadsPluginConfig {
   runLoop?: {
     enabled?: boolean;
     readyLimitPerRepo?: number;
+    /**
+     * Show ready issues that carry no assignee. Defaults to TRUE.
+     *
+     * It used to default to false, when shared work was filed as the
+     * pseudo-owner `assignee: any` and unassigned meant "not triaged yet".
+     * Retiring that sentinel (openclaw-1lw7) makes unassigned *the* shared
+     * bucket — it is what `bd update --claim` can actually arbitrate — so
+     * hiding it would hide all shared work.
+     */
     includeUnassigned?: boolean;
+    /**
+     * How long a shared (unassigned) ready issue is offered to a single agent
+     * before other agents may see it again. Default 5 minutes; 0 disables the
+     * gate entirely and relies solely on the `bd --claim` compare-and-set.
+     *
+     * This bounds starvation: an agent that takes an offer and does nothing
+     * parks the issue for at most one heartbeat cycle. Withheld issues are
+     * still counted in the block as `hidden_offered_elsewhere`.
+     */
+    sharedOfferTtlMs?: number;
+    /**
+     * At gateway startup, retire legacy `assignee: any` pseudo-owners to
+     * unassigned so they become claimable. Default: enabled. Without this,
+     * pre-existing sentinel rows can be claimed by NOBODY (bd reads `any` as a
+     * real claimant) and agents fall back to last-write-wins.
+     */
+    normalizeSentinelAssigneesOnStartup?: boolean;
     startupWake?: boolean;
     startupWakeTarget?: string;
     startupWakeDelayMs?: number;
@@ -227,17 +284,61 @@ function issueAssignee(issue: BdIssue): string {
  * visible, but we never *write* it — see `createIssue` in `beads-cli.ts`.
  */
 export function isBroadcastAssignee(owner: string): boolean {
-  return owner === "" || owner === "any";
+  // Delegates to src/claim.ts so the sentinel set has exactly one definition;
+  // that module also covers "anyone"/"unassigned"/"none"/"nobody" and is
+  // case/whitespace tolerant, which a bare `=== "any"` was not.
+  return isSharedAssignee(owner);
 }
 
 export function shouldIncludeReadyIssue(issue: BdIssue, agentId: string, includeUnassigned: boolean): boolean {
   const owner = issueAssignee(issue);
-  // Legacy `any` stays visible unconditionally; genuinely-unassigned work is
+  // Legacy sentinel rows (`any`, and friends) stay visible unconditionally, so
+  // retiring the sentinel can roll out without a window where shared work
+  // silently vanishes from every agent's queue. Genuinely-unassigned work is
   // the new normal claimable state, so it is shown unless an operator has
   // explicitly opted out via runLoop.includeUnassigned=false.
-  if (owner === "any") return true;
+  //
+  // "Shown" is not "yours": a shared issue must still be WON with
+  // `bd update <id> --claim` before any work starts. See src/claim.ts.
   if (!owner) return includeUnassigned;
-  return owner === agentId;
+  if (owner === agentId) return true;
+  return isSharedAssignee(owner);
+}
+
+/**
+ * Admission gate for one ready issue on one agent's prompt build.
+ *
+ * Returns false when the issue is shared work currently offered to a DIFFERENT
+ * agent, in which case the id is withheld from this agent's block entirely —
+ * so the agent cannot spawn work on it however it reads its instructions. This
+ * is the model-independent half of the openclaw-1lw7 fix; the load-bearing half
+ * is the `bd update --claim` compare-and-set that runs when work actually
+ * starts.
+ *
+ * Issues already assigned to this agent are never gated: nobody is racing them,
+ * and gating them would break "resume, don't restart" on multi-turn work.
+ *
+ * Side-effecting by design — the check and the take are one synchronous step.
+ * Splitting them would recreate the read-then-write race this closes.
+ */
+export function admitSharedIssue(params: {
+  issue: BdIssue;
+  agentId: string;
+  repoName: string;
+  /** 0 disables the gate. */
+  offerTtlMs: number;
+  registry: SharedOfferRegistry;
+}): boolean {
+  const { issue, agentId, repoName, offerTtlMs, registry } = params;
+  if (offerTtlMs <= 0) return true;
+  const key = `${repoName}:${issue.id}`;
+  if (!isSharedAssignee((issue as any).assignee)) {
+    // Somebody's claim landed (or it was always directly assigned): stop
+    // holding the key so the map stays bounded by the live shared set.
+    registry.release(key);
+    return true;
+  }
+  return registry.offer(key, agentId, offerTtlMs).acquired;
 }
 
 /**
@@ -283,6 +384,12 @@ export interface ReadyRepoEntry {
     filteredUnassigned: number;
     /** Dropped because they are assigned to a different agent. */
     filteredOtherOwner: number;
+    /**
+     * Shared issues withheld because they are currently offered to a different
+     * agent (openclaw-1lw7). Counted rather than silently dropped: a shortened
+     * queue must always be explainable (openclaw-beads-7sz).
+     */
+    offeredElsewhere: number;
     /** Dropped only by the per-repo render cap. */
     truncated: number;
   };
@@ -331,9 +438,11 @@ export function formatPlansAndTasksBlock(params: {
   lines.push("- Ignore issues assigned to another owner. You may act on issues assigned to you, and on unassigned issues (shown with owner=\"unassigned\").");
   lines.push("- Never treat issues from repos whose configured repo name matches /test/i as ready work.");
   lines.push(
-    `- CLAIM ATOMICALLY BEFORE YOU START. Other agents wake on their own heartbeats and read this same queue, so "it looked unassigned" is not ownership. To take an issue, run \`bd update <id> --claim --actor ${params.agentId}\` in that repo and CHECK THE EXIT CODE. Exit 0 means you own it (assignee and in_progress are set atomically) — proceed. NONZERO means another agent won the race; the error names the winner (\`issue already claimed by <agent>\`). On nonzero you MUST NOT start the work, spawn a subagent, or cut a worktree — pick different work, and say who won. Do NOT substitute \`--assignee <you> --status in_progress\`: that is last-write-wins and every racing agent believes it won.`,
+    `- CLAIM ATOMICALLY BEFORE YOU START. Other agents wake on their own heartbeats and read this same queue, so "it looked unassigned" is not ownership. To take an issue, run \`bd update <id> --claim --actor ${params.agentId}\` in that repo and CHECK THE EXIT CODE. Exit 0 means you own it (assignee and in_progress are set atomically) — proceed. NONZERO means another agent won the race; the error names the winner (\`issue already claimed by <agent>\`). On nonzero you MUST create NOTHING, spawn NOTHING and cut NO worktree — pick different work, and say in your reply which issue you stood down from and who won. Do NOT substitute \`--assignee <you> --status in_progress\`: that is last-write-wins and every racing agent believes it won.`,
   );
-  lines.push("- Legacy issues whose owner is literally \"any\" cannot be claimed by anyone — `bd` reads \"any\" as a claimant. Normalize first with `bd update <id> --assignee \"\"`, then claim it atomically as above.");
+  lines.push(
+    "- If a claim fails with `already claimed by any` (or another pseudo-owner), that is NOT a lost race and NOT your cue to take it another way: `bd` reads the literal string as a claimant, so NOBODY owns that issue and nobody can claim it until the sentinel is retired. Stand down and report it. Do NOT run `--assignee \"\"` yourself and then claim: clearing and claiming are two writes, and a second agent that read the sentinel before you can clear the field again and wipe your claim, leaving two winners. The plugin retires these rows at gateway startup, which is a context where nothing is racing.",
+  );
   lines.push("- Re-claiming an issue you already own is idempotent (exit 0), so it is always safe to re-run the claim to confirm ownership before resuming work.");
   lines.push("- When completed, close it. If waiting on the user, mark waiting_for_user. If waiting on an available agent/resource, mark waiting_for_available_agent. If blocked with no path forward, mark blocked. Keep state truthful.");
   lines.push("- An `in_progress` issue listed below is active work you (or a previous turn) already claimed. Resume it; do NOT restart it as if it were a fresh `open` issue. If a single `in_progress` issue represents a long-running multi-turn loop (e.g. cyclical PR review), advance it as far as the current turn allows, leave it `in_progress`, and let the next heartbeat pick up where you left off.");
@@ -366,11 +475,18 @@ export function formatPlansAndTasksBlock(params: {
           attrs.push(`hidden_unassigned=\"${counts.filteredUnassigned}\"`);
         if (counts.filteredOtherOwner > 0)
           attrs.push(`hidden_other_owner=\"${counts.filteredOtherOwner}\"`);
+        if (counts.offeredElsewhere > 0)
+          attrs.push(`hidden_offered_elsewhere=\"${counts.offeredElsewhere}\"`);
         if (counts.truncated > 0) attrs.push(`hidden_over_limit=\"${counts.truncated}\"`);
       }
       lines.push(`  <repo ${attrs.join(" ")}>`);
       if (entry.error) lines.push(`    <error>${escapeXml(entry.error)}</error>`);
       if (entry.warning) lines.push(`    <warning>${escapeXml(entry.warning)}</warning>`);
+      if (counts && counts.offeredElsewhere > 0) {
+        lines.push(
+          `    <note>${counts.offeredElsewhere} shared issue(s) here are currently offered to another agent and withheld from you on purpose (openclaw-1lw7 collision guard). They are NOT idle work you are missing, and you must not go looking them up to work around this. If the holder does not claim one, it returns to this queue within the offer TTL.</note>`,
+        );
+      }
       if (counts && counts.filteredUnassigned > 0 && counts.shown === 0) {
         lines.push(
           `    <note>All ${counts.filteredUnassigned} ready issue(s) here are unassigned and hidden because an operator set runLoop.includeUnassigned=false. Since openclaw-1lw7, unassigned is the normal claimable state for shared backlog, so this setting is hiding real, claimable work. Claim one explicitly (\`bd update <id> --claim --actor ${escapeXml(params.agentId)}\`) if nothing else is pending.</note>`,
@@ -606,8 +722,12 @@ async function collectRepoReady(params: {
   limit: number;
   includeUnassigned: boolean;
   deadlineMs: number;
+  /** 0 disables the shared-offer admission gate. */
+  offerTtlMs: number;
+  offerRegistry: SharedOfferRegistry;
 }): Promise<ReadyRepoEntry> {
-  const { repo, agentId, bdBinary, limit, includeUnassigned, deadlineMs } = params;
+  const { repo, agentId, bdBinary, limit, includeUnassigned, deadlineMs, offerTtlMs, offerRegistry } =
+    params;
   const runOpts = { cwd: repo.path, bdBinary, deadlineMs };
   const warnings: string[] = [];
 
@@ -668,9 +788,22 @@ async function collectRepoReady(params: {
 
   let filteredUnassigned = 0;
   let filteredOtherOwner = 0;
+  let offeredElsewhere = 0;
   const kept: BdIssue[] = [];
   for (const issue of ready) {
     if (shouldIncludeReadyIssue(issue, agentId, includeUnassigned)) {
+      if (
+        !admitSharedIssue({
+          issue,
+          agentId,
+          repoName: repo.name,
+          offerTtlMs,
+          registry: offerRegistry,
+        })
+      ) {
+        offeredElsewhere++;
+        continue;
+      }
       kept.push(issue);
       continue;
     }
@@ -691,6 +824,7 @@ async function collectRepoReady(params: {
       shown: issues.length,
       filteredUnassigned,
       filteredOtherOwner,
+      offeredElsewhere,
       truncated: Math.max(0, kept.length - issues.length),
     },
   };
@@ -721,6 +855,7 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
   // this to false would hide the entire broadcast backlog and silence the
   // queue. Operators can still opt out explicitly.
   const includeUnassigned = config.runLoop?.includeUnassigned ?? true;
+  const offerTtlMs = Math.max(0, config.runLoop?.sharedOfferTtlMs ?? DEFAULT_SHARED_OFFER_TTL_MS);
   const actionableRepos = repos.filter((repo) => !/test/i.test(repo.name));
   const ttlMs = Math.max(0, config.runLoop?.readyCacheTtlMs ?? DEFAULT_PROMPT_BLOCK_TTL_MS);
   const budgetMs = Math.max(1_000, config.runLoop?.readyBudgetMs ?? DEFAULT_READY_BUDGET_MS);
@@ -728,6 +863,7 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
     agentId,
     limit,
     includeUnassigned,
+    offerTtlMs,
     bdBinary: config.bdBinary ?? "",
     repos: actionableRepos.map((r) => [r.name, r.path]),
   });
@@ -747,6 +883,8 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
                 limit,
                 includeUnassigned,
                 deadlineMs,
+                offerTtlMs,
+                offerRegistry: sharedOffers,
               }).catch(
                 (err: any): ReadyRepoEntry => ({
                   repo,
@@ -1005,11 +1143,61 @@ export function activate(api: PluginApi): void {
     );
   }
 
-  if (api.registerHook && api.runtime?.system?.requestHeartbeatNow) {
+  if (api.registerHook) {
     api.registerHook(
       "gateway:startup",
       (event) => {
         const runLoop = cfg(api).runLoop;
+
+        // PHASE 0 (async, non-blocking): retire legacy `assignee: any`
+        // pseudo-owners so shared work is claimable at all.
+        //
+        // Runs before the run-loop/startupWake opt-outs below because it is
+        // data repair, not scheduling: an operator who disabled the startup
+        // wake still must not be left with rows that NOBODY can claim (bd reads
+        // `any` as a real claimant and refuses every actor).
+        //
+        // Safe to run concurrently with live agents: it only ever touches rows
+        // whose assignee is *exactly* a sentinel, and a genuine claim's assignee
+        // is an agent id — so it cannot wipe a claim. See
+        // normalizeSentinelAssignees in beads-cli.ts.
+        if (runLoop?.normalizeSentinelAssigneesOnStartup !== false) {
+          const repos = (cfg(api).repos ?? []).filter((repo) => !/test/i.test(repo.name));
+          void (async () => {
+            for (const repo of repos) {
+              try {
+                const result = await normalizeSentinelAssignees({
+                  cwd: repo.path,
+                  bdBinary: cfg(api).bdBinary,
+                  timeoutMs: 20_000,
+                });
+                if (result.error) {
+                  log.warn(`[beads] sentinel-normalize repo=${repo.name} FAILED: ${result.error}`);
+                  continue;
+                }
+                if (result.normalized.length || result.failed.length) {
+                  log.info(
+                    `[beads] sentinel-normalize repo=${repo.name} scanned=${result.scanned} ` +
+                      `retired=${result.normalized.length}` +
+                      (result.normalized.length
+                        ? ` [${result.normalized.map((n) => `${n.id}(was ${n.was})`).join(", ")}]`
+                        : "") +
+                      (result.failed.length
+                        ? ` failed=${result.failed.length} [${result.failed
+                            .map((f) => `${f.id}: ${f.error}`)
+                            .join("; ")}]`
+                        : ""),
+                  );
+                }
+              } catch (err: any) {
+                log.warn(
+                  `[beads] sentinel-normalize repo=${repo.name} threw: ${String(err?.message ?? err).slice(0, 300)}`,
+                );
+              }
+            }
+          })();
+        }
+
         if (runLoop?.enabled === false || runLoop?.startupWake === false) return;
         if (runLoop?.startupSessionMapping === false) {
           // Mapping disabled by config: fall back to legacy single-broadcast
@@ -1310,6 +1498,34 @@ export function activate(api: PluginApi): void {
             await reopenIssue(id, opts);
             const detail = await showIssue(id, opts);
             return sendJson(res, 200, { repo: repo.name, issue: detail });
+          }
+          if (action === "claim") {
+            // Compare-and-set take-ownership (openclaw-1lw7). A lost race is
+            // NOT a server error — it is the mechanism working — so it answers
+            // 409 with the winner named, and the caller is expected to stand
+            // down. 200 means and only means "you own this now".
+            const body = (await readJsonBody(req).catch(() => ({}))) as { actor?: string };
+            const actor = String(body?.actor ?? "").trim();
+            if (!actor) return sendJson(res, 400, { error: "claim requires an actor" });
+            const outcome = await claimIssue(id, actor, opts);
+            log.info(`[beads] api-claim repo=${repo.name} ${formatClaimOutcome(outcome)}`);
+            if (!outcome.ok) {
+              return sendJson(res, outcome.reason === "already-claimed" ? 409 : 422, {
+                repo: repo.name,
+                claimed: false,
+                reason: outcome.reason,
+                heldBy: outcome.heldBy,
+                error: outcome.detail,
+              });
+            }
+            const detail = await showIssue(id, opts, { forceFresh: true });
+            return sendJson(res, 200, {
+              repo: repo.name,
+              claimed: true,
+              actor: outcome.actor,
+              ...(outcome.exportWarning ? { warning: outcome.exportWarning } : {}),
+              issue: detail,
+            });
           }
           return sendJson(res, 400, { error: `unknown action: ${action}` });
         }
