@@ -98,7 +98,7 @@ describe('run loop prompt helpers', () => {
     assert.match(block, /bd update <id> --claim --actor narcissus/, 'must name the atomic claim verb');
     assert.match(block, /CHECK THE EXIT CODE/, 'a claim whose exit code is ignored is not a claim');
     assert.match(block, /NONZERO means another agent won the race/);
-    assert.match(block, /MUST NOT start the work, spawn a subagent, or cut a worktree/, 'the loser must abort');
+    assert.match(block, /MUST create NOTHING, spawn NOTHING and cut NO worktree/, 'the loser must abort');
     assert.match(
       block,
       /Do NOT substitute `--assignee <you> --status in_progress`/,
@@ -112,7 +112,26 @@ describe('run loop prompt helpers', () => {
     const block = formatPlansAndTasksBlock({ agentId: 'tank', repos: [] });
     assert.doesNotMatch(block, /general backlog \(owner any\)/);
     assert.match(block, /leave it UNASSIGNED/);
-    assert.match(block, /Normalize first with `bd update <id> --assignee ""`/, 'legacy any needs a recovery path');
+  });
+
+  it('tells the agent to STAND DOWN on a sentinel row, not to hand-normalize it', () => {
+    // Deliberately inverted from an earlier revision of this test, which
+    // required the block to say `Normalize first with bd update <id>
+    // --assignee ""` and then claim. That is two writes and it reopens the
+    // race it looks like it closes: A clears the sentinel, A claims, then B —
+    // which read the sentinel before A moved — clears the field again, wiping
+    // A's claim, and claims too. Two winners, which is the openclaw-1lw7
+    // incident with extra steps. Retiring a sentinel is a startup migration
+    // (normalizeSentinelAssignees), never part of claiming.
+    const block = formatPlansAndTasksBlock({ agentId: 'tank', repos: [] });
+    assert.doesNotMatch(
+      block,
+      /Normalize first with `bd update <id> --assignee ""`/,
+      'the block must not prescribe a clear-then-claim, which is a lost-update race',
+    );
+    assert.match(block, /NOT a lost race/, 'sentinel-blocked is distinct from losing a race');
+    assert.match(block, /Stand down and report it/);
+    assert.match(block, /clearing and claiming are two writes/, 'and it must say WHY not to do it by hand');
   });
 
   it('renders an empty ready marker when nothing is available', () => {

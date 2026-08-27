@@ -195,6 +195,58 @@ explicitly forbids the read-then-write substitute. Keep it in lockstep with
 `~/.openclaw-narcissus/refs/openclaw.md` § "Beads run-loop discipline" — two
 conflicting instructions are worse than the original bug.
 
+### The claim mechanism itself (openclaw-1lw7 hardening)
+
+The section above establishes the policy: `--claim` is the atomic verb and `any`
+is retired. This one covers the machinery that makes it a *mechanism* rather
+than an instruction, because the instruction is the part that had already failed
+three times.
+
+- **`src/claim.ts` owns the sentinel set and the outcome taxonomy.**
+  `normalizeAssignee` collapses `any`/`anyone`/`unassigned`/`none`/`nobody`
+  case- and whitespace-insensitively, so `"ANY "` cannot slip past a
+  `=== "any"` check. `isBroadcastAssignee` in `index.ts` and `isIssueForAgent`
+  in `session-map.ts` both delegate here — one definition, three call sites.
+- **`already-claimed`, `sentinel-blocked` and `error` are three different
+  verdicts and bd reports the first two identically.** `classifyClaimFailure`
+  splits them. Getting this wrong is worse than the original bug in both
+  directions: reading `already claimed by any` as a lost race makes every agent
+  stand down from shared work forever, and reading a timeout as a win puts two
+  agents on one issue. An unexplained failure is `error` = ownership **UNKNOWN**,
+  never a win.
+- **`claimIssue()` re-exports after a win.** bd does not auto-export, and the
+  readiness fast path reads `.beads/issues.jsonl`. Without the refresh the very
+  next prompt build still sees the issue as unassigned and offers it to somebody
+  else — a won claim invisible to the queue is no better than no claim.
+- **`POST /beads/api/issue/<id>/claim` answers 409 on a lost race**, not 500. A
+  lost race is the mechanism working. 200 means, and only means, "you own this".
+- **Retiring a sentinel is a migration, never part of claiming.**
+  `normalizeSentinelAssignees()` runs per repo at `gateway:startup`. Its safety
+  does not rest on being the only writer: it only touches rows whose assignee is
+  *exactly* a sentinel, and a genuine claim's assignee is an agent id — so it
+  cannot wipe a live claim. A test asserts exactly that. **Never** tell an agent
+  to `--assignee ""` then `--claim`: two writes, and the second clear wipes the
+  first agent's claim, leaving two winners. The block tells agents to stand down
+  on `sentinel-blocked` instead, and `test/runloop.test.mjs` pins that (it is
+  deliberately inverted from an earlier revision that required the racy advice).
+- **The offer registry is a gate, not the mechanism.**
+  `src/shared-offer-registry.ts` hands a shared issue id to exactly one agent at
+  a time, so a collision cannot happen even if an agent ignores the claim
+  instruction. It is an in-process map, genuinely atomic across competing prompt
+  builds (one gateway, one thread — exactly the population that collided) but
+  **not** durable or multi-host. Do not promote it to "the mechanism"; the
+  compare-and-set in the database is. Withheld issues are counted as
+  `hidden_offered_elsewhere` and explained in the block, per openclaw-beads-7sz.
+  Offers lapse (`runLoop.sharedOfferTtlMs`, default 5 min) so an unused offer
+  parks an issue for at most one heartbeat cycle rather than forever.
+
+**The installed `bd` is not `~/projects/beads`.** That checkout gates claims on
+`status = 'open'` in addition to assignee; the deployed v1.0.3 binary claims an
+`in_progress` unassigned row happily (verified). Derive claim behavior from the
+binary you actually run. This is also why the tempting upstream one-liner
+(teach the claim predicate that `any` is not a claimant) was *not* the fix we
+shipped — we cannot validate a patch against a tree that isn't what runs here.
+
 ### Retries
 
 Read-only commands retry transient failures (timeout kills, Dolt lock

@@ -10,6 +10,13 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import {
+  classifyClaimFailure,
+  isSharedAssigneeSentinel,
+  normalizeAssignee,
+  type ClaimOutcome,
+} from "./claim.js";
+
 const execFileAsync = promisify(execFile);
 
 export interface BdMutateInput {
@@ -429,12 +436,14 @@ export async function createIssue(
   if (input.type) args.push("--type", input.type);
   if (input.priority !== undefined && input.priority !== null && input.priority !== "")
     args.push("--priority", String(input.priority));
-  // openclaw-1lw7: never stamp the `any` sentinel. `bd` treats the literal
-  // string "any" as a real claimant, so an issue created with it can never be
-  // taken through the atomic `bd update <id> --claim` path — which is exactly
-  // the shared-backlog population that races on parallel heartbeat wakes.
-  // "Anyone may claim this" is a genuinely unassigned issue.
-  if (input.owner && input.owner.trim() !== "any") args.push("--assignee", input.owner);
+  // openclaw-1lw7: never stamp a pseudo-owner. `bd` treats the literal string
+  // "any" as a real claimant, so an issue created with it can never be taken
+  // through the atomic `bd update <id> --claim` path — which is exactly the
+  // shared-backlog population that races on parallel heartbeat wakes.
+  // "Anyone may claim this" is a genuinely unassigned issue. `normalizeAssignee`
+  // covers the whole sentinel set case-insensitively, not just lowercase "any".
+  const createAssignee = normalizeAssignee(input.owner);
+  if (createAssignee) args.push("--assignee", createAssignee);
   if (input.target_datetime) {
     args.push("--due", input.target_datetime);
     args.push("--metadata", JSON.stringify({ target_datetime: input.target_datetime }));
@@ -478,11 +487,10 @@ export async function updateIssue(
     args.push("--priority", String(patch.priority));
   if (patch.status !== undefined && patch.status !== "") args.push("--status", patch.status);
   if (patch.type !== undefined && patch.type !== "") args.push("--type", patch.type);
-  // openclaw-1lw7: normalize the retired `any` sentinel to unassigned rather
-  // than writing it back. `--assignee ""` clears the field (verified, bd
-  // 1.0.3), which restores the atomic `--claim` path for that issue.
-  if (patch.owner !== undefined)
-    args.push("--assignee", patch.owner.trim() === "any" ? "" : patch.owner);
+  // openclaw-1lw7: normalize retired pseudo-owners to unassigned rather than
+  // writing them back. `--assignee ""` clears the field (verified, bd 1.0.3),
+  // which restores the atomic `--claim` path for that issue.
+  if (patch.owner !== undefined) args.push("--assignee", normalizeAssignee(patch.owner));
   if (patch.target_datetime !== undefined) {
     const target = patch.target_datetime.trim();
     args.push("--due", target);
@@ -600,6 +608,162 @@ export async function ensureFreshExport(opts: BdRunOptions): Promise<ExportResul
 }
 
 /** Close an issue. */
+/**
+ * Atomically take ownership of an issue. The ONLY sanctioned way to claim.
+ *
+ * Wraps `bd update <id> --claim --actor <actor>`, which is a conditional UPDATE
+ * inside a Dolt transaction: it sets assignee+in_progress only while the row is
+ * unassigned or already the actor's. Verified under a real 3-way concurrent race
+ * against bd 1.0.3 (three rounds, three racers): exactly one exit-0 winner, two
+ * exit-1 losers whose stderr names the winner. Being in the database rather than
+ * in this process, it arbitrates across agents, processes, shells and hosts.
+ *
+ * Never take ownership with `--assignee`/`--status` instead. Those are
+ * unconditional writes: every racer succeeds, the last write wins the field, and
+ * no racer learns it lost. That is precisely the openclaw-1lw7 incident.
+ *
+ * Single-shot on purpose. A claim IS idempotent for its winner, so a retry would
+ * be safe, but retrying a mutation whose outcome is unknown is how a
+ * partially-applied write gets replayed; and a transient failure here must
+ * surface as `reason: "error"` (ownership UNKNOWN) rather than be papered over
+ * into a confident verdict either way.
+ */
+export async function claimIssue(
+  id: string,
+  actor: string,
+  opts: BdRunOptions,
+): Promise<ClaimOutcome> {
+  const trimmedActor = actor.trim();
+  if (!trimmedActor) {
+    return {
+      ok: false,
+      id,
+      actor,
+      reason: "error",
+      detail:
+        "refusing to claim with an empty actor: bd would attribute the claim to whatever " +
+        "BEADS_ACTOR/git identity the gateway happens to run as, so no agent could be held to it",
+    };
+  }
+  if (isSharedAssigneeSentinel(trimmedActor)) {
+    return {
+      ok: false,
+      id,
+      actor: trimmedActor,
+      reason: "error",
+      detail:
+        `refusing to claim as "${trimmedActor}": that is a shared-work pseudo-owner, not an agent. ` +
+        `Claiming as a sentinel is what makes an issue unclaimable by everyone (openclaw-1lw7).`,
+    };
+  }
+
+  try {
+    await runBd(["update", id, "--claim", "--actor", trimmedActor], { ...opts, retries: 0 });
+  } catch (err: any) {
+    const outcome = classifyClaimFailure({
+      id,
+      actor: trimmedActor,
+      stderr: err instanceof BdCommandError ? err.stderr : "",
+      fallbackDetail: String(err?.message ?? err),
+    });
+    // A lost race leaves the DB untouched, but a `not-claimable`/`error` verdict
+    // may reflect state this repo's snapshot has not caught up with yet, and the
+    // reader-side fast path trusts the snapshot. Refresh either way.
+    await refreshExport(opts).catch(() => undefined);
+    return outcome;
+  }
+
+  // The heartbeat's ready query reads `.beads/issues.jsonl`, and bd does not
+  // auto-export after a mutation. Without this the very next prompt build still
+  // sees the issue as unassigned and offers it to somebody else — a won claim
+  // that is invisible to the queue is no better than no claim at all.
+  const exported = await refreshExport(opts);
+  return {
+    ok: true,
+    id,
+    actor: trimmedActor,
+    // bd reports an idempotent re-claim the same way as a first claim, so we
+    // cannot distinguish them from the exit code alone. Reported as a first
+    // claim; the export result is what callers actually act on.
+    idempotent: false,
+    ...(exported.ok
+      ? {}
+      : {
+          exportWarning:
+            `claim of ${id} by ${trimmedActor} IS committed, but re-exporting .beads/issues.jsonl ` +
+            `failed, so the readiness fast path may keep listing it as unassigned: ${exported.error ?? "unknown error"}`,
+        }),
+  };
+}
+
+export interface SentinelNormalizationResult {
+  /** Issues examined. */
+  scanned: number;
+  /** Ids whose pseudo-owner was retired, with the sentinel that was removed. */
+  normalized: Array<{ id: string; was: string }>;
+  /** Ids that could not be normalized, with the reason. */
+  failed: Array<{ id: string; error: string }>;
+  /** Populated when the scan itself could not run; `normalized` is then empty. */
+  error?: string;
+}
+
+/**
+ * Retire legacy pseudo-owner rows (`assignee: any`) so they become claimable.
+ *
+ * This is the one place allowed to move an assignee out of a sentinel, and its
+ * safety does NOT rest on being the only writer. It rests on an invariant:
+ * it only ever touches rows whose assignee is *exactly* a sentinel, and a
+ * genuine claim's assignee is an agent id, never a sentinel. So this pass
+ * cannot destroy a live claim no matter what else is running.
+ *
+ * That is also why the claim path itself must never do this inline. "Clear the
+ * assignee, then claim" is two writes: A clears, A claims, then B — which read
+ * the sentinel before A moved — clears again, wiping A's claim, and claims too.
+ * Two winners. Retiring the sentinel is a migration, not part of claiming.
+ *
+ * Runs once per repo at gateway startup. After it, `normalizeAssignee` on the
+ * write paths is what stops new sentinel rows appearing.
+ */
+export async function normalizeSentinelAssignees(
+  opts: BdRunOptions,
+): Promise<SentinelNormalizationResult> {
+  const out: SentinelNormalizationResult = { scanned: 0, normalized: [], failed: [] };
+
+  let issues: BdIssue[];
+  try {
+    // forceFresh via an explicit export: the JSONL snapshot can predate
+    // shell-initiated writes, and normalizing off a stale read would clear
+    // assignees that have since become real claims.
+    await ensureFreshExport(opts).catch(() => undefined);
+    issues = await listIssues(opts);
+  } catch (err: any) {
+    out.error = `sentinel scan failed: ${String(err?.message ?? err).slice(0, 300)}`;
+    return out;
+  }
+
+  out.scanned = issues.length;
+  for (const issue of issues) {
+    const raw = (issue as any).assignee;
+    if (!isSharedAssigneeSentinel(raw)) continue;
+    const status = String((issue as any).status ?? "");
+    // Closed history is left exactly as filed. Rewriting the assignee of a
+    // closed issue changes the audit record for no operational gain — only
+    // open work needs to be claimable.
+    if (status === "closed") continue;
+    const id = String(issue.id ?? "");
+    if (!id) continue;
+    try {
+      await runBd(["update", id, "--assignee", ""], { ...opts, retries: 0 });
+      out.normalized.push({ id, was: String(raw).trim() });
+    } catch (err: any) {
+      out.failed.push({ id, error: String(err?.message ?? err).slice(0, 300) });
+    }
+  }
+  if (out.normalized.length) await refreshExport(opts).catch(() => undefined);
+  return out;
+}
+
+
 export async function closeIssue(id: string, reason: string | undefined, opts: BdRunOptions): Promise<void> {
   const args = ["close", id];
   if (reason) args.push("--reason", reason);
