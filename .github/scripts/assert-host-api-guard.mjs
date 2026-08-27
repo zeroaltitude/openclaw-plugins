@@ -169,6 +169,18 @@ const dependency = describeDependency();
 const { exitCode, output } = runProbe();
 const codes = new Set([...output.matchAll(/error (TS\d+):/g)].map((m) => m[1]));
 
+// `actions/setup-node` registers a `tsc` problem matcher for the whole job, and it
+// anchors on a non-whitespace first character. Echoing the probe's raw diagnostics
+// verbatim therefore mints a red `failure` annotation on the checks page even when
+// this step deliberately exits 0 — which is exactly the wrong-loud signal a
+// warning-only ratchet is supposed to avoid. Indenting defeats the matcher without
+// removing it (the real typecheck steps that follow still want their annotations).
+const quoteDiagnostics = (text) =>
+  text
+    .split("\n")
+    .map((line) => `  | ${line}`)
+    .join("\n");
+
 console.log(`host-api-guard: dependency  ${dependency}`);
 console.log(`host-api-guard: probe       tsc exit ${exitCode}, diagnostics ${[...codes].join(", ") || "(none)"}`);
 
@@ -181,7 +193,7 @@ if (exitCode !== 0 && codes.has("TS2339")) {
 }
 
 if (exitCode === 0) {
-  console.error(output.trim());
+  console.error(quoteDiagnostics(output.trim()));
   console.error(
     `FAIL [host-api-guard]: the probe compiled CLEANLY. It references ` +
       `api.${PROBE_MEMBER}(), which no host API can have, so a clean compile means ` +
@@ -209,7 +221,7 @@ const message =
   "that does not exist on a runner. See openclaw-vestige-ive.";
 
 console.log(`host-api-guard: verdict     DEAD`);
-if (output.trim()) console.log(output.trim());
+if (output.trim()) console.log(quoteDiagnostics(output.trim()));
 
 if (required) {
   console.error(`FAIL [host-api-guard]: ${message}`);
