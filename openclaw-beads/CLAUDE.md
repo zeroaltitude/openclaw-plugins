@@ -157,6 +157,44 @@ Consequences for this plugin:
   before. The gateway journal (`journalctl --user -u openclaw-gateway`) is the
   only forensic surface for a missing block.
 
+### Claiming is atomic, and `any` is a retired sentinel (openclaw-1lw7)
+
+On 2026-08-26 three agents claimed `openclaw-vaon` within four seconds and two
+spawned implementation subagents onto it. Each had followed the injected
+run-loop prose correctly — the prose was the bug. It said "mark the issue
+in_progress", i.e. `bd update <id> --assignee <me> --status in_progress`, which
+is **last-write-wins**: measured against a scratch DB, three concurrent agents
+all exit 0 and all believe they won.
+
+- **`bd update <id> --claim` is already a compare-and-set.** Measured on bd
+  1.0.3 under genuine concurrency (3 racers × 6 rounds): exactly one winner
+  every time, exit 0; losers exit **1** with `issue already claimed by <agent>`.
+  Re-claiming as the current owner is idempotent (exit 0). We did not need to
+  build a CAS — only to start using it.
+- **`bd` treats the literal string `any` as a real claimant.** An issue stamped
+  `assignee: any` refuses `--claim` from *everyone* (`issue already claimed by
+  any`, exit 1). So the `any` sentinel made the atomic path unusable on exactly
+  the broadcast population that races. "Anyone may claim this" is therefore a
+  genuinely **unassigned** issue.
+- We still **read** `any` as a broadcast synonym (`isBroadcastAssignee`) so
+  historical issues stay visible and bindable, but we never **write** it:
+  `createIssue` omits `--assignee` for it and `updateIssue` normalizes it to
+  `""`, which clears the field and restores claimability.
+- **The rule has two copies** — `shouldIncludeReadyIssue` in `src/index.ts` and
+  `isIssueForAgent` in `src/session-map.ts`. They must move together; a test in
+  `test/session-map.test.mjs` pins them against each other.
+- **`runLoop.includeUnassigned` defaults to `true`.** With `any` retired,
+  unassigned is the normal claimable state, so a `false` default would hide the
+  whole shared backlog and silence the queue — the openclaw-beads-7sz failure
+  mode, reintroduced through the assignee policy instead of through an error.
+
+The injected prose is a **contract**, not styling: it is the only instruction an
+agent gets on a heartbeat wake. `test/runloop.test.mjs` asserts that it names
+the atomic verb, mandates the exit-code check, requires the loser to abort, and
+explicitly forbids the read-then-write substitute. Keep it in lockstep with
+`~/.openclaw-narcissus/refs/openclaw.md` § "Beads run-loop discipline" — two
+conflicting instructions are worse than the original bug.
+
 ### Retries
 
 Read-only commands retry transient failures (timeout kills, Dolt lock
