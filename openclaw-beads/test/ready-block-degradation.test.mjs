@@ -196,7 +196,10 @@ describe('block rendering never hides a failure (openclaw-beads-7sz mode 2)', ()
     assert.doesNotMatch(block, /<ready_issues none="true" \/>/);
     assert.match(block, /ready_total="20"/);
     assert.match(block, /hidden_unassigned="20"/);
-    assert.match(block, /hidden by the owner filter/);
+    // The note must still explain *why* the queue looks empty, and (since
+    // openclaw-1lw7) name the setting responsible so it can be turned off.
+    assert.match(block, /runLoop\.includeUnassigned=false/);
+    assert.match(block, /real, claimable work/);
   });
 
   it('still emits the plain empty marker when the queue is genuinely empty', () => {

@@ -218,6 +218,9 @@ describe("session-map: buildSessionMap (integration)", () => {
         { id: "foo-003", title: "ignored: closed", status: "closed", assignee: "tank" },
         { id: "foo-004", title: "for narcissus", status: "open", assignee: "narcissus" },
         { id: "foo-005", title: "any-owner", status: "open", assignee: "any" },
+        // openclaw-1lw7: unassigned is now the broadcast tier that `any` used
+        // to mean, so it must bind exactly like foo-005 does.
+        { id: "foo-006", title: "unassigned broadcast", status: "open" },
       ];
       writeFileSync(
         join(repoDir, ".beads", "issues.jsonl"),
@@ -267,6 +270,18 @@ describe("session-map: buildSessionMap (integration)", () => {
       );
       assert.ok(anyForNarc, "foo-005 should be unbound for narcissus");
       assert.equal(anyForNarc?.reason, "no-recent-sessions");
+
+      // foo-006 (unassigned) must behave identically to foo-005 (legacy any).
+      // This pins the SECOND copy of the broadcast rule, in session-map.ts,
+      // against the copy in index.ts — they drifted apart is the failure mode.
+      const unassignedForTank = map.bindings.find(
+        (b) => b.issueId === "foo-006" && b.agentId === "tank",
+      );
+      assert.ok(unassignedForTank, "unassigned foo-006 should bind for tank, like any-owner foo-005");
+      const unassignedForNarc = map.unbound.find(
+        (u) => u.issueId === "foo-006" && u.agentId === "narcissus",
+      );
+      assert.ok(unassignedForNarc, "unassigned foo-006 should be unbound for narcissus, like foo-005");
 
       // foo-004 binds for narcissus → unbound (no sessions)
       const narc004 = map.unbound.find(

@@ -429,7 +429,12 @@ export async function createIssue(
   if (input.type) args.push("--type", input.type);
   if (input.priority !== undefined && input.priority !== null && input.priority !== "")
     args.push("--priority", String(input.priority));
-  if (input.owner) args.push("--assignee", input.owner);
+  // openclaw-1lw7: never stamp the `any` sentinel. `bd` treats the literal
+  // string "any" as a real claimant, so an issue created with it can never be
+  // taken through the atomic `bd update <id> --claim` path — which is exactly
+  // the shared-backlog population that races on parallel heartbeat wakes.
+  // "Anyone may claim this" is a genuinely unassigned issue.
+  if (input.owner && input.owner.trim() !== "any") args.push("--assignee", input.owner);
   if (input.target_datetime) {
     args.push("--due", input.target_datetime);
     args.push("--metadata", JSON.stringify({ target_datetime: input.target_datetime }));
@@ -473,7 +478,11 @@ export async function updateIssue(
     args.push("--priority", String(patch.priority));
   if (patch.status !== undefined && patch.status !== "") args.push("--status", patch.status);
   if (patch.type !== undefined && patch.type !== "") args.push("--type", patch.type);
-  if (patch.owner !== undefined) args.push("--assignee", patch.owner);
+  // openclaw-1lw7: normalize the retired `any` sentinel to unassigned rather
+  // than writing it back. `--assignee ""` clears the field (verified, bd
+  // 1.0.3), which restores the atomic `--claim` path for that issue.
+  if (patch.owner !== undefined)
+    args.push("--assignee", patch.owner.trim() === "any" ? "" : patch.owner);
   if (patch.target_datetime !== undefined) {
     const target = patch.target_datetime.trim();
     args.push("--due", target);

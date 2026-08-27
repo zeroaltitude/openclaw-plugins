@@ -203,10 +203,18 @@ function isActiveIssue(issue: BdIssue): boolean {
   return status === "open" || status === "in_progress";
 }
 
-/** Match issues whose assignee is this agent or "any". */
+/**
+ * Match issues this agent may act on: its own, plus broadcast backlog.
+ *
+ * Broadcast backlog is **unassigned** since openclaw-1lw7 retired the `any`
+ * sentinel (`bd` reads the literal string `any` as a real claimant, which made
+ * `--claim` fail for everyone). `any` is still matched so historical issues
+ * keep binding; it is no longer produced. This rule is duplicated by
+ * `shouldIncludeReadyIssue` in `index.ts` — change both together.
+ */
 function isIssueForAgent(issue: BdIssue, agentId: string): boolean {
   const raw = String((issue as any).assignee ?? "").trim();
-  if (!raw) return false;
+  if (!raw) return true;
   return raw === agentId || raw === "any";
 }
 

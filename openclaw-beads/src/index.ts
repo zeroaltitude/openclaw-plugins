@@ -210,17 +210,42 @@ function issueAssignee(issue: BdIssue): string {
   return typeof raw === "string" ? raw.trim() : "";
 }
 
+/**
+ * The retired `any` sentinel (openclaw-1lw7).
+ *
+ * `any` used to be written into `assignee` to mean "anyone may take this".
+ * `bd` does not share that reading: it treats the literal string `any` as a
+ * real claimant, so `bd update <id> --claim` on such an issue fails for
+ * *everyone* with `issue already claimed by any` (measured, bd 1.0.3). That
+ * made the atomic claim path unusable on exactly the population that races —
+ * broadcast backlog — which is how three agents claimed openclaw-vaon in the
+ * same minute.
+ *
+ * "Anyone may claim this" is now expressed as a genuinely **unassigned**
+ * issue, which is what `--claim` understands. We still *read* `any` as a
+ * claimable-by-anyone synonym so historical and externally-created issues stay
+ * visible, but we never *write* it — see `createIssue` in `beads-cli.ts`.
+ */
+export function isBroadcastAssignee(owner: string): boolean {
+  return owner === "" || owner === "any";
+}
+
 export function shouldIncludeReadyIssue(issue: BdIssue, agentId: string, includeUnassigned: boolean): boolean {
   const owner = issueAssignee(issue);
+  // Legacy `any` stays visible unconditionally; genuinely-unassigned work is
+  // the new normal claimable state, so it is shown unless an operator has
+  // explicitly opted out via runLoop.includeUnassigned=false.
+  if (owner === "any") return true;
   if (!owner) return includeUnassigned;
-  return owner === "any" || owner === agentId;
+  return owner === agentId;
 }
 
 /**
  * Heartbeat selection ordering for `<plans_and_tasks>`. Sorts by:
  *   1. Direct-assignee match first (assignee === agentId), so an
- *      agent's own work is never starved by `any` backlog when the
- *      list is capped by `readyLimitPerRepo`.
+ *      agent's own work is never starved by broadcast backlog
+ *      (unassigned, or the legacy `any`) when the list is capped by
+ *      `readyLimitPerRepo`.
  *   2. Numeric priority ascending (lower number = higher priority).
  *   3. Stable on issue id as a tie-breaker.
  */
@@ -302,10 +327,15 @@ export function formatPlansAndTasksBlock(params: {
   lines.push("Run-loop discipline:");
   lines.push("- First satisfy the user's current request. If ready Beads work conflicts with it, explain the tradeoff and ask what to prioritize.");
   lines.push("- For non-trivial work you are about to perform, ensure there is a Beads issue tracking it. Simple exchanges (date/time, quick clarification, casual chat, one-shot answers with no durable follow-up) do not need an issue.");
-  lines.push(`- When creating a Beads issue for work you will do, assign it to your own agent id (${params.agentId}) by default unless the user specified someone else or it belongs in general backlog (owner any).`);
-  lines.push("- Ignore issues assigned to another owner. You may act on issues assigned to you or to any.");
+  lines.push(`- When creating a Beads issue for work you will do, assign it to your own agent id (${params.agentId}) by default unless the user specified someone else. If it belongs in general backlog, leave it UNASSIGNED — do not set the assignee to the string "any", which blocks the atomic claim below.`);
+  lines.push("- Ignore issues assigned to another owner. You may act on issues assigned to you, and on unassigned issues (shown with owner=\"unassigned\").");
   lines.push("- Never treat issues from repos whose configured repo name matches /test/i as ready work.");
-  lines.push("- If you start meaningful work, mark the issue in_progress. If completed, close it. If waiting on the user, mark waiting_for_user. If waiting on an available agent/resource, mark waiting_for_available_agent. If blocked with no path forward, mark blocked. Keep state truthful.");
+  lines.push(
+    `- CLAIM ATOMICALLY BEFORE YOU START. Other agents wake on their own heartbeats and read this same queue, so "it looked unassigned" is not ownership. To take an issue, run \`bd update <id> --claim --actor ${params.agentId}\` in that repo and CHECK THE EXIT CODE. Exit 0 means you own it (assignee and in_progress are set atomically) — proceed. NONZERO means another agent won the race; the error names the winner (\`issue already claimed by <agent>\`). On nonzero you MUST NOT start the work, spawn a subagent, or cut a worktree — pick different work, and say who won. Do NOT substitute \`--assignee <you> --status in_progress\`: that is last-write-wins and every racing agent believes it won.`,
+  );
+  lines.push("- Legacy issues whose owner is literally \"any\" cannot be claimed by anyone — `bd` reads \"any\" as a claimant. Normalize first with `bd update <id> --assignee \"\"`, then claim it atomically as above.");
+  lines.push("- Re-claiming an issue you already own is idempotent (exit 0), so it is always safe to re-run the claim to confirm ownership before resuming work.");
+  lines.push("- When completed, close it. If waiting on the user, mark waiting_for_user. If waiting on an available agent/resource, mark waiting_for_available_agent. If blocked with no path forward, mark blocked. Keep state truthful.");
   lines.push("- An `in_progress` issue listed below is active work you (or a previous turn) already claimed. Resume it; do NOT restart it as if it were a fresh `open` issue. If a single `in_progress` issue represents a long-running multi-turn loop (e.g. cyclical PR review), advance it as far as the current turn allows, leave it `in_progress`, and let the next heartbeat pick up where you left off.");
   lines.push("- If the user suggests future work, bugs, investigations, reminders, or other durable trackables, create/update Beads issues for them and include target_datetime metadata when timing is implied.");
   lines.push("- If this turn was not triggered by direct user input (for example heartbeat, gateway startup/resume, cron wake, or other autonomous wake) and you take action on Beads work, explicitly reply with a concise summary of the Beads issue(s) touched and actions taken. If no action was taken, stay quiet unless there is a meaningful blocker or decision for the user.");
@@ -343,7 +373,7 @@ export function formatPlansAndTasksBlock(params: {
       if (entry.warning) lines.push(`    <warning>${escapeXml(entry.warning)}</warning>`);
       if (counts && counts.filteredUnassigned > 0 && counts.shown === 0) {
         lines.push(
-          `    <note>All ${counts.filteredUnassigned} ready issue(s) here are unassigned and hidden by the owner filter (includeUnassigned=false). They are real work — claim one explicitly if nothing else is pending.</note>`,
+          `    <note>All ${counts.filteredUnassigned} ready issue(s) here are unassigned and hidden because an operator set runLoop.includeUnassigned=false. Since openclaw-1lw7, unassigned is the normal claimable state for shared backlog, so this setting is hiding real, claimable work. Claim one explicitly (\`bd update <id> --claim --actor ${escapeXml(params.agentId)}\`) if nothing else is pending.</note>`,
         );
       }
       for (const issue of entry.issues) {
@@ -686,7 +716,11 @@ async function buildPlansAndTasksBlock(api: PluginApi, agentId: string): Promise
     return null;
   }
   const limit = Math.max(1, config.runLoop?.readyLimitPerRepo ?? 3);
-  const includeUnassigned = config.runLoop?.includeUnassigned ?? false;
+  // Defaults to TRUE since openclaw-1lw7 retired the `any` sentinel: "anyone
+  // may claim this" is now expressed as an unassigned issue, so defaulting
+  // this to false would hide the entire broadcast backlog and silence the
+  // queue. Operators can still opt out explicitly.
+  const includeUnassigned = config.runLoop?.includeUnassigned ?? true;
   const actionableRepos = repos.filter((repo) => !/test/i.test(repo.name));
   const ttlMs = Math.max(0, config.runLoop?.readyCacheTtlMs ?? DEFAULT_PROMPT_BLOCK_TTL_MS);
   const budgetMs = Math.max(1_000, config.runLoop?.readyBudgetMs ?? DEFAULT_READY_BUDGET_MS);
