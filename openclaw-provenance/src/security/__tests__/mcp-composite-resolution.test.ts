@@ -81,6 +81,29 @@ describe("resolveToolKey — MCP-prefixed composite tools", () => {
     expect(getToolTrust(key, taints)).toBe("external");
   });
 
+  it("resolves bare progress_card as trusted", () => {
+    // Regression: progress_card was absent from DEFAULT_COMPOSITE_OUTPUT_TAINTS.
+    // The bare tool name (no mcp__openclaw__ prefix) has no namespace to fall
+    // back through, so it fell all the way to the unknown-tool "untrusted"
+    // default, tainting every session that keeps its progress card current.
+    const key = resolveToolKey("progress_card", {}, compositeTools);
+    expect(key).toBe("progress_card");
+    expect(getToolTrust(key, taints)).toBe("trusted");
+  });
+
+  it("resolves bridge-routed mcp__openclaw__progress_card as trusted", () => {
+    // Already covered by the mcp__openclaw__ namespace's blanket trusted
+    // default even before this entry existed — asserted here so a future
+    // change to that namespace default can't silently regress this tool too.
+    const key = resolveToolKey(
+      "mcp__openclaw__progress_card",
+      {},
+      compositeTools,
+    );
+    expect(key).toBe("mcp__openclaw__progress_card");
+    expect(getToolTrust(key, taints)).toBe("trusted");
+  });
+
   it("resolves bridge-routed exec command patterns (curl stays external)", () => {
     const key = resolveToolKey(
       "mcp__openclaw__exec",
