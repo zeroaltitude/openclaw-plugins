@@ -136,6 +136,12 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "sessions_list": "trusted",
   "sessions_history": "trusted",
   "cron": "trusted",
+  // progress_card's only inputs are markdown/plan text the calling agent
+  // writes about its own status; its result is a bare confirmation, not
+  // reflected external content. Without this entry it falls through to the
+  // unknown-tool "untrusted" default, tainting every session that keeps its
+  // progress card current. Sibling of session_status/sessions_list above.
+  "progress_card": "trusted",
 
   // ── exec: command-pattern-based taints (generated from exec command rules) ──
   ...buildExecOutputTaints(),
