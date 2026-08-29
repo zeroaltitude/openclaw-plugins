@@ -116,6 +116,15 @@ describe("resolveToolKey — MCP-prefixed composite tools", () => {
     expect(getToolTrust(key, taints)).toBe("trusted");
   });
 
+  it("resolves the bridge-relay 'openclawwrite' alias as trusted", () => {
+    // Regression: same nested outer-span mechanism as "openclawread" above,
+    // confirmed for write by the identical before/after_tool_call nesting on
+    // the next tool call in the same turn (openclaw-provenance-8jx).
+    const key = resolveToolKey("openclawwrite", {}, compositeTools);
+    expect(key).toBe("openclawwrite");
+    expect(getToolTrust(key, taints)).toBe("trusted");
+  });
+
   it("resolves bridge-routed exec command patterns (curl stays external)", () => {
     const key = resolveToolKey(
       "mcp__openclaw__exec",
