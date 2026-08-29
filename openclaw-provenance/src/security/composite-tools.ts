@@ -115,15 +115,19 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "read": "trusted",
   "write": "trusted",
   "edit": "trusted",
-  // Embedded/bridge-routed sessions (e.g. claude-bridge) have been observed
-  // reporting the same `read` MCP tool call under this second, unprefixed
-  // name via their own hook-relay path — confirmed by a single turn logging
-  // BOTH "read" and "openclawread" as distinct tools used. It's the identical
-  // capability (local read, no external content), just a second name for it
-  // that bypasses the normal mcp__openclaw__ prefix stripping. Sibling
-  // "openclawwrite"/"openclawedit" forms have not been observed; add them
-  // here if they surface (openclaw-provenance-v9y).
+  // Embedded/bridge-routed sessions (e.g. claude-bridge) fire an OUTER
+  // before/after_tool_call span under this second, unprefixed name, wrapping
+  // the real MCP dispatch's correctly-named INNER span — confirmed by the
+  // tool-call chain of a single turn: before_tool_call[openclawread] →
+  // before_tool_call[read] → after_tool_call[read] → after_tool_call
+  // [openclawread]. Two genuine hook emissions per logical call, bypassing
+  // the normal mcp__openclaw__ prefix stripping on the outer one. Same
+  // capability as bare "read" (local read, no external content) either way.
+  // "openclawwrite" confirmed by the identical nesting on the very next tool
+  // call in that turn (openclaw-provenance-8jx); "openclawedit" not yet
+  // observed — add it here if it surfaces.
   "openclawread": "trusted",
+  "openclawwrite": "trusted",
   "memory_search": "trusted",
   "memory_get": "trusted",
   "vestige_search": "trusted",
