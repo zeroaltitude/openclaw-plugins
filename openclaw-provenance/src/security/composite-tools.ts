@@ -115,6 +115,15 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   "read": "trusted",
   "write": "trusted",
   "edit": "trusted",
+  // Embedded/bridge-routed sessions (e.g. claude-bridge) have been observed
+  // reporting the same `read` MCP tool call under this second, unprefixed
+  // name via their own hook-relay path — confirmed by a single turn logging
+  // BOTH "read" and "openclawread" as distinct tools used. It's the identical
+  // capability (local read, no external content), just a second name for it
+  // that bypasses the normal mcp__openclaw__ prefix stripping. Sibling
+  // "openclawwrite"/"openclawedit" forms have not been observed; add them
+  // here if they surface (openclaw-provenance-v9y).
+  "openclawread": "trusted",
   "memory_search": "trusted",
   "memory_get": "trusted",
   "vestige_search": "trusted",

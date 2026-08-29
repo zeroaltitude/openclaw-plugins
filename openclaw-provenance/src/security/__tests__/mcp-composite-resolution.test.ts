@@ -104,6 +104,18 @@ describe("resolveToolKey — MCP-prefixed composite tools", () => {
     expect(getToolTrust(key, taints)).toBe("trusted");
   });
 
+  it("resolves the bridge-relay 'openclawread' alias as trusted", () => {
+    // Regression: embedded/bridge-routed sessions (claude-bridge) report the
+    // same `read` MCP tool call under this second, unprefixed name via their
+    // own hook-relay path — it has no "mcp__openclaw__" prefix to strip, so
+    // it fell to the unknown-tool "untrusted" default and tainted the
+    // session, even though the identical call also logged cleanly as "read"
+    // in the same turn.
+    const key = resolveToolKey("openclawread", {}, compositeTools);
+    expect(key).toBe("openclawread");
+    expect(getToolTrust(key, taints)).toBe("trusted");
+  });
+
   it("resolves bridge-routed exec command patterns (curl stays external)", () => {
     const key = resolveToolKey(
       "mcp__openclaw__exec",
