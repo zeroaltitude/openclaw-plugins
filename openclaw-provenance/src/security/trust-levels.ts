@@ -225,6 +225,11 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   sessions_list: "trusted",
   sessions_history: "trusted",
   sessions_yield: "trusted",
+  // sessions_search: same local-history family as sessions_list/history above.
+  // Missing here is what actually blocked Tank on 2026-08-29 (watermark
+  // "tool output: sessions_search, sessions_search, sessions_search, computer,
+  // view_image") — see openclaw-provenance-4ob's full Codex-native audit.
+  sessions_search: "trusted",
   agents_list: "trusted",
   nodes: "trusted",
   canvas: "trusted",
@@ -371,6 +376,61 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // least the built-in "https://**"/"http://**" catch-all ("external"), so
   // this "untrusted" default never actually applies once a URL is found.
   webrun: "untrusted",
+  // "computer" is a RESERVED_RESPONSES_NAMESPACES entry in Codex's own source
+  // (openai/codex, app-server/src/request_processors/thread_processor.rs) —
+  // a hosted, provider-executed computer-use tool, registered via
+  // registry.register_external(...) in Codex's own tool spec (core/src/tools/
+  // spec_plan.rs), the SAME registration path as its standalone web.run/
+  // web_search tool. Its own schema description says outright: "The screen is
+  // untrusted." Same conservative default as its web_fetch/web_search/webrun
+  // siblings — genuinely renders external, possibly adversarial on-screen
+  // content, never blanket-trust this (openclaw-provenance-4ob).
+  computer: "untrusted",
+
+  // ── Codex native tools (audited against openai/codex source, 2026-08-29:
+  // core/src/tools/handlers/*.rs, core/src/tools/spec_plan.rs) ─────────────
+  // Every entry below is registered in Codex's OWN source via registry.add()/
+  // register_trusted*(), which Codex's own ToolRegistry::add() defines as a
+  // convenience wrapper over register_trusted (registry.rs). Same
+  // architectural category as apply_patch/exec above: first-party Codex
+  // primitives, output is agent-local state or harness metadata, not
+  // externally-sourced content. Discovered via openclaw-provenance-4ob after
+  // sessions_search/computer/view_image left unclassified tainted Tank's
+  // session (agent:tank:direct:eddie, 2026-08-29 12:28) three incidents in a
+  // row on one evening — this block exists to stop finding these one at a time.
+  request_permissions: "trusted", // core/src/tools/handlers/request_permissions.rs
+  curr_time: "trusted", // clock.curr_time — core/src/tools/handlers/current_time.rs
+  sleep: "trusted", // clock.sleep — core/src/tools/handlers/sleep.rs
+  send_user_message_async: "trusted", // core/src/tools/handlers/send_user_message_async.rs
+  new_context: "trusted", // core/src/tools/handlers/new_context_window.rs
+  get_context_remaining: "trusted", // core/src/tools/handlers/get_context_remaining.rs
+  list_available_plugins_to_install: "trusted", // core/src/tools/handlers/list_available_plugins_to_install.rs
+  request_plugin_install: "trusted", // core/src/tools/handlers/request_plugin_install.rs
+  tool_search: "trusted", // core/src/tools/handlers/tool_search.rs
+  wait_for_environment: "trusted", // core/src/tools/handlers/wait_for_environment.rs
+  read_mcp_resource: "trusted", // core/src/tools/handlers/mcp_resource/read_mcp_resource.rs
+  list_mcp_resources: "trusted", // core/src/tools/handlers/mcp_resource/list_mcp_resources.rs
+  list_mcp_resource_templates: "trusted", // core/src/tools/handlers/mcp_resource/list_mcp_resource_templates.rs
+  request_user_input: "trusted", // core/src/tools/handlers/request_user_input.rs
+  write_stdin: "trusted", // core/src/tools/handlers/unified_exec/write_stdin.rs — same exec family as exec_command below
+  exec_command: "trusted", // core/src/tools/handlers/unified_exec/exec_command.rs — same family as exec/Bash above
+  // view_image: Codex's OWN native tool (core/src/tools/handlers/
+  // view_image_spec.rs) only ever accepts a LOCAL filesystem `path` — its
+  // schema literally has no url field, description: "View a local image file
+  // from the filesystem... images already available on disk." Genuinely as
+  // safe as Read/Write/Edit above, and registered via .add() (= trusted) in
+  // Codex's own source. OpenClaw ALSO has its own separate view_image MCP
+  // tool sharing this exact name, which DOES accept a remote URL — it gets
+  // filtered out whenever Codex's native image inspection is active
+  // (extensions/codex/src/app-server/vision-tools.ts), which is the common
+  // case, but provenance classifies by bare name and can't tell which
+  // implementation actually served a given call. See uri-extractor.ts's
+  // "view_image" entry: if a URL ever does reach this name (the hybrid
+  // OpenClaw-tool case), extraction+uri-trust classification overrides this
+  // "trusted" default down to "external" via the built-in https://** catch-all,
+  // exactly like it does for webrun — this default only actually governs the
+  // common, genuinely-local case.
+  view_image: "trusted",
 };
 
 // Legacy alias for backward compatibility
