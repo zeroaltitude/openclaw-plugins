@@ -36,6 +36,13 @@ export const DEFAULT_URI_EXTRACTORS: Record<string, UriExtractorConfig> = {
   Write: { params: ["file_path", "path"], scheme: "file" },
   Edit: { params: ["file_path", "path"], scheme: "file" },
   image: { params: ["image", "images"], scheme: "file" },
+  // view_image: Codex's OWN native tool only accepts a local `path` (see the
+  // "view_image" comment in trust-levels.ts) — same category as Read above,
+  // same file:// extraction. OpenClaw's separate view_image MCP tool CAN
+  // carry a remote URL; this extraction is what catches that case and lets
+  // uri-trust correctly override the "trusted" default down to "external"
+  // via the built-in https://** catch-all, exactly like webrun.
+  view_image: { params: ["path", "paths"], scheme: "file" },
   gog: { params: ["query"], scheme: "google" },
   // vestige_search intentionally omitted — local cognitive memory, trusted
   // by default. The vestige:// URI pattern ("shared") would override the
