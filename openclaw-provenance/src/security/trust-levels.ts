@@ -364,6 +364,18 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   WebFetch: "untrusted",
   WebSearch: "untrusted",
   browser: "untrusted",
+  // OpenAI's native hosted web tool (raw wire name "web.run"; the bridge
+  // relay reports it unaliased and dot-stripped as "webrun" — same class of
+  // naming quirk as openclawread/openclawwrite in composite-tools.ts, but
+  // this one carries genuinely external content, unlike those). Same
+  // conservative default as its web_fetch/web_search siblings; this fallback
+  // only applies when no URL could be extracted at all (e.g. its "search"
+  // action, which carries queries, not a URL) — see uri-extractor.ts's
+  // "webrun" entry for the URL-sensitive path (its "open_page" action nests
+  // the URL under `action.url`). Any extracted http(s) URL always matches at
+  // least the built-in "https://**"/"http://**" catch-all ("external"), so
+  // this "untrusted" default never actually applies once a URL is found.
+  webrun: "untrusted",
   // "computer" is a RESERVED_RESPONSES_NAMESPACES entry in Codex's own source
   // (openai/codex, app-server/src/request_processors/thread_processor.rs) —
   // a hosted, provider-executed computer-use tool, registered via

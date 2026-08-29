@@ -9,6 +9,8 @@ import {
   resolveTabUrl,
   initTabUrlPersistence,
 } from "../uri-extractor.js";
+import { classifyUris, buildUriTrustConfig } from "../uri-trust.js";
+import { getToolTrust } from "../trust-levels.js";
 
 describe("uri-extractor: browser tab URL resolution", () => {
   let tmpDir: string;
@@ -102,5 +104,74 @@ describe("uri-extractor: browser tab URL resolution", () => {
       extractors,
     );
     expect(uris).toEqual([]);
+  });
+});
+
+describe("uri-extractor: webrun (OpenAI native web tool)", () => {
+  const extractors = buildUriExtractorMap();
+
+  it("extracts the URL nested under action.url (the actual wire shape for an open_page call)", () => {
+    const uris = extractToolSourceUris(
+      "webrun",
+      "webrun",
+      { action: { type: "open_page", url: "https://example.com/page" } },
+      extractors,
+    );
+    expect(uris).toEqual(["https://example.com/page"]);
+  });
+
+  it("also extracts a flat top-level url (in case a relay layer flattens it)", () => {
+    const uris = extractToolSourceUris(
+      "webrun",
+      "webrun",
+      { url: "https://example.com/flat" },
+      extractors,
+    );
+    expect(uris).toEqual(["https://example.com/flat"]);
+  });
+
+  it("extracts nothing for a search action (queries, not a URL — falls back to the tool's default taint)", () => {
+    const uris = extractToolSourceUris(
+      "webrun",
+      "webrun",
+      { action: { type: "search", queries: ["site:github.com foo"] } },
+      extractors,
+    );
+    expect(uris).toEqual([]);
+  });
+
+  it("with no URL extracted, falls back to webrun's own default (untrusted)", () => {
+    const trust = getToolTrust("webrun");
+    expect(trust).toBe("untrusted");
+  });
+
+  it("a URI-trust pattern match overrides webrun's default — the actual point of extraction", () => {
+    // This is the end-to-end chain index.ts's after_tool_call runs: extract
+    // -> classify the URI -> the URI's classification wins over the tool's
+    // own default. A page on a pattern-matched domain resolves "trusted"
+    // even though webrun's own default is "untrusted".
+    const uriTrustConfig = buildUriTrustConfig({
+      "https://docs.openclaw.ai/**": "trusted",
+    });
+    const uris = extractToolSourceUris(
+      "webrun",
+      "webrun",
+      { action: { type: "open_page", url: "https://docs.openclaw.ai/some/page" } },
+      extractors,
+    );
+    expect(uris).toEqual(["https://docs.openclaw.ai/some/page"]);
+    const uriTrust = classifyUris(uris, uriTrustConfig);
+    expect(uriTrust).toBe("trusted");
+    // An unrelated domain matches only the built-in "https://**" catch-all
+    // ("external"), never webrun's own "untrusted" default — the catch-all
+    // covers every extracted http(s) URL. webrun's "untrusted" default only
+    // matters when NO URL is extracted at all (e.g. its search action).
+    const unmatchedUris = extractToolSourceUris(
+      "webrun",
+      "webrun",
+      { action: { type: "open_page", url: "https://evil.example.com/phish" } },
+      extractors,
+    );
+    expect(classifyUris(unmatchedUris, uriTrustConfig)).toBe("external");
   });
 });
