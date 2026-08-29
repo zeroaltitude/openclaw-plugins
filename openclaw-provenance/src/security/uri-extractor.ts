@@ -32,6 +32,13 @@ export interface UriExtractorConfig {
 export const DEFAULT_URI_EXTRACTORS: Record<string, UriExtractorConfig> = {
   web_fetch: { params: ["url"] },
   web_search: { params: ["query"], scheme: "brave-search" },
+  // webrun's URL, when present, is nested under an `action` object
+  // (OpenAI's native web tool reports `{action: {type: "open_page", url}}`
+  // for a page-open call — confirmed from raw Codex rollout logs, not the
+  // search variant, which carries no URL). This flat entry only covers the
+  // case where a relay layer flattens `url` to the top level; the nested
+  // case is handled by the fallback augmentation below.
+  webrun: { params: ["url"] },
   Read: { params: ["file_path", "path"], scheme: "file" },
   Write: { params: ["file_path", "path"], scheme: "file" },
   Edit: { params: ["file_path", "path"], scheme: "file" },
@@ -273,6 +280,21 @@ export function extractToolSourceUris(
       if (tabRef) {
         const tabUrl = resolveTabUrl(tabRef);
         if (tabUrl) return [tabUrl];
+      }
+    }
+    // Fallback: webrun's URL, per the raw Codex rollout format, is nested
+    // under an `action` object (`{action: {type: "open_page", url}}`), not
+    // exposed at the top level. The flat "webrun" config entry above only
+    // catches a relay that flattens it; this catches the nested shape
+    // actually observed on the wire.
+    if (uris.length === 0 && toolKey === "webrun") {
+      const action = params.action;
+      const nestedUrl =
+        action && typeof action === "object" && !Array.isArray(action)
+          ? (action as Record<string, unknown>).url
+          : undefined;
+      if (typeof nestedUrl === "string" && nestedUrl) {
+        return [normalizeUri(nestedUrl, extractors[toolKey]?.scheme)];
       }
     }
     return uris;
