@@ -274,6 +274,10 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   understand_analyze_project: "trusted",
   understand_get_node: "trusted",
   understand_list_projects: "trusted",
+  // understand_analyze_pr: same family, was reachable via mcp__openclaw__
+  // understand_analyze_pr but had no bare-name entry at all (a plain gap,
+  // not the openclaw-prefix issue below).
+  understand_analyze_pr: "trusted",
 
   // ── Additional OpenClaw native tools — owner-controlled output ──
   // pdf: classified trusted on the basis that the owner only parses PDFs
@@ -311,6 +315,48 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   openclawvestige_predict: "trusted",
   openclawvestige_session_context: "trusted",
   openclawvestige_backup: "trusted",
+
+  // ── openclaw<name> flattened-alias siblings, part 2 (2026-08-30) ──────────
+  // Tank's DM session (agent:tank:direct:eddie) escalated trusted -> untrusted
+  // on "openclawmemory_search(untrusted)", which blocked its very next tool
+  // call ("exec") at the real-time gate — the literal "unable to continue"
+  // Eddie reported. memory_search itself was already trusted; only its
+  // flattened bridge-relay alias was missing, same bug class as
+  // openclawread/openclawwrite (composite-tools.ts) and the openclawvestige_*
+  // block above — this is that same maintenance pattern recurring for a
+  // family that hadn't hit it yet. Swept every other currently-bare-trusted
+  // OpenClaw-native tool (cross-checked against the live mcp__openclaw__*
+  // tool list) for the same gap rather than patching memory_search alone.
+  openclawmemory_search: "trusted",
+  openclawmemory_get: "trusted",
+  openclawunderstand_status: "trusted",
+  openclawunderstand_search: "trusted",
+  openclawunderstand_analyze_project: "trusted",
+  openclawunderstand_get_node: "trusted",
+  openclawunderstand_list_projects: "trusted",
+  openclawunderstand_analyze_pr: "trusted",
+  openclawwiki_status: "trusted",
+  openclawwiki_search: "trusted",
+  openclawwiki_get: "trusted",
+  openclawwiki_lint: "trusted",
+  openclawwiki_apply: "trusted",
+  openclawpdf: "trusted",
+  openclawskill_workshop: "trusted",
+  openclawtts: "trusted",
+  openclawsessions_spawn: "trusted",
+  openclawsessions_send: "trusted",
+  openclawsessions_list: "trusted",
+  openclawsessions_history: "trusted",
+  openclawsessions_yield: "trusted",
+  openclawsessions_search: "trusted",
+  openclawagents_list: "trusted",
+  openclawnodes: "trusted",
+  openclawcanvas: "trusted",
+  openclawgateway: "trusted",
+  openclawsession_status: "trusted",
+  openclawsubagents: "trusted",
+  openclawimage_generate: "trusted",
+  openclawvideo_generate: "trusted",
 
   // ── External sources ──────────────────────────────────────────────
   message: "external", // channel messages contain external content

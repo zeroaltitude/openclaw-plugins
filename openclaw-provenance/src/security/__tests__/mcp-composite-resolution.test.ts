@@ -161,3 +161,52 @@ describe("skill_workshop — trusted agent-local skill authoring tool", () => {
     );
   });
 });
+
+describe("openclaw<name> flattened-alias siblings (2026-08-30, openclawmemory_search incident)", () => {
+  // Tank's DM session escalated trusted -> untrusted on
+  // "openclawmemory_search(untrusted)" and its next tool call ("exec") was
+  // blocked at the real-time gate — memory_search itself was already
+  // trusted, only this flattened bridge-relay alias was missing. Same bug
+  // class as openclawread/openclawwrite (composite-tools.ts) and
+  // openclawvestige_* (trust-levels.ts) above; swept every other
+  // currently-bare-trusted OpenClaw-native tool for the same gap.
+  const flattenedAliasNames = [
+    "openclawmemory_search",
+    "openclawmemory_get",
+    "openclawunderstand_status",
+    "openclawunderstand_search",
+    "openclawunderstand_analyze_project",
+    "openclawunderstand_get_node",
+    "openclawunderstand_list_projects",
+    "openclawunderstand_analyze_pr",
+    "openclawwiki_status",
+    "openclawwiki_search",
+    "openclawwiki_get",
+    "openclawwiki_lint",
+    "openclawwiki_apply",
+    "openclawpdf",
+    "openclawskill_workshop",
+    "openclawtts",
+    "openclawsessions_spawn",
+    "openclawsessions_send",
+    "openclawsessions_list",
+    "openclawsessions_history",
+    "openclawsessions_yield",
+    "openclawsessions_search",
+    "openclawagents_list",
+    "openclawnodes",
+    "openclawcanvas",
+    "openclawgateway",
+    "openclawsession_status",
+    "openclawsubagents",
+    "openclawimage_generate",
+    "openclawvideo_generate",
+  ];
+  it.each(flattenedAliasNames)("%s is trusted", (name) => {
+    expect(getToolTrust(name)).toBe("trusted");
+  });
+
+  it("understand_analyze_pr (bare, no prefix at all) is also now classified — was a plain gap", () => {
+    expect(getToolTrust("understand_analyze_pr")).toBe("trusted");
+  });
+});
