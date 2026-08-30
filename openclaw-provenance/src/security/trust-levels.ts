@@ -350,6 +350,18 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
 
   // ── Runtime execution (trusted: agent-local, same as exec/process) ────────
   code_execution: "trusted",
+  // "wait" is Code Mode's own polling primitive (openai/codex source,
+  // code-mode-protocol/src/lib.rs: WAIT_TOOL_NAME = "wait"; code-mode-host/
+  // src/lib.rs: RequestKind::Wait -> "wait") — a genuinely separate Codex
+  // subsystem from the core tool registry audited in openclaw-provenance-4ob
+  // (spec_plan.rs/handlers/*.rs), missed there even though the raw evidence
+  // (rollout-log dumps showing repeated "function_call wait" entries) was
+  // already in hand at the time. Confirmed via rollout-trace/src/reducer/
+  // code_cell.rs:461's own comment: "wait is a normal model-visible function
+  // call, not a nested JS tool request" — it waits on an async Code Mode
+  // runtime cell finishing. Pure control-flow, no external content, same
+  // category as sleep/wait_for_environment/code_execution above.
+  wait: "trusted",
 
   // ── External social / web ─────────────────────────────────────────────────
   // x_search returns X/Twitter content — user-generated external content,

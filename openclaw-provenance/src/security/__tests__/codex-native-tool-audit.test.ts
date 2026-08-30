@@ -94,3 +94,17 @@ describe("codex native tool audit — view_image (dual-implementation name)", ()
     expect(classifyUris(uris, uriTrustConfig)).toBe("external");
   });
 });
+
+describe("codex native tool audit — wait (Code Mode subsystem, missed in the first pass)", () => {
+  it("is trusted — Code Mode's own polling primitive, not core-registry content", () => {
+    // "wait" lives in a genuinely separate Codex subsystem (code-mode-
+    // protocol/code-mode-host), not the core tool registry this audit
+    // otherwise covers (spec_plan.rs/handlers/*.rs). Missed in the initial
+    // pass even though raw evidence for it (repeated "function_call wait"
+    // entries in rollout-log dumps) was already in hand at the time — see
+    // openclaw-provenance-4ob. It waits on an async Code Mode runtime cell
+    // finishing: pure control-flow, same category as sleep/
+    // wait_for_environment/code_execution.
+    expect(getToolTrust("wait")).toBe("trusted");
+  });
+});
