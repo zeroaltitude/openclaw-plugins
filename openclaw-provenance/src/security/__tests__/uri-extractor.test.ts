@@ -175,3 +175,49 @@ describe("uri-extractor: webrun (OpenAI native web tool)", () => {
     expect(classifyUris(unmatchedUris, uriTrustConfig)).toBe("external");
   });
 });
+
+describe("uri-extractor: Write/Edit have no URI extraction (2026-08-30 Tank incident)", () => {
+  const extractors = buildUriExtractorMap();
+  const uriTrustConfig = buildUriTrustConfig();
+
+  it("Write to a path outside the workspace extracts nothing, staying at its own trusted default", () => {
+    // Regression: Write(file:///tmp/stratajam-ci-trust.json) previously
+    // extracted the destination path as a URI, which matched the built-in
+    // "file:///**" -> "shared" catch-all and overrode Write's correct
+    // "trusted" tool-output default — even though Write's content flows
+    // OUT (agent-authored), not in. Same bug class as the vestige-write/
+    // memory_search omissions already documented in uri-extractor.ts.
+    const uris = extractToolSourceUris(
+      "Write",
+      "Write",
+      { file_path: "/tmp/stratajam-ci-trust.json" },
+      extractors,
+    );
+    expect(uris).toEqual([]);
+    expect(getToolTrust("Write")).toBe("trusted");
+  });
+
+  it("Edit to a path outside the workspace extracts nothing, staying at its own trusted default", () => {
+    const uris = extractToolSourceUris(
+      "Edit",
+      "Edit",
+      { file_path: "/tmp/stratajam-ci-policy.json" },
+      extractors,
+    );
+    expect(uris).toEqual([]);
+    expect(getToolTrust("Edit")).toBe("trusted");
+  });
+
+  it("Read is unaffected — still extracts a file:// URI for path-sensitive classification", () => {
+    // Read brings existing file content INTO context, so it must stay
+    // path-sensitive (a file outside the workspace might not be the
+    // agent's own content). Only Write/Edit's directionality changed.
+    const uris = extractToolSourceUris(
+      "Read",
+      "Read",
+      { file_path: "/tmp/some-external-file.json" },
+      extractors,
+    );
+    expect(uris).toEqual(["file:///tmp/some-external-file.json"]);
+  });
+});

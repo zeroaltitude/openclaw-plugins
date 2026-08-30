@@ -40,8 +40,18 @@ export const DEFAULT_URI_EXTRACTORS: Record<string, UriExtractorConfig> = {
   // case is handled by the fallback augmentation below.
   webrun: { params: ["url"] },
   Read: { params: ["file_path", "path"], scheme: "file" },
-  Write: { params: ["file_path", "path"], scheme: "file" },
-  Edit: { params: ["file_path", "path"], scheme: "file" },
+  // Write/Edit intentionally omitted (2026-08-30, Tank incident:
+  // Write(file:///tmp/stratajam-ci-trust.json) tainted "shared" instead of
+  // staying "trusted"). Same rationale as the vestige-write/memory_search
+  // omissions below: content is going OUT (the agent's own authored text),
+  // not coming IN, so there's nothing here for a URI to classify. Read
+  // stays path-sensitive above because it brings a file's existing content
+  // INTO context — if that file lives outside the workspace, it might not
+  // be the agent's own content. Write/Edit only ever emit patch/write-result
+  // metadata; extracting the destination path just let the generic
+  // "file:///**" → "shared" catch-all override their correct "trusted"
+  // tool-output default for any target outside the workspace (e.g. /tmp
+  // scratch files), which is exactly backwards for an outbound write.
   image: { params: ["image", "images"], scheme: "file" },
   // view_image: Codex's OWN native tool only accepts a local `path` (see the
   // "view_image" comment in trust-levels.ts) — same category as Read above,
