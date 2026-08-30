@@ -107,4 +107,80 @@ describe("codex native tool audit — wait (Code Mode subsystem, missed in the f
     // wait_for_environment/code_execution.
     expect(getToolTrust("wait")).toBe("trusted");
   });
+
+  it("Code Mode's own submit-code tool ('exec') is already covered, confirming no gap", () => {
+    // core/src/tools/code_mode/execute_handler.rs's PUBLIC_TOOL_NAME is
+    // literally "exec" — already trusted via the exec/apply_patch block.
+    expect(getToolTrust("exec")).toBe("trusted");
+  });
+});
+
+describe("codex native tool audit — multi-agent orchestration v1 + v2 (2026-08-30 follow-up sweep)", () => {
+  // PR #43 explicitly flagged the v2 handlers as an unconfirmed residual gap
+  // ("could NOT be located via grep"). This sweep found and confirmed both
+  // v1 (namespaced "multi_agent_v1") and v2 (plain names) — both actively
+  // wired into spec_plan.rs, not dead code.
+  const v1Names = [
+    "multi_agent_v1wait_agent",
+    "multi_agent_v1resume_agent",
+    "multi_agent_v1send_input",
+    "multi_agent_v1spawn_agent",
+    "multi_agent_v1close_agent",
+  ];
+  it.each(v1Names)("%s is trusted", (name) => {
+    expect(getToolTrust(name)).toBe("trusted");
+  });
+
+  const v2Names = [
+    "interrupt_agent",
+    "wait_agent",
+    "followup_task",
+    "spawn_agent",
+    "list_agents",
+    "send_message",
+  ];
+  it.each(v2Names)("%s is trusted", (name) => {
+    expect(getToolTrust(name)).toBe("trusted");
+  });
+});
+
+describe("codex native tool audit — ext/* extension crates (2026-08-30 follow-up sweep)", () => {
+  const trustedExtNames = [
+    "get_goal",
+    "create_goal",
+    "update_goal",
+    "memorieslist",
+    "memoriesread",
+    "memoriessearch",
+    "memoriesadd_ad_hoc_note",
+    "historylist_windows",
+    "historylist_items",
+    "historyread_item",
+    "historysearch_contents",
+    "noteslist_files_by_prefix",
+    "notesread_file",
+    "notessearch_contents",
+    "notesappend_to_file",
+    "noteswrite_file",
+    "image_genimagegen",
+  ];
+  it.each(trustedExtNames)("%s is trusted", (name) => {
+    expect(getToolTrust(name)).toBe("trusted");
+  });
+
+  it("skillslist defaults to external — skills can be remote/plugin-installed, not blanket-trusted", () => {
+    // ext/skills/src/catalog.rs's SkillSourceKind::Host doc comment lists
+    // "downloaded/materialized remote skills" as a real source category.
+    expect(getToolTrust("skillslist")).toBe("external");
+  });
+
+  it("skillsread defaults to external for the same reason (reading remote skill content)", () => {
+    expect(getToolTrust("skillsread")).toBe("external");
+  });
+
+  it("web.run's ext/web-search registration resolves to the same webrun entry already covered", () => {
+    // ext/web-search/src/tool.rs registers ToolName::namespaced("web", "run")
+    // — identical wire name to the one already covered by PR #42.
+    expect(getToolTrust("webrun")).toBe("untrusted");
+  });
 });

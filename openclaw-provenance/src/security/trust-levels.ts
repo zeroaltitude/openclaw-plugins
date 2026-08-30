@@ -443,6 +443,121 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // exactly like it does for webrun — this default only actually governs the
   // common, genuinely-local case.
   view_image: "trusted",
+
+  // ── Codex multi-agent orchestration, v1 + v2 (openclaw-provenance-4ob,
+  // follow-up sweep 2026-08-30) ──────────────────────────────────────────
+  // Eddie's request after the "wait" miss was to fully audit Code Mode (done:
+  // its only two model-visible tool names are "exec" — core/src/tools/
+  // code_mode/execute_handler.rs's PUBLIC_TOOL_NAME, already covered by the
+  // exec: "trusted" entry above — and "wait", covered above; the other
+  // RequestKind variants in code-mode-host/src/lib.rs, OpenSession/Execute/
+  // Terminate/ShutdownSession, are internal host<->runtime session RPC with
+  // no before/after_tool_call hook emission at all, confirmed by their total
+  // absence outside the enum definition and its own test file) and to look
+  // for other unaudited subsystems. Doing so surfaced a second, still-live
+  // multi-agent tool generation that PR #43's audit had explicitly flagged
+  // as unconfirmed ("multi-agent-v2 handlers ... could NOT be located via
+  // grep"). Both v1 (core/src/tools/handlers/multi_agents/*.rs) and v2
+  // (core/src/tools/handlers/multi_agents_v2/*.rs) are actively wired into
+  // spec_plan.rs today, not dead code. Same category as spawn_agent/
+  // sessions_spawn/sessions_send above: sub-agent orchestration is
+  // agent-local control-flow, not externally-sourced content.
+  //
+  // v1 tools are registered under the "multi_agent_v1" namespace (core/src/
+  // tools/handlers/multi_agents_spec.rs), which ToolName's Display impl
+  // concatenates directly onto the name with no separator (protocol/src/
+  // tool_name.rs — confirmed empirically for webrun/"web"+"run" and now
+  // reused for every namespaced entry in this block).
+  multi_agent_v1wait_agent: "trusted", // core/src/tools/handlers/multi_agents/wait.rs
+  multi_agent_v1resume_agent: "trusted", // core/src/tools/handlers/multi_agents/resume_agent.rs
+  multi_agent_v1send_input: "trusted", // core/src/tools/handlers/multi_agents/send_input.rs
+  multi_agent_v1spawn_agent: "trusted", // core/src/tools/handlers/multi_agents/spawn.rs
+  multi_agent_v1close_agent: "trusted", // core/src/tools/handlers/multi_agents/close_agent.rs
+  // v2 tools register plain (unnamespaced) names. spawn_agent is already
+  // covered above; the rest were missing.
+  interrupt_agent: "trusted", // core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs
+  wait_agent: "trusted", // core/src/tools/handlers/multi_agents_v2/wait.rs
+  followup_task: "trusted", // core/src/tools/handlers/multi_agents_v2/followup_task.rs
+  list_agents: "trusted", // core/src/tools/handlers/multi_agents_v2/list_agents.rs
+  // send_message: confirmed via source (CollabAgentTool::SendMessage,
+  // args.target, MessageDeliveryMode::QueueOnly) to be inter-agent
+  // collaboration messaging, not an external channel send — same category
+  // as sessions_send, not OpenClaw's own external "message" tool.
+  send_message: "trusted", // core/src/tools/handlers/multi_agents_v2/send_message.rs
+
+  // ── Codex extension crates (ext/*), openclaw-provenance-4ob follow-up ──
+  // The full Cargo workspace member list was enumerated to find subsystems
+  // beyond core/src/tools/ and code-mode*: an entire ext/* family exists,
+  // each crate's tools funneled through registry.register_external(...) in
+  // core/src/tools/spec_plan.rs's append_extension_tool_executors — but that
+  // register_external call is generic to ALL ext/* tools regardless of
+  // actual content risk (it fires identically for web.run, which genuinely
+  // carries external content, and for the agent-local tools below), so
+  // Codex's own trust bucket carries no independent classification signal
+  // here the way core's register_trusted/register_external split did.
+  // Classified instead by actual content provenance, per tool:
+
+  // ext/goal: get_goal/create_goal/update_goal register PLAIN names
+  // (ext/goal/src/spec.rs). Agent/owner-authored structured planning state,
+  // same category as update_plan above — no external fetch capability.
+  get_goal: "trusted",
+  create_goal: "trusted",
+  update_goal: "trusted",
+
+  // ext/memories: Codex's own native cross-session memory feature (distinct
+  // from OpenClaw's Vestige), namespace "memories" (ext/memories/src/lib.rs).
+  // Entries are model-authored (add_ad_hoc_note) or derived from the
+  // session's own reflection — same self-authored-history category as
+  // sessions_search/sessions_history above, not a channel for fetching new
+  // external content.
+  memorieslist: "trusted", // ext/memories/src/tools/list.rs
+  memoriesread: "trusted", // ext/memories/src/tools/read.rs
+  memoriessearch: "trusted", // ext/memories/src/tools/search.rs
+  memoriesadd_ad_hoc_note: "trusted", // ext/memories/src/tools/ad_hoc_note.rs
+
+  // ext/history-notes: namespaces "history" and "notes" (ext/history-notes/
+  // src/tools.rs). Its own tool description states outright: "This is
+  // private model-only state" — context-window-recovery notes the model
+  // wrote for itself, the same category as sessions_history/vestige_* above.
+  historylist_windows: "trusted",
+  historylist_items: "trusted",
+  historyread_item: "trusted",
+  historysearch_contents: "trusted",
+  noteslist_files_by_prefix: "trusted",
+  notesread_file: "trusted",
+  notessearch_contents: "trusted",
+  notesappend_to_file: "trusted",
+  noteswrite_file: "trusted",
+
+  // ext/image-generation: namespace "image_gen", tool "imagegen" (ext/
+  // image-generation/src/lib.rs). Its only path-like input,
+  // referenced_image_paths, is Option<Vec<AbsolutePathBuf>> — LOCAL
+  // filesystem paths only, no URL field (confirmed in ext/image-generation/
+  // src/tool.rs's ImagegenArgs struct). Output is a generated image, same
+  // model-generated-content category as image_generate above.
+  image_genimagegen: "trusted",
+
+  // ext/skills: namespace "skills" (ext/skills/src/tools/mod.rs). NOT
+  // classified trusted like the crates above — ext/skills/src/catalog.rs's
+  // own SkillSourceKind::Host doc comment explicitly lists "downloaded/
+  // materialized remote skills" as a real source category alongside bundled/
+  // user/repo/plugin-installed skills. Reading (skillsread) or even listing
+  // (skillslist, which surfaces attacker-craftable skill descriptions) a
+  // remote/plugin-installed skill's content is a genuine prompt-injection
+  // vector, the same shape as reading a fetched document — conservative
+  // "external" default, not blanket-trusted, matching Eddie's standing
+  // instruction to stay sensitive to actual content provenance rather than
+  // assume first-party-crate == safe.
+  skillslist: "external", // ext/skills/src/tools/list.rs
+  skillsread: "external", // ext/skills/src/tools/read.rs
+
+  // ext/web-search: registers ToolName::namespaced("web", "run")
+  // (ext/web-search/src/tool.rs) — the identical "web.run" tool already
+  // covered by the webrun: "untrusted" entry above (confirmed empirically
+  // via Tank's own rollout logs and independently here via source: this is
+  // literally the same wire name, just registered from a separate crate).
+  // No new entry needed; noted here so this crate isn't mistaken for an
+  // unaudited gap on a future pass.
 };
 
 // Legacy alias for backward compatibility
