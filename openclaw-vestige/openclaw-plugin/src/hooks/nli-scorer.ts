@@ -8,13 +8,17 @@
  * and takes a few seconds; subsequent calls are ~50-200ms depending on text length.
  */
 
-// @ts-ignore — @xenova/transformers has no TS types
-import { pipeline, env } from "@xenova/transformers";
-
 // ── Config ─────────────────────────────────────────────────────────────
 
-/** Disable local model check — always use HF cache */
-env.allowLocalModels = false;
+// @xenova/transformers is imported lazily inside initClassifier(). A top-level
+// import pulls in onnxruntime-node's native addon at module load, and ONNX
+// Runtime spins up its intra-op thread pool (spin-wait by default) as soon as
+// the binding loads — burning a full core forever even when nothing ever calls
+// the scorer. Vestige's ambient hooks are commonly disabled in config, so that
+// cost was being paid for zero work. Worse, each plugin registry activation
+// re-bundles this plugin into a fresh /tmp/openclaw-plugin-build-* directory, so
+// the native addon resolves to a new absolute path and Node loads *another*
+// independent ORT instance with its own spinning pool, with no teardown path.
 
 const MODEL_NAME = "Xenova/nli-deberta-v3-xsmall";
 
@@ -79,6 +83,10 @@ let initPromise: Promise<void> | null = null;
 // ── Initialization ─────────────────────────────────────────────────────
 
 async function initClassifier(): Promise<void> {
+  // @ts-ignore — @xenova/transformers has no TS types
+  const { pipeline, env } = await import("@xenova/transformers");
+  /** Disable local model check — always use HF cache */
+  env.allowLocalModels = false;
   classifier = await pipeline("zero-shot-classification", MODEL_NAME, {
     quantized: true,
   });

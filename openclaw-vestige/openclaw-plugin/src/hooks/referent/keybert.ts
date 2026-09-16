@@ -11,10 +11,12 @@
  * call and is cached at module level.
  */
 
-// @ts-ignore — @xenova/transformers ships partial types and is loaded via Node's ESM interop
-import { pipeline, env } from "@xenova/transformers";
-
-env.allowLocalModels = false;
+// @xenova/transformers is imported lazily inside initEmbedder(). See the note in
+// ../nli-scorer.ts: a top-level import loads onnxruntime-node's native addon,
+// which starts ONNX Runtime's spin-waiting intra-op thread pool at module load
+// and pegs a core for the process's lifetime even if no embedding is ever
+// requested. The docstring above already promises lazy loading; the top-level
+// import silently broke that promise.
 
 const EMBED_MODEL = "Xenova/all-MiniLM-L6-v2";
 
@@ -22,6 +24,9 @@ let embedder: any = null;
 let initPromise: Promise<void> | null = null;
 
 async function initEmbedder(): Promise<void> {
+  // @ts-ignore — @xenova/transformers ships partial types and is loaded via Node's ESM interop
+  const { pipeline, env } = await import("@xenova/transformers");
+  env.allowLocalModels = false;
   embedder = await pipeline("feature-extraction", EMBED_MODEL, {
     quantized: true,
   });
