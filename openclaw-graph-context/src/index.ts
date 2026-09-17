@@ -122,7 +122,10 @@ export function activate(api: PluginApi): void {
     initSchema(db);
     log.info(`[graph-context] DB opened: ${dbPath}`);
   } catch (err) {
-    log.error(`[graph-context] Failed to open DB at ${dbPath}:`, err);
+    // The plugin logger formats only the message string; carry the cause into it.
+    log.error(
+      `[graph-context] Failed to open DB at ${dbPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return;
   }
 
