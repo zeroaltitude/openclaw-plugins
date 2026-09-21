@@ -48,7 +48,7 @@ approvals reviewer, no `guardian_subagent`, different tool surface).
 | `server.ts` | JSON-RPC method dispatch; thread/turn lifecycle entry points. |
 | `turn-runner.ts` | **The heart.** Drives one Claude turn: spins the SDK `query()` stream, translates each stream event into codex-shaped item notifications, manages keepalive + subagent-activity progress, token usage. Most behavior bugs live here. |
 | `approval-bridge.ts` | Routes the SDK's native-tool approval requests through OpenClaw's BeforeToolCall chain (`registerApprovalHandler`). The `never→untrusted` promotion lives near here / in the consumer. |
-| `thread-store.ts` / `session-store.ts` | Thread metadata + SDK session persistence (resume vs fresh). |
+| `thread-store.ts` / `session-store.ts` | Thread metadata + SDK session persistence (resume vs fresh). Also owns retention: `pruneStaleThreads` deletes thread dirs whose newest file is older than `OPENCLAW_CLAUDE_BRIDGE_THREAD_RETENTION_DAYS` (default 30, `0` disables); `cli.ts` runs it 15 s after startup and every 6 h. Staleness is judged by file mtime, not `meta.updatedAt`, because the SDK appends transcripts without touching meta. |
 | `dynamic-tools.ts` | Bridges OpenClaw dynamic tools into the SDK as an MCP server; emits item/started+completed around each call. |
 | `models.ts` | Model id resolution / capability gating (e.g. Fast mode per-model). |
 | `rate-limits.ts` | Parses Anthropic 429s into a user-legible retry message. |

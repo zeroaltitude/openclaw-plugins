@@ -179,6 +179,17 @@ export type ThreadMeta = {
   archivedAt?: number | null;
 };
 
+export type PruneStaleThreadsResult = {
+  /** Thread directories examined (non-directory entries are not counted). */
+  scanned: number;
+  /** Directories deleted because every file in them was older than the cutoff. */
+  pruned: number;
+  /** Directories retained because at least one file was newer than the cutoff. */
+  kept: number;
+  /** Directories that could not be examined or deleted; left in place. */
+  failed: number;
+};
+
 export type CreateThreadInput = {
   cwd: string;
   model: string;
@@ -326,6 +337,90 @@ export class ThreadStore {
       .filter((entry): entry is { threadId: string; mtimeMs: number } => entry !== null)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
       .map((entry) => entry.threadId);
+  }
+
+  /**
+   * Retention sweep: delete every thread directory whose NEWEST file
+   * (meta.json, messages.jsonl, anything else the SDK dropped in there) is
+   * older than `maxAgeMs`. Returns counts; never throws for a single bad entry.
+   *
+   * Why this exists: nothing else ever removes a thread. Every heartbeat,
+   * cron wake, subagent and chat turn creates one, and each meta.json carries
+   * a full copy of the dynamic-tool catalog plus developer instructions
+   * (~250 KB on a real install). On 2026-09-21 a long-lived install had
+   * 19,687 thread dirs / 6.3 GB, 13,783 of them untouched for 30+ days.
+   *
+   * Staleness is judged on file mtimes, not `meta.updatedAt`, because the SDK
+   * appends to messages.jsonl without going through `updateMeta`, so a thread
+   * can be actively conversing while its meta.json is weeks old. Deleting a
+   * thread that is mid-resume is the failure mode to avoid; a recently
+   * appended transcript is the cheapest reliable "in use" signal we have.
+   *
+   * `maxAgeMs <= 0` (or non-finite) disables the sweep and returns zeros, so
+   * callers can wire it straight to an operator knob without branching.
+   */
+  async pruneStaleThreads(opts: {
+    maxAgeMs: number;
+    now?: number;
+  }): Promise<PruneStaleThreadsResult> {
+    const result: PruneStaleThreadsResult = { scanned: 0, pruned: 0, kept: 0, failed: 0 };
+    if (!Number.isFinite(opts.maxAgeMs) || opts.maxAgeMs <= 0) {
+      return result;
+    }
+    const cutoffMs = (opts.now ?? Date.now()) - opts.maxAgeMs;
+    const threadsRoot = path.join(this.stateRoot, "threads");
+    let entries: string[];
+    try {
+      entries = await fs.readdir(threadsRoot);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return result;
+      throw err;
+    }
+    const verdicts = await mapWithConcurrency(entries, STAT_CONCURRENCY, async (threadId) => {
+      const dir = path.join(threadsRoot, threadId);
+      try {
+        const dirStat = await fs.stat(dir);
+        if (!dirStat.isDirectory()) return "skip" as const;
+        const files = await fs.readdir(dir);
+        let newestMs = dirStat.mtimeMs;
+        for (const file of files) {
+          try {
+            const st = await fs.stat(path.join(dir, file));
+            if (st.mtimeMs > newestMs) newestMs = st.mtimeMs;
+          } catch {
+            // vanished between readdir and stat — treat as no evidence of activity
+          }
+        }
+        return newestMs < cutoffMs ? ("stale" as const) : ("fresh" as const);
+      } catch {
+        return "failed" as const;
+      }
+    });
+    const stale: string[] = [];
+    verdicts.forEach((verdict, i) => {
+      if (verdict === "skip") return;
+      result.scanned += 1;
+      if (verdict === "stale") stale.push(entries[i] as string);
+      else if (verdict === "fresh") result.kept += 1;
+      else result.failed += 1;
+    });
+    await mapWithConcurrency(stale, STAT_CONCURRENCY, async (threadId) => {
+      try {
+        await fs.rm(path.join(threadsRoot, threadId), { recursive: true, force: true });
+        result.pruned += 1;
+      } catch (err) {
+        result.failed += 1;
+        this.logger.warn("[thread-store] retention: failed to delete stale thread", {
+          threadId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+    this.logger.info("[thread-store] retention sweep complete", {
+      maxAgeDays: Math.round((opts.maxAgeMs / 86_400_000) * 10) / 10,
+      ...result,
+    });
+    return result;
   }
 
   async deleteThread(threadId: string): Promise<void> {

@@ -137,6 +137,30 @@ export async function main(argv: string[]): Promise<void> {
   }, 5 * 60_000);
   attemptSweepTimer.unref?.();
 
+  // Thread-directory retention. Nothing else ever deletes a thread dir, and a
+  // real install accumulated 19k dirs / 6.3 GB in seven weeks (see
+  // ThreadStore.pruneStaleThreads). Default 30 days; `0` disables. Runs once
+  // shortly after startup and then every 6h for long-lived bridge processes.
+  // Fire-and-forget: a sweep over tens of thousands of dirs is a few seconds
+  // of stat calls and must never delay `initialize`.
+  const THREAD_RETENTION_DAYS = Number(process.env.OPENCLAW_CLAUDE_BRIDGE_THREAD_RETENTION_DAYS ?? 30);
+  const THREAD_RETENTION_MS = Number.isFinite(THREAD_RETENTION_DAYS)
+    ? THREAD_RETENTION_DAYS * 86_400_000
+    : 0;
+  const runRetentionSweep = () => {
+    threadStore.pruneStaleThreads({ maxAgeMs: THREAD_RETENTION_MS }).catch((err: unknown) => {
+      STDERR_LOGGER.warn("[thread-store] retention sweep failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  };
+  if (THREAD_RETENTION_MS > 0) {
+    const initialRetentionTimer = setTimeout(runRetentionSweep, 15_000);
+    initialRetentionTimer.unref?.();
+    const retentionTimer = setInterval(runRetentionSweep, 6 * 60 * 60_000);
+    retentionTimer.unref?.();
+  }
+
   const notify = (method: string, params: unknown) => server.notify(method, params);
 
   server.onMethod("model/list", createModelListHandler(STDERR_LOGGER));
