@@ -78,6 +78,35 @@ engine is not live until that binary is replaced and the process restarted.** Th
 holds one long-lived MCP session; `GET /api/health`'s `uptime_seconds` is time since that
 session was established, which makes it a usable proxy for "how old is the running engine."
 
+### `smart_ingest` decisions are not all equally safe (openclaw-vestige-1de)
+
+`vestige_smart_ingest` returns a `decision` field. Two of its values mutate an **existing**
+memory, and neither is recorded anywhere you can audit or undo:
+
+| decision | what it does to the old node |
+| --- | --- |
+| `create` / `merge` | nothing — a new node is added |
+| `reinforce` | `strengthen_on_access` — beneficial |
+| `supersede` | `demote_memory`: `retrieval_strength -0.30`, `retention_strength -0.15`, `stability x0.5`. **No edge, no `superseded_by` column, no changelog row** — `superseded_id` is returned in the JSON and then dropped |
+| `update` / `replace` / `add_context` | rewrites the old node's `content` **in place**; no second node is created |
+
+Two ratchets make a wrong `supersede` worse than a one-off penalty. `was_demoted` is
+defined as `retrieval_strength < 0.3` (`sqlite.rs`), so a node pushed under that line
+becomes eligible for the `auto_supersede_demoted` branch, which needs no contradiction at
+all. And consolidation runs `gc_below_retention(0.3, 30)` whenever average retention is
+under `VESTIGE_RETENTION_TARGET` (default 0.8), which `DELETE`s nodes below 0.3 retention
+older than 30 days.
+
+So when a memory "feels like it faded," check the decision history before blaming FSRS
+decay. And when a tool reports `decision=supersede` on something that should have been a
+separate memory, that is a **bug worth filing**, not cosmetic noise. The gate that makes
+the call is `crates/vestige-core/src/advanced/prediction_error.rs` in `~/projects/vestige`;
+`openclaw-vestige-1de` fixed it firing on disjoint memories at 0.78-0.80 similarity
+(https://github.com/zeroaltitude/vestige/pull/24).
+
+Escape hatch while any of this is in doubt: `forceCreate: true` skips the similarity check
+entirely.
+
 ## Build & Test
 
 ```bash
