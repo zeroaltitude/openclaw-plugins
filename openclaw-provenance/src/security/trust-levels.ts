@@ -220,6 +220,10 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   ReadMcpResourceTool: "trusted",
   tts: "trusted",
   cron: "trusted",
+  // automations: cron's name since OpenClaw's RFC 0026 (the policy alias
+  // cron -> automations, so a CLI bridge reports the cron tool under it).
+  // Same schedule metadata as cron; missing, it fell to "untrusted".
+  automations: "trusted",
   sessions_spawn: "trusted",
   sessions_send: "trusted",
   sessions_list: "trusted",
@@ -705,6 +709,57 @@ export function buildToolOutputTaintMap(
   return base;
 }
 
+// ── CLI bridge tool names (openclaw-provenance-0kz) ─────────────────────────
+//
+// OpenClaw's CLI harness bridge reports a native tool under its policy id,
+// not its own name: `normalizeCliToolName` (openclaw
+// src/agents/cli-runner/tool-policy.ts) splits CamelCase into snake_case,
+// lowercases, and applies the policy aliases. So Claude Code's `TaskStop`
+// reaches the hooks as `task_stop`, which neither the exact nor the
+// case-insensitive lookup matches ("taskstop" is not "task_stop"). Every
+// two-word harness tool fell to the "untrusted" default, and a single call
+// tainted the session for good (a Theseus lane, 2026-09-30: watermark
+// "tool output: task_stop", then every exec and write refused).
+
+/** The bridge's policy aliases (openclaw src/agents/tool-policy-shared.ts). */
+const BRIDGE_TOOL_ALIASES: Readonly<Record<string, string>> = {
+  bash: "exec",
+  "apply-patch": "apply_patch",
+  cron: "automations",
+};
+
+const bridgeNames = new Map<string, string>();
+
+/**
+ * The name OpenClaw's CLI bridge reports for the tool `name`: the same
+ * transform as `normalizeCliToolName`, so a bridge-form match admits only a
+ * name the bridge would produce from a key already in the map.
+ */
+export function bridgeToolName(name: string): string {
+  let bridged = bridgeNames.get(name);
+  if (bridged === undefined) {
+    const folded = name
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .toLowerCase();
+    bridged = BRIDGE_TOOL_ALIASES[folded] ?? folded;
+    bridgeNames.set(name, bridged);
+  }
+  return bridged;
+}
+
+/** The least trusted entry of `map` whose bridge form is `lower`, if any. */
+function bridgeFormTrust(
+  lower: string,
+  map: Record<string, TrustLevel>,
+): TrustLevel | undefined {
+  let found: TrustLevel | undefined;
+  for (const [key, value] of Object.entries(map)) {
+    if (bridgeToolName(key) === lower) found = found ? minTrust(found, value) : value;
+  }
+  return found;
+}
+
 /**
  * Get trust level for a tool's output. Uses a pre-merged map if provided, otherwise defaults.
  * Unknown tools (not in defaults or overrides) default to "untrusted" — this prevents
@@ -730,6 +785,17 @@ export function getToolTrust(
   for (const [key, value] of Object.entries(DEFAULT_TOOL_OUTPUT_TAINTS)) {
     if (key.toLowerCase() === lower) return value;
   }
+
+  // Bridge-form fallback (openclaw-provenance-0kz): a CLI harness reports
+  // `TaskStop` as `task_stop`. It fires only after the exact and
+  // case-insensitive lookups miss, and it matches only the bridge's own
+  // transform of a key in the map, so no new name class gains trust. An
+  // override keeps its say (the merged map is searched first), and when two
+  // keys share a bridge form, the less trusted wins.
+  const viaBridge =
+    (resolvedMap ? bridgeFormTrust(lower, resolvedMap) : undefined) ??
+    bridgeFormTrust(lower, DEFAULT_TOOL_OUTPUT_TAINTS);
+  if (viaBridge) return viaBridge;
 
   // Composite key fallback: plugin tools can resolve to keys such as
   // tweetclaw./api/v1/x/tweets/search while sharing a bare tool taint.

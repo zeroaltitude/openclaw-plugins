@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   getToolTrust,
+  bridgeToolName,
   buildToolOutputTaintMap,
   DEFAULT_TOOL_OUTPUT_TAINTS,
 } from "../trust-levels.js";
@@ -102,4 +103,66 @@ describe("Vestige dynamic-tool aliases — trusted output", () => {
       expect(DEFAULT_TOOL_OUTPUT_TAINTS[tool]).toBe("trusted");
     });
   }
+});
+
+// The CLI bridge's names (openclaw-provenance-0kz). OpenClaw's claude-cli
+// bridge reports a native tool under its policy id: CamelCase split into
+// snake_case, lowercased, then aliased (bash -> exec, cron -> automations).
+// Claude Code's TaskStop reached provenance as `task_stop`, missed every
+// lookup, and tainted a Theseus lane's session untrusted (2026-09-30).
+describe("CLI bridge tool names — the bridge's form of a known key", () => {
+  it("mirrors openclaw's normalizeCliToolName", () => {
+    expect(bridgeToolName("TaskStop")).toBe("task_stop");
+    expect(bridgeToolName("AskUserQuestion")).toBe("ask_user_question");
+    expect(bridgeToolName("ListMcpResourcesTool")).toBe("list_mcp_resources_tool");
+    expect(bridgeToolName("MCPTool")).toBe("mcp_tool");
+    expect(bridgeToolName("WebFetch")).toBe("web_fetch");
+    expect(bridgeToolName("Bash")).toBe("exec");
+    expect(bridgeToolName("cron")).toBe("automations");
+    expect(bridgeToolName("sessions_spawn")).toBe("sessions_spawn");
+  });
+
+  it("the watermark's own name, task_stop, resolves trusted", () => {
+    expect(getToolTrust("task_stop", taints)).toBe("trusted");
+    expect(getToolTrust("task_stop")).toBe("trusted");
+  });
+
+  it("every multi-word key resolves, in its bridge form, exactly as the key does", () => {
+    const multiWord = Object.keys(DEFAULT_TOOL_OUTPUT_TAINTS).filter((key) =>
+      /[a-z0-9][A-Z]/.test(key),
+    );
+    expect(multiWord.length).toBeGreaterThan(20);
+    for (const key of multiWord) {
+      expect([key, getToolTrust(bridgeToolName(key), taints)]).toEqual([
+        key,
+        getToolTrust(key, taints),
+      ]);
+    }
+  });
+
+  it("the cron tool under its policy name, automations, is trusted", () => {
+    expect(getToolTrust("automations", taints)).toBe("trusted");
+  });
+
+  it("the web tools stay untrusted in their bridge form", () => {
+    expect(getToolTrust("web_fetch", taints)).toBe("untrusted");
+    expect(getToolTrust("web_search", taints)).toBe("untrusted");
+  });
+
+  it("a name no known key folds to stays untrusted", () => {
+    expect(getToolTrust("task_stopper", taints)).toBe("untrusted");
+    expect(getToolTrust("taskstop_now", taints)).toBe("untrusted");
+    expect(getToolTrust("unknown_widget", taints)).toBe("untrusted");
+  });
+
+  it("an override keeps its say over the bridge form", () => {
+    const strict = buildToolOutputTaintMap({ TaskStop: "untrusted" });
+    expect(getToolTrust("task_stop", strict)).toBe("untrusted");
+  });
+
+  it("when two keys share a bridge form, the less trusted wins", () => {
+    // TASKStop folds to task_stop too, and neither key matches it case-insensitively.
+    const clash = buildToolOutputTaintMap({ TaskStop: "trusted", TASKStop: "external" });
+    expect(getToolTrust("task_stop", clash)).toBe("external");
+  });
 });
