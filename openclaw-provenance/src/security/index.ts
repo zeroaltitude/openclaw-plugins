@@ -41,6 +41,10 @@ import {
   minTrust,
 } from "./trust-levels.js";
 import type { TrustLevel } from "./trust-levels.js";
+import {
+  isCollectorWaitTool,
+  resolveCollectorChildTaint,
+} from "./collector-taint.js";
 import { ApprovalStore } from "./approval-store.js";
 import { isMemoryFile } from "./memory-file-detector.js";
 import { basename } from "node:path";
@@ -2506,6 +2510,34 @@ export function registerSecurityHooks(
         const uriTrust = classifyUris(sourceUris, effectiveUriTrustConfig);
         if (uriTrust !== undefined) {
           effectiveTrust = uriTrust;
+        }
+      }
+
+      // Collector wait (openclaw-provenance-0ii): agents_wait relays its
+      // children's answers, so its taint is the maximum taint of the children
+      // it actually collected, read from the result's own completed[].sessionKey
+      // list. Overrides the static map entry (which is only the no-children
+      // fallback) and runs after the URI block because a wait carries no URIs.
+      if (isCollectorWaitTool(toolKey)) {
+        const childTaint = resolveCollectorChildTaint(result, (childKey) => {
+          const childGraph = store.getActive(childKey);
+          const childWatermark = watermarkStore.getLevel(childKey)?.level;
+          if (childGraph && childWatermark) return minTrust(childGraph.maxTaint, childWatermark);
+          return childGraph?.maxTaint ?? childWatermark;
+        });
+        effectiveTrust = childTaint.trust;
+        if (verbose || childTaint.trust !== "trusted") {
+          logger.info(
+            `[provenance:${sk}]   COLLECTOR_WAIT_TAINT: ${toolKey} → ${childTaint.trust} from ${
+              childTaint.sessionKeys.length
+            } collected child(ren)${
+              childTaint.sessionKeys.length > 0
+                ? `: ${childTaint.sessionKeys
+                    .map((key, i) => `${shortKey(key)}=${childTaint.levels[i]}`)
+                    .join(", ")}`
+                : " (none collected — no child output relayed)"
+            }`,
+          );
         }
       }
 

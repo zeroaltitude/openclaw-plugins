@@ -28,6 +28,15 @@ export interface CompositeToolConfig {
 export const DEFAULT_COMPOSITE_TOOLS: Record<string, CompositeToolConfig> = {
   message: { actionParam: "action" },
   browser: { actionParam: "action" },
+  // openclaw-provenance-0ii: three more action-dispatched tools whose actions
+  // do NOT share one provenance. Each has a required/declared `action` param
+  // (openclaw src/agents/tools/plugins-tool.ts, github-publish-tool.ts,
+  // transcripts-tool.ts). An action we don't enumerate still resolves through
+  // getToolTrust's composite-key fallback to the bare tool's label, so adding
+  // these cannot strand an unknown action.
+  plugins: { actionParam: "action" },
+  github_publish: { actionParam: "action" },
+  transcripts: { actionParam: "action" },
 };
 
 // ── Composite output taints ─────────────────────────────────────────────────
@@ -155,6 +164,53 @@ export const DEFAULT_COMPOSITE_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // unknown-tool "untrusted" default, tainting every session that keeps its
   // progress card current. Sibling of session_status/sessions_list above.
   "progress_card": "trusted",
+
+  // ── plugins: local inventory vs remote catalog (openclaw-provenance-0ii) ──
+  // list/inspect and the lifecycle actions report or mutate THIS gateway's
+  // installed plugins — local state, trusted. search and install read the
+  // official catalog / ClawHub, whose package names and descriptions are
+  // authored off-box and are craftable by whoever published them; that is the
+  // same injection surface as reading a remote skill, so it takes the same
+  // "external" label.
+  "plugins.list": "trusted",
+  "plugins.inspect": "trusted",
+  "plugins.enable": "trusted",
+  "plugins.disable": "trusted",
+  "plugins.uninstall": "trusted",
+  "plugins.reload": "trusted",
+  "plugins.reloadAndResume": "trusted",
+  "plugins.search": "external",
+  "plugins.install": "external",
+
+  // ── github_publish: write receipts vs observed remote state (0ii) ────────
+  // publish/prepare_pr/refresh_base/upload_evidence/request_review return a
+  // receipt for something we did. inspect_pr/edit/readiness/ready/merge/close
+  // "return the observed GitHub state" (the tool's own description) — PR
+  // titles, bodies and review text written by other people on github.com.
+  "github_publish.publish": "trusted",
+  "github_publish.prepare_pr": "trusted",
+  "github_publish.refresh_base": "trusted",
+  "github_publish.upload_evidence": "trusted",
+  "github_publish.request_review": "trusted",
+  "github_publish.inspect_pr": "external",
+  "github_publish.edit": "external",
+  "github_publish.readiness": "external",
+  "github_publish.ready": "external",
+  "github_publish.merge": "external",
+  "github_publish.close": "external",
+
+  // ── transcripts: capture control vs recorded speech (0ii) ───────────────
+  // start/stop/status/list are capture control and local capture inventory.
+  // show/summarize return the transcript itself — other people's speech — and
+  // import pulls a transcript in from outside; those keep the bare tool's
+  // "external" label explicitly so the distinction is readable here.
+  "transcripts.start": "trusted",
+  "transcripts.stop": "trusted",
+  "transcripts.status": "trusted",
+  "transcripts.list": "trusted",
+  "transcripts.show": "external",
+  "transcripts.summarize": "external",
+  "transcripts.import": "external",
 
   // ── exec: command-pattern-based taints (generated from exec command rules) ──
   ...buildExecOutputTaints(),

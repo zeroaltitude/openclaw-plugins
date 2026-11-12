@@ -248,6 +248,162 @@ export const DEFAULT_TOOL_OUTPUT_TAINTS: Record<string, TrustLevel> = {
   // tainted at the specific tool that fetched it (e.g. web_fetch), not here.
   skill_workshop: "trusted",
 
+  // ── OpenClaw 2026.11.3 tool surface (openclaw-provenance-0ii) ─────────────
+  //
+  // Audited against the gateway's own registry — CORE_TOOL_DEFINITIONS and
+  // RUNTIME_ONLY_TOOL_FACTS in openclaw src/agents/core-tool-facts.ts, which
+  // is the single list every core tool is declared in. Every name below had
+  // no entry in any map here and therefore took the unknown-tool "untrusted"
+  // secure default, which is a one-way door: one call escalates the session
+  // and the execution-layer re-eval then refuses every later tool. That cost
+  // three locked-out runs on 2026-11-12 alone (agents_wait 11:10, plugins
+  // 13:43 + 13:45, plus ls 11:13).
+  //
+  // The rule applied to each: output that is purely this gateway's own state
+  // (its sessions, plugins, schedules, routes, panels, local files, the
+  // owner's own answer) is trusted; output that relays content from outside
+  // the gateway (a channel reply, a remote catalog, a meeting transcript, a
+  // device screen) keeps a non-trusted label.
+
+  // agents_wait: relays a collector child's final answer. Its real taint is
+  // the MAXIMUM taint of the children it waited on, resolved per call from
+  // the result's own `completed[].sessionKey` list — see collector-taint.ts
+  // and its use in index.ts's after_tool_call. This entry is only the
+  // fallback used when no child session can be resolved from the result
+  // (e.g. every id still pending, or an error-shaped result): a wait that
+  // returned no child output carries no child content, so it must not taint
+  // the parent. A blanket "untrusted" here is what locked out the Theseus
+  // 1.0.6 planner (session fa05064b) at 11:10:45 while all four of its
+  // children were its own local-file subagents.
+  agents_wait: "trusted",
+  // ask_user: the human's own answer to a question this agent posed, same
+  // category as the Claude-native AskUserQuestion above. NOTE: when a
+  // deployment routes ask_user into a shared group channel, the answer is
+  // whoever replied there, not necessarily the owner — such a deployment
+  // should override this to "external" via toolOutputTaints.
+  ask_user: "trusted",
+  // ls: local directory listing (openclaw src/agents/sessions/tools/ls.ts),
+  // the fs sibling of read/write/edit and dir_list above. Its absence is why
+  // a single `ls` re-tainted sessions at 11:13:18 and 14:29:03.
+  ls: "trusted",
+  // Gateway-local session and conversation management. sessions_create is the
+  // sibling of sessions_spawn; `sessions` patches labels/groups/ownership;
+  // presence reports who is attached. All return gateway state, never
+  // message bodies.
+  sessions: "trusted",
+  sessions_create: "trusted",
+  presence: "trusted",
+  // conversations_*: conversations_list returns conversationRef values —
+  // channel routing metadata, the exact category as message.channel-list
+  // above, so it takes the same "shared" label. conversations_send performs
+  // delivery and returns a receipt (sibling of message.send). conversations_turn
+  // waits for the correlated inbound REPLY and returns it — that is an
+  // external channel message and is labelled as one.
+  conversations_list: "shared",
+  conversations_send: "trusted",
+  conversations_turn: "external",
+  // plugins: inventory and lifecycle for this gateway's plugins. Bare-name
+  // default is trusted because the content-bearing remote actions (search,
+  // install — ClawHub/catalog text authored off-box) carry their own
+  // composite keys in composite-tools.ts; this label governs the local
+  // actions (list/inspect/enable/disable/uninstall/reload) and any call whose
+  // params the hook could not read. Two sessions were locked out by the
+  // missing entry on 2026-11-12 (13:43:22, 13:45:26).
+  plugins: "trusted",
+  // openclaw: gateway self-management surface. Two tools ship under this bare
+  // name (the automation-section core tool, and the channel bridge's
+  // conversation lister in src/mcp/channel-server.ts); both return gateway
+  // routing/management state rather than message bodies, which still arrive
+  // through `message`/`conversations_turn`. A deployment that treats the
+  // bridge's conversation inventory as platform metadata can override to
+  // "shared".
+  openclaw: "trusted",
+  // portal: allocates/lists/closes an HTTP route for a local app. Output is
+  // the route, port and exposure facts the gateway itself computed — not the
+  // app's page content (nothing fetches the app here).
+  portal: "trusted",
+  // screen: drives the requesting user's Control UI panels (desktop_show /
+  // portal_show). It opens a panel and acknowledges; it does not return a
+  // screen capture. Contrast `computer` and `mobile_ui`, which do return
+  // rendered screen content and stay untrusted.
+  screen: "trusted",
+  // terminal: lists/reads/resizes terminals the operator opened from this
+  // chat's Control UI. A read returns that terminal's buffer — local command
+  // output, the same provenance as exec/process above.
+  terminal: "trusted",
+  // dashboard / show_widget / theme: this session's own dashboard, widget and
+  // appearance state. Output is a snapshot or an ack of a local UI mutation.
+  dashboard: "trusted",
+  show_widget: "trusted",
+  theme: "trusted",
+  // suggest_task / dismiss_task / progress_card family: agent-authored task
+  // cards and status. progress_card already had a composite entry; the two
+  // task tools had none.
+  suggest_task: "trusted",
+  dismiss_task: "trusted",
+  // decision_evaluate: scores ONLY the state the caller supplied, with this
+  // agent's own model. It introduces no new source.
+  decision_evaluate: "trusted",
+  // personal_instructions: reads or updates the requesting user's own USER.md
+  // on this gateway — owner-authored local content, same as a Read of it.
+  personal_instructions: "trusted",
+  // secrets: `request` a value from the human, `list` entry metadata, or
+  // `delete`. Local vault state and owner input. (Sensitivity is not
+  // provenance: this label says where the bytes came from, not how secret
+  // they are — exfiltration is governed by the execution policy.)
+  secrets: "trusted",
+  // github_identity_status: local credential/identity status for this
+  // gateway's GitHub link. No remote content.
+  github_identity_status: "trusted",
+  // github_publish: the bare name is the default action (publish), whose
+  // result is our own publication receipt. The actions that return OBSERVED
+  // GitHub state — inspect_pr, edit, readiness, ready, merge, close — carry
+  // other people's PR titles, bodies and review text, and are labelled
+  // "external" as composite keys in composite-tools.ts.
+  github_publish: "trusted",
+  // structured_output: the model's own answer, re-emitted against a schema.
+  structured_output: "trusted",
+  // Tool Search control surface. tool_search was already trusted; its two
+  // siblings were not. tool_describe returns a tool SCHEMA. dispatch_action
+  // (policy alias of the old tool_call) invokes a deferred tool and relays
+  // its result — and the dispatched tool fires its own before/after_tool_call
+  // under its own name (visibly so in the gateway journal: deferred-tool runs
+  // log `exec(trusted)`, `read(trusted)`, `ls(...)`, never `dispatch_action`),
+  // so the inner call's taint is already recorded against the same graph.
+  // Labelling the dispatcher itself trusted therefore loses nothing; labelling
+  // it untrusted would taint every deferred-tool call twice over.
+  tool_describe: "trusted",
+  dispatch_action: "trusted",
+  // find / search: the local filesystem search family, siblings of the
+  // already-trusted grep/glob (openclaw RUNTIME_ONLY_TOOL_FACTS).
+  find: "trusted",
+  search: "trusted",
+  // skills_search / skills_read / skill_library: deliberately NOT trusted.
+  // An installed skill's text can come from a plugin-installed or downloaded
+  // source, so reading it (or even listing attacker-craftable descriptions)
+  // is the same prompt-injection vector as reading a fetched document — the
+  // identical call already made for Codex's ext/skills tools (skillslist /
+  // skillsread) above. "external" rather than "untrusted": it is a known,
+  // enumerable source, and under the default policy both are restricted
+  // anyway. A deployment whose skills are all first-party can override.
+  skills_search: "external",
+  skills_read: "external",
+  skill_library: "external",
+  // transcripts: meeting capture. The bare name is "external" because the
+  // content-bearing actions (show, summarize, import) return other people's
+  // recorded speech; start/stop/status/list are control and local inventory
+  // and carry trusted composite keys in composite-tools.ts.
+  // (Note: the older `meeting_notes: "trusted"` entry above is the same
+  // content class and looks inconsistent — left unchanged here deliberately;
+  // it is an existing, deliberate entry, not a gap. Flagged in the
+  // openclaw-provenance-0ii report for a follow-up decision.)
+  transcripts: "external",
+  // mobile_ui: deliberately left at the untrusted default. It returns
+  // semantic accessibility snapshots of whatever a paired Android device is
+  // showing — the same "the screen is untrusted" category as `computer`
+  // above. Listed here only so a future audit sees it was considered.
+  // mobile_ui: (no entry — untrusted by default, on purpose)
+
   // ── Local wiki vault (trusted: on-machine markdown vault, owner-controlled) ──
   wiki_status: "trusted",
   wiki_search: "trusted",
@@ -642,6 +798,9 @@ export const DEFAULT_TOOL_TRUST = DEFAULT_TOOL_OUTPUT_TAINTS;
 // or external. Blanket-trusting the whole namespace would suppress taint
 // on genuine external content. Tools in that namespace that are truly
 // internal can be added to DEFAULT_TOOL_OUTPUT_TAINTS individually.
+/** The `__` that separates an MCP server name from its tool name. */
+const TOOL_NAME_SEPARATOR = "__";
+
 const MCP_PREFIX_DEFAULTS: ReadonlyArray<[string, TrustLevel]> = [
   ["mcp__openclaw__", "trusted"],
   ["mcp__codex_apps__", "trusted"],
@@ -662,6 +821,37 @@ export const KNOWN_MCP_PREFIXES: readonly string[] = MCP_PREFIX_DEFAULTS.map(
 export function stripKnownMcpPrefix(toolName: string): string | undefined {
   for (const prefix of KNOWN_MCP_PREFIXES) {
     if (toolName.startsWith(prefix)) return toolName.slice(prefix.length);
+  }
+  return undefined;
+}
+
+/**
+ * The namespace default for a tool name that is a recognized MCP namespace and
+ * nothing else — `mcp__openclaw` (no separator, no tool) or `mcp__openclaw__`
+ * (separator, empty tool).
+ *
+ * This is not a tool. It is the server-scope identifier: the name a harness
+ * uses for "every tool of that server" (Claude Code's permission rules use the
+ * same `mcp__<server>` form), and the name that arrives when a model truncates
+ * a real call. Observed 2026-11-12 14:28:52 MST in session d7c61300: the model
+ * emitted `{"name":"mcp__openclaw","input":{"command":"…"}}` — an `exec` call
+ * that lost its `__exec` suffix. Claude Code rejected it outright
+ * (`<tool_use_error>Error: No such tool available: mcp__openclaw`), so NOTHING
+ * ran and no content of any kind entered the context — and yet the name, being
+ * unknown to every map here, took the "untrusted" secure default and locked
+ * that run out of exec/read/ls/tool_search for the rest of its turn.
+ *
+ * The namespace it names is one whose tools this plugin already classifies
+ * (`mcp__openclaw__*` defaults to trusted below), and no tool can ever answer
+ * to the bare form, so the namespace default is the correct label. An
+ * unrecognized namespace (e.g. the `mcp__observe` seen at 15:39) is NOT
+ * covered — it keeps the untrusted default, which is right: we know nothing
+ * about that server.
+ */
+export function bareMcpNamespaceTrust(toolName: string): TrustLevel | undefined {
+  for (const [prefix, prefixDefault] of MCP_PREFIX_DEFAULTS) {
+    const namespaceOnly = prefix.slice(0, -TOOL_NAME_SEPARATOR.length);
+    if (toolName === namespaceOnly || toolName === prefix) return prefixDefault;
   }
   return undefined;
 }
@@ -811,6 +1001,11 @@ export function getToolTrust(
       if (key.toLowerCase() === bareName) return value;
     }
   }
+
+  // Namespace-only name (`mcp__openclaw`, `mcp__openclaw__`): not a tool at
+  // all — the server scope itself. Takes that namespace's default.
+  const bareNamespace = bareMcpNamespaceTrust(toolName);
+  if (bareNamespace) return bareNamespace;
 
   // MCP-namespaced lookup: strip the prefix and try the bare name, then
   // fall back to the per-prefix default for known trusted namespaces.
