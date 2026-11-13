@@ -45,6 +45,7 @@ import {
   isCollectorWaitTool,
   resolveCollectorChildTaint,
 } from "./collector-taint.js";
+import { isHarnessRejectedToolCall } from "./rejected-call.js";
 import { ApprovalStore } from "./approval-store.js";
 import { isMemoryFile } from "./memory-file-detector.js";
 import { basename } from "node:path";
@@ -2374,6 +2375,20 @@ export function registerSecurityHooks(
       const sessionKey = _ctx.sessionKey ?? lastToolCallSessionKey;
       const graph = store.getActive(sessionKey);
       if (!graph) return;
+
+      // A call the harness REFUSED dispatched nothing, so it introduced no
+      // source: no taint, no URI record, no browser-tab seeding, no graph
+      // node. Keyed only on the gateway's own structural declaration that it
+      // never dispatched the call — never on the error text, the result shape
+      // or the tool name, any of which a tool's output could imitate. See
+      // rejected-call.ts for the payloads this is answering and for why the
+      // narrower signals are all bypasses.
+      if (isHarnessRejectedToolCall(event)) {
+        logger.info(
+          `[provenance:${shortKey(sessionKey)}]   REJECTED_CALL_NO_TAINT: ${toolName} — the harness refused the call; nothing ran, so nothing is tainted`,
+        );
+        return;
+      }
 
       const toolKey = resolveToolKey(toolName, params, compositeTools, execCommandRules);
       const agentId = sessionAgentMap.get(sessionKey);
